@@ -1,2 +1,1 @@
-core = "../core/wit"
-cli = "https://github.com/WebAssembly/wasi-cli/archive/main.tar.gz"
+core = "../../core/wit"
