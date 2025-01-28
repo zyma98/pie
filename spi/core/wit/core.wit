@@ -22,4 +22,5 @@ interface run {
 world imports {
     import inference;
     import system;
+    export run;
 }

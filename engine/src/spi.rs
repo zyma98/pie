@@ -35,8 +35,11 @@ impl WasiView for ComponentRunStates {
 
 impl ComponentRunStates {
     pub fn new() -> Self {
+        let mut builder = WasiCtx::builder();
+        builder.inherit_stderr().inherit_network().inherit_stdout();
+
         ComponentRunStates {
-            wasi_ctx: WasiCtxBuilder::new().build(),
+            wasi_ctx: builder.build(),
             resource_table: ResourceTable::new(),
         }
     }
