@@ -7,11 +7,11 @@ use wasmtime::Result;
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiView};
 
 bindgen!({
-    path: "../spi/core/wit",
-    world: "imports",
+    path: "../spi/app/wit",
+    world: "app",
     async: true,
     with: {
-        "spi:core/inference/language-model": LanguageModel
+        "spi:lm/inference/language-model": LanguageModel
     },
     // Interactions with `ResourceTable` can possibly trap so enable the ability
     // to return traps from generated functions.
@@ -49,8 +49,8 @@ pub struct LanguageModel {
     model_id: String,
 }
 
-impl spi::core::inference::Host for ComponentRunStates {}
-impl spi::core::inference::HostLanguageModel for ComponentRunStates {
+impl spi::lm::inference::Host for ComponentRunStates {}
+impl spi::lm::inference::HostLanguageModel for ComponentRunStates {
     async fn new(&mut self, model_id: String) -> Result<Resource<LanguageModel>, wasmtime::Error> {
         let handle = LanguageModel { model_id };
         Ok(self.resource_table.push(handle)?)
@@ -85,7 +85,7 @@ impl spi::core::inference::HostLanguageModel for ComponentRunStates {
     }
 }
 //
-impl spi::core::system::Host for ComponentRunStates {
+impl spi::app::system::Host for ComponentRunStates {
     async fn ask(&mut self, question: String) -> Result<String, wasmtime::Error> {
         // print the question, and randomly return an answer
         println!("Asked: {}", question);
@@ -98,3 +98,5 @@ impl spi::core::system::Host for ComponentRunStates {
         Ok(())
     }
 }
+
+impl spi::lm::kvcache::Host for ComponentRunStates {}

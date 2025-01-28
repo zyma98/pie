@@ -1,0 +1,8 @@
+interface inference {
+  resource language-model {
+    constructor(model-id:string);
+    tokenize: func(text: string) -> list<u32>;
+    detokenize: func(tokens: list<u32>) -> string;
+    predict: func(tokens: list<u32>) -> u32;
+  }
+}

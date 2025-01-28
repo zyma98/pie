@@ -1,19 +1,19 @@
+use crate::exports::spi::app::run::Guest;
 
 wit_bindgen::generate!({
+    path: "../../spi/app/wit",
     world: "app",
     generate_all,
 });
 
 struct HelloWorld;
-use crate::exports::spi::core::run::Guest;
 
 impl Guest for HelloWorld {
     fn run() -> Result<(), ()> {
-
         println!("I am a WASM module running in the Symphony runtime!");
 
-        spi::core::system::ask("What is your name?");
-        spi::core::system::tell("Have a great day!");
+        spi::app::system::ask("What is your name?");
+        spi::app::system::tell("Have a great day!");
         Ok(())
     }
 }

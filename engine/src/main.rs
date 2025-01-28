@@ -1,7 +1,7 @@
 mod spi;
 use futures::executor::block_on;
 
-use crate::spi::{ComponentRunStates, Imports};
+use crate::spi::{App, ComponentRunStates};
 use anyhow::{anyhow, Context};
 use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Result, Store};
@@ -15,7 +15,7 @@ fn main() -> Result<()> {
 
     run_async(
         &engine,
-        "../spi/target/wasm32-wasip2/release/helloworld.wasm",
+        "../example-apps/target/wasm32-wasip2/release/helloworld.wasm",
     )?;
     println!("Run without errors!");
     Ok(())
@@ -30,14 +30,14 @@ fn run_async(engine: &Engine, path: &'static str) -> Result<()> {
     let state = ComponentRunStates::new();
     let mut store = Store::new(&engine, state);
 
-    Imports::add_to_linker(&mut linker, |s| s)?;
+    App::add_to_linker(&mut linker, |s| s)?;
     bind_interfaces_needed_by_guest_rust_std(&mut linker);
     let async_future = async {
         let instance = linker.instantiate_async(&mut store, &component).await?;
 
         let run_interface = instance
-            .get_export(&mut store, None, "spi:core/run")
-            .ok_or_else(|| anyhow!("spi:core/run missing?"))?;
+            .get_export(&mut store, None, "spi:app/run")
+            .ok_or_else(|| anyhow!("spi:app/run missing?"))?;
         let run_func_export = instance
             .get_export(&mut store, Some(&run_interface), "run")
             .ok_or_else(|| anyhow!("run export missing?"))?;
