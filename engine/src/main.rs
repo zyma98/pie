@@ -13,10 +13,16 @@ fn main() -> Result<()> {
 
     let engine = Engine::new(&config)?;
 
+    // run_async(
+    //     &engine,
+    //     "../example-apps/target/wasm32-wasip2/release/helloworld.wasm",
+    // )?;
+
     run_async(
         &engine,
-        "../example-apps/target/wasm32-wasip2/release/helloworld.wasm",
+        "../example-apps-python/helloworld/helloworld.wasm",
     )?;
+    
     println!("Run without errors!");
     Ok(())
 }
