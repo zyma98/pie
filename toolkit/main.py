@@ -3,7 +3,7 @@ import websockets
 import msgpack
 import blake3
 
-PROGRAM_CACHE_DIR = "./"
+PROGRAM_CACHE_DIR = "../example-apps/target/wasm32-wasip2/release/"
 
 async def main():
     uri = "ws://127.0.0.1:9000"
@@ -21,7 +21,7 @@ async def main():
         print("query_existence response:", response)
 
         # 2) Upload a local .wasm (renamed as “program”) file in chunks
-        program_path = "test_program.wasm"
+        program_path = f"{PROGRAM_CACHE_DIR}helloworld.wasm"
         with open(program_path, "rb") as f:
             program_bytes = f.read()
 
@@ -49,6 +49,8 @@ async def main():
             print("Upload chunk response:", resp)
 
         # 3) Start the program
+        return
+
         start_msg = {
             "type": "start_program",
             "hash": file_hash,

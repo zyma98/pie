@@ -91,7 +91,7 @@ enum ClientMessage {
         hash: String,
         chunk_index: usize,
         total_chunks: usize,
-        /// Raw chunk data (no base64, since we use MessagePack binary)
+        #[serde(with = "serde_bytes")]
         chunk_data: Vec<u8>,
     },
 
