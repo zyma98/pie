@@ -2,6 +2,7 @@ mod spi;
 
 use anyhow::Context;
 use blake3::Hasher;
+use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
 use std::{
     collections::HashMap,
@@ -46,19 +47,19 @@ const CHUNK_SIZE_BYTES: usize = 64 * 1024; // 64 KiB
 /// - Running program instances
 struct ServerState {
     /// Maps a BLAKE3 hash -> Path to the binary on disk
-    programs_in_disk: HashMap<String, PathBuf>,
+    programs_in_disk: DashMap<String, PathBuf>,
 
     // Compiled WASM components in memory
-    programs_in_memory: HashMap<String, Component>,
+    programs_in_memory: DashMap<String, Component>,
 
     /// Tracks partial uploads in progress
-    programs_in_flight: HashMap<String, InFlightUpload>,
+    programs_in_flight: DashMap<String, Arc<Mutex<InFlightUpload>>>,
 
     // wasmtime engine
     engine: Engine,
 
     /// Running program instances (instance_id -> handle)
-    running_instances: HashMap<Uuid, InstanceHandle>,
+    running_instances: DashMap<Uuid, InstanceHandle>,
 
     // "The" receiver for all instance messages.
     // Sender per instance is stored in the handle.
@@ -169,11 +170,11 @@ async fn main() -> anyhow::Result<()> {
     let (sender, receiver) = tokio::sync::mpsc::channel(1024);
 
     let mut server_state = ServerState {
-        programs_in_disk: HashMap::new(),
-        programs_in_memory: HashMap::new(),
-        programs_in_flight: HashMap::new(),
+        programs_in_disk: DashMap::new(),
+        programs_in_memory: DashMap::new(),
+        programs_in_flight: DashMap::new(),
         engine: Engine::new(&config)?,
-        running_instances: HashMap::new(),
+        running_instances: DashMap::new(),
         receiver,
         sender,
     };
@@ -182,7 +183,7 @@ async fn main() -> anyhow::Result<()> {
     load_existing_programs(Path::new(PROGRAM_CACHE_DIR), &mut server_state)
         .context("Failed to load existing programs")?;
 
-    let state = Arc::new(Mutex::new(server_state));
+    let state = Arc::new(server_state);
 
     // Start listening on port 9000
     let addr = "127.0.0.1:9000";
@@ -226,10 +227,7 @@ fn load_existing_programs(cache_dir: &Path, state: &mut ServerState) -> anyhow::
 // Connection Handler
 // ---------------------------
 
-async fn handle_connection(
-    stream: TcpStream,
-    state: Arc<Mutex<ServerState>>,
-) -> anyhow::Result<()> {
+async fn handle_connection(stream: TcpStream, state: Arc<ServerState>) -> anyhow::Result<()> {
     let ws_stream = accept_async(stream).await?;
 
     // print the detailed information of the connection
@@ -280,16 +278,10 @@ async fn handle_connection(
 // Message Dispatch
 // ---------------------------
 
-async fn handle_client_message(
-    msg: ClientMessage,
-    state: Arc<Mutex<ServerState>>,
-) -> Vec<ServerMessage> {
+async fn handle_client_message(msg: ClientMessage, state: Arc<ServerState>) -> Vec<ServerMessage> {
     match msg {
         ClientMessage::QueryExistence { hash } => {
-            let exists = {
-                let guard = state.lock().await;
-                guard.programs_in_disk.contains_key(&hash)
-            };
+            let exists = { state.programs_in_disk.contains_key(&hash) };
             vec![ServerMessage::QueryResponse {
                 hash: hash.clone(),
                 exists,
@@ -302,8 +294,7 @@ async fn handle_client_message(
             total_chunks,
             chunk_data,
         } => {
-            let mut guard = state.lock().await;
-
+            // 1) Basic validation before locking
             if chunk_data.len() > CHUNK_SIZE_BYTES {
                 return vec![ServerMessage::Error {
                     error: format!(
@@ -314,78 +305,98 @@ async fn handle_client_message(
                 }];
             }
 
-            let entry = guard
+            // 2) Obtain or initialize the per-hash upload entry
+            //    (we don't need a global lock, just dashmap + a per-hash mutex)
+            let upload_entry = state
                 .programs_in_flight
                 .entry(hash.clone())
-                .or_insert(InFlightUpload {
-                    total_chunks,
-                    collected_data: Vec::with_capacity(total_chunks * CHUNK_SIZE_BYTES),
-                    received_chunks: 0,
-                });
+                .or_insert_with(|| {
+                    // Allocate a new InFlightUpload if not present
+                    Arc::new(Mutex::new(InFlightUpload {
+                        total_chunks,
+                        collected_data: Vec::with_capacity(total_chunks * CHUNK_SIZE_BYTES),
+                        received_chunks: 0,
+                    }))
+                })
+                .clone(); // Arc<AsyncMutex<...>>
 
-            // Validate total chunk count is consistent
-            if entry.total_chunks != total_chunks {
-                return vec![ServerMessage::Error {
-                    error: "Mismatch in total_chunks from earlier upload messages.".to_string(),
-                }];
-            }
+            // 3) Lock just this one hash's upload data
+            let mut upload_data = upload_entry.lock().await;
 
-            // Check chunk ordering
-            if chunk_index != entry.received_chunks {
+            // Validate total_chunks consistency across calls
+            if upload_data.total_chunks != total_chunks {
                 return vec![ServerMessage::Error {
                     error: format!(
-                        "Out-of-order chunk. Expected {}, got {}",
-                        entry.received_chunks, chunk_index
+                        "Mismatch in total_chunks: previously {}, now {}",
+                        upload_data.total_chunks, total_chunks
                     ),
                 }];
             }
 
-            // Accumulate
-            entry.collected_data.extend_from_slice(&chunk_data);
-            entry.received_chunks += 1;
+            // 4) Check chunk ordering
+            if chunk_index != upload_data.received_chunks {
+                return vec![ServerMessage::Error {
+                    error: format!(
+                        "Out-of-order chunk. Expected {}, got {}",
+                        upload_data.received_chunks, chunk_index
+                    ),
+                }];
+            }
 
-            // Build response
+            // 5) Accumulate
+            upload_data.collected_data.extend_from_slice(&chunk_data);
+            upload_data.received_chunks += 1;
+
+            // We'll build our responses in a single vector
             let mut replies = vec![ServerMessage::UploadAck {
                 hash: hash.clone(),
                 chunk_index,
             }];
 
-            // Check if all chunks have arrived
-            if entry.received_chunks == entry.total_chunks {
-                let InFlightUpload { collected_data, .. } =
-                    guard.programs_in_flight.remove(&hash).unwrap();
+            // 6) Check if this was the last chunk
+            if upload_data.received_chunks == upload_data.total_chunks {
+                // Extract the collected data now that it's complete
+                let final_data = std::mem::take(&mut upload_data.collected_data);
+                let total_chunks_stored = upload_data.total_chunks;
 
-                // Compute BLAKE3 to verify correctness
+                // We must drop the upload_data lock before removing from DashMap
+                drop(upload_data);
+
+                // Remove the entry so future uploads for this hash can start fresh
+                state.programs_in_flight.remove(&hash);
+
+                // Verify BLAKE3 hash
                 let mut hasher = Hasher::new();
-                hasher.update(&collected_data);
+                hasher.update(&final_data);
                 let actual_hash = hasher.finalize().to_hex().to_string();
 
                 if actual_hash != hash {
-                    // Hash mismatch, discard
-                    drop(guard);
                     return vec![ServerMessage::Error {
                         error: format!(
-                            "BLAKE3 mismatch. Expected {}, computed {}. Discarding upload.",
-                            hash, actual_hash
+                            "BLAKE3 mismatch. Expected {}, computed {} (total chunks={})",
+                            hash, actual_hash, total_chunks_stored
                         ),
                     }];
                 }
 
-                // If not already in the cache, persist the file
-                if !guard.programs_in_disk.contains_key(&hash) {
+                // If not already in the server's disk map, persist it
+                if state.programs_in_disk.get(&hash).is_none() {
                     let file_path = Path::new(PROGRAM_CACHE_DIR).join(&hash);
-                    if let Err(e) = fs::write(&file_path, &collected_data) {
-                        drop(guard);
+                    if let Err(e) = fs::write(&file_path, &final_data) {
                         return vec![ServerMessage::Error {
                             error: format!("Failed to write program to disk: {}", e),
                         }];
                     }
-                    guard.programs_in_disk.insert(hash.clone(), file_path);
+
+                    // Record in dashmap
+                    state.programs_in_disk.insert(hash.clone(), file_path);
                 }
 
-                replies.push(ServerMessage::UploadComplete { hash });
+                // Announce completion
+                replies.push(ServerMessage::UploadComplete { hash: hash.clone() });
             }
 
+            // 7) Return the accumulated replies
             replies
         }
 
@@ -394,18 +405,17 @@ async fn handle_client_message(
             configuration,
         } => {
             // Load WASM component from disk if not already in memory
-            let mut guard = state.lock().await;
-            if guard.programs_in_memory.get(&hash).is_none() {
-                if let Some(path) = guard.programs_in_disk.get(&hash) {
+            if state.programs_in_memory.get(&hash).is_none() {
+                if let Some(path) = state.programs_in_disk.get(&hash) {
                     println!("Loading component from path: {hash}");
-                    let component = Component::from_file(&guard.engine, path)
+                    let component = Component::from_file(&state.engine, path.value())
                         .with_context(|| format!("Failed to compile program: {hash}"));
 
                     // Handle the error explicitly and return ServerMessage::Error
                     match component {
                         Ok(comp) => {
                             // Add the component to the in-memory cache
-                            guard.programs_in_memory.insert(hash.clone(), comp);
+                            state.programs_in_memory.insert(hash.clone(), comp);
                         }
                         Err(e) => {
                             return vec![ServerMessage::Error {
@@ -421,37 +431,44 @@ async fn handle_client_message(
             }
 
             // get the component from in-memory
-            let component = guard.programs_in_memory.get(&hash).unwrap().clone();
+            let component = state.programs_in_memory.get(&hash).unwrap().clone();
             let instance_id = Uuid::new_v4();
 
             // create a channel
             let (sender, receiver) = tokio::sync::mpsc::channel(32);
 
-            let state = InstanceState::new(instance_id, guard.sender.clone(), receiver);
+            let inst_state = InstanceState::new(instance_id, state.sender.clone(), receiver);
 
             // linker and store
 
-            let engine_clone = guard.engine.clone();
+            let engine_clone = state.engine.clone();
             // 2) Spawn a background task to do the heavy lifting
             let join_handle = tokio::spawn({
                 // We clone references so the closure can move them in
 
                 async move {
                     // Lock the store for instantiation
-                    let mut store = Store::new(&engine_clone, state);
+                    let mut store = Store::new(&engine_clone, inst_state);
 
                     let mut linker: Linker<InstanceState> = Linker::new(&engine_clone);
 
-                    App::add_to_linker(&mut linker, |s| s).expect("Failed to add App to linker");
-                    link_wasi_bindings(&mut linker)
-                        .context("Failed to link WASI bindings")
-                        .expect("Failed to link WASI bindings");
+                    if let Err(e) = App::add_to_linker(&mut linker, |s| s) {
+                        eprintln!("Error adding App to linker: {}", e);
+                        return; // or handle more gracefully
+                    }
+                    if let Err(e) = link_wasi_bindings(&mut linker) {
+                        eprintln!("Failed to link WASI bindings: {}", e);
+                        return;
+                    }
 
                     // Instantiate
-                    let instance = linker
-                        .instantiate_async(&mut store, &component)
-                        .await
-                        .expect("Failed to instantiate");
+                    let instance = match linker.instantiate_async(&mut store, &component).await {
+                        Ok(i) => i,
+                        Err(e) => {
+                            eprintln!("Failed to instantiate: {}", e);
+                            return;
+                        }
+                    };
 
                     // Optionally store the Instance somewhere (Arc<Instance>, etc.)
                     // Then run the "run" entry point
@@ -509,7 +526,7 @@ async fn handle_client_message(
                 join_handle,
             };
 
-            guard.running_instances.insert(instance_id, handle);
+            state.running_instances.insert(instance_id, handle);
 
             // 4) Return ProgramLaunched *immediately*, without blocking
             vec![ServerMessage::ProgramLaunched {
@@ -524,10 +541,8 @@ async fn handle_client_message(
         } => {
             let instance_id = Uuid::parse_str(&instance_id).expect("Invalid UUID format");
 
-            let guard = state.lock().await;
-
-            let handle = match guard.running_instances.get(&instance_id) {
-                Some(h) => h,
+            let entry = match state.running_instances.get(&instance_id) {
+                Some(e) => e,
                 None => {
                     return vec![ServerMessage::Error {
                         error: format!("No running instance with ID {}", instance_id),
@@ -535,7 +550,8 @@ async fn handle_client_message(
                 }
             };
 
-            if let Err(e) = handle
+            if let Err(e) = entry
+                .value()
                 .sender
                 .send(InstanceMessage {
                     instance_id,
@@ -555,10 +571,8 @@ async fn handle_client_message(
         ClientMessage::TerminateProgram { instance_id } => {
             let instance_id = Uuid::parse_str(&instance_id).expect("Invalid UUID format");
 
-            let guard = state.lock().await;
-
-            let handle = match guard.running_instances.get(&instance_id) {
-                Some(h) => h,
+            let entry = match state.running_instances.get(&instance_id) {
+                Some(e) => e,
                 None => {
                     return vec![ServerMessage::Error {
                         error: format!("No running instance with ID {}", instance_id),
@@ -567,7 +581,10 @@ async fn handle_client_message(
             };
 
             // abort
-            handle.join_handle.abort();
+            entry.value().join_handle.abort();
+
+            // remove the instance from the running_instances
+            state.running_instances.remove(&instance_id);
 
             // Drop the instance handle
             vec![ServerMessage::ProgramTerminated {
