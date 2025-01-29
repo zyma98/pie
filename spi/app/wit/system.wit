@@ -1,5 +1,11 @@
 interface system {
-  ask: func(question: string) -> string;
-  tell: func(message: string);
-  poll: func() -> string;
+
+  resource channel {
+    constructor();
+    request: func(message: string) -> string;
+    send: func(message: string);
+    fetch: func() -> string;
+  }
+
+  get-version: func() -> string;
 }

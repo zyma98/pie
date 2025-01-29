@@ -1,3 +1,4 @@
+use std::future::Future;
 use wasmtime::component::Resource;
 use wasmtime::component::{bindgen, ResourceTable};
 use wasmtime::Result;
@@ -8,7 +9,8 @@ bindgen!({
     world: "app",
     async: true,
     with: {
-        "spi:lm/inference/language-model": LanguageModel
+        "spi:lm/inference/language-model": LanguageModel,
+        "spi:app/system/channel": Channel
     },
     // Interactions with `ResourceTable` can possibly trap so enable the ability
     // to return traps from generated functions.
@@ -45,6 +47,8 @@ impl InstanceState {
 pub struct LanguageModel {
     model_id: String,
 }
+
+pub struct Channel {}
 
 impl spi::lm::inference::Host for InstanceState {}
 impl spi::lm::inference::HostLanguageModel for InstanceState {
@@ -83,20 +87,35 @@ impl spi::lm::inference::HostLanguageModel for InstanceState {
 }
 //
 impl spi::app::system::Host for InstanceState {
-    async fn ask(&mut self, question: String) -> Result<String, wasmtime::Error> {
-        // print the question, and randomly return an answer
-        println!("Asked: {}", question);
-        Ok("My answer is yolo!".to_string())
+    async fn get_version(&mut self) -> Result<String, wasmtime::Error> {
+        Ok("0.1.0".to_string())
+    }
+}
+
+impl spi::app::system::HostChannel for InstanceState {
+    async fn new(&mut self) -> Result<Resource<Channel>, wasmtime::Error> {
+        let handle = Channel {};
+        Ok(self.resource_table.push(handle)?)
     }
 
-    async fn tell(&mut self, message: String) -> Result<()> {
-        // print the message
-        println!("Told: {}", message);
+    async fn request(
+        &mut self,
+        self_: Resource<Channel>,
+        message: String,
+    ) -> Result<String, wasmtime::Error> {
+        Ok("sdsd".to_string())
+    }
+
+    async fn send(&mut self, self_: Resource<Channel>, message: String) -> Result<()> {
         Ok(())
     }
 
-    async fn poll(&mut self) -> Result<String, wasmtime::Error> {
+    async fn fetch(&mut self, self_: Resource<Channel>) -> Result<String, wasmtime::Error> {
         Ok("sdsd".to_string())
+    }
+
+    async fn drop(&mut self, rep: Resource<Channel>) -> Result<()> {
+        Ok(())
     }
 }
 

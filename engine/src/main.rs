@@ -15,6 +15,7 @@ use tokio_tungstenite::accept_async;
 use tungstenite::protocol::Message as WsMessage;
 
 use blake3::Hasher;
+use futures::executor::block_on;
 use futures::{SinkExt, StreamExt};
 use uuid::Uuid;
 
@@ -385,28 +386,7 @@ async fn handle_client_message(
             hash,
             configuration,
         } => {
-            // // First, check if the program is already in memory
-            // let component = {
-            //     let mut guard = state.lock();
-            //     if let Some(component) = guard.programs_in_memory.get(&hash) {
-            //         // Generate a unique instance_id
-            //         let instance_id = Uuid::new_v4().to_string();
-            //         let store = Store::new(&guard.engine, InstanceState::new());
-            //         let instance = component.instantiate(&store)?;
-            //         let handle = ProgramInstanceHandle {
-            //             hash: hash.clone(),
-            //             instance: Arc::new(instance),
-            //             store: Arc::new(Mutex::new(InstanceState::new())),
-            //         };
-            //         guard.running_instances.insert(instance_id.clone(), handle);
-            //         return vec![ServerMessage::ProgramLaunched {
-            //             hash: Box::leak(hash.into_boxed_str()),
-            //             instance_id: Box::leak(instance_id.into_boxed_str()),
-            //         }];
-            //     }
-            // }
-
-            // Acquire path from the cache
+            // Load WASM component from disk if not already in memory
             let mut guard = state.lock();
             if guard.programs_in_memory.get(&hash).is_none() {
                 if let Some(path) = guard.programs_in_disk.get(&hash) {
@@ -452,15 +432,40 @@ async fn handle_client_message(
                 }];
             }
 
+            ////////////////////////////////////////////////////////////////////////////////////
+            ////////////////////////////////////////////////////////////////////////////////////
+            // The problematic code block
+            ////////////////////////////////////////////////////////////////////////////////////
+            ////////////////////////////////////////////////////////////////////////////////////
+
             println!("Instantiating...{hash}");
 
-            //
-            // let store = Store::new(&engine, ());
-            //
+            let async_future = async {
+                println!("instantiating...");
+
+                let instance = linker.instantiate_async(&mut store, &component).await?;
+
+                let run_interface = instance
+                    .get_export(&mut store, None, "spi:app/run")
+                    .ok_or_else(|| anyhow!("spi:app/run missing?"))?;
+                let run_func_export = instance
+                    .get_export(&mut store, Some(&run_interface), "run")
+                    .ok_or_else(|| anyhow!("run export missing?"))?;
+                let run_func = instance
+                    .get_typed_func::<(), (Result<(), ()>,)>(&mut store, &run_func_export)
+                    .context("run as typed func")?;
+
+                println!("entering wasm...");
+                let (runtime_result,) = run_func.call_async(&mut store, ()).await?;
+                runtime_result.map_err(|()| anyhow!("run returned an error"))?;
+                println!("done");
+                Ok(())
+            };
+            block_on(async_future);
+
             // // Generate a unique instance_id
             // let instance_id = Uuid::new_v4().to_string();
             // {
-            //     let mut guard = state.lock();
             //     let handle = ProgramInstanceHandle {
             //         hash: hash.clone(),
             //         store,
@@ -476,6 +481,11 @@ async fn handle_client_message(
                 hash: Box::leak(hash.into_boxed_str()),
                 instance_id: "test_dummy",
             }]
+            ////////////////////////////////////////////////////////////////////////////////////
+            ////////////////////////////////////////////////////////////////////////////////////
+            // The problematic code block ends here
+            ////////////////////////////////////////////////////////////////////////////////////
+            ////////////////////////////////////////////////////////////////////////////////////
         }
 
         ClientMessage::SendEvent {
