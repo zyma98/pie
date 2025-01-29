@@ -1,13 +1,13 @@
 mod spi;
 
+use anyhow::Context;
+use parking_lot::Mutex;
 use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
     sync::Arc,
 };
-
-use parking_lot::Mutex;
 
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task;
@@ -22,10 +22,11 @@ use uuid::Uuid;
 use wasmtime::{Config, Engine, Module, Store};
 
 // For MessagePack serialization/deserialization.
-use crate::spi::InstanceState;
+use crate::spi::{App, InstanceState};
 use rmp_serde::{decode::from_slice, encode::to_vec_named};
 use serde::{Deserialize, Serialize};
-use wasmtime::component::{Component, Instance};
+use wasmtime::component::{Component, Instance, Linker};
+use wasmtime_wasi::{WasiImpl, WasiView};
 
 /// Directory where we store (and load) program binaries:
 const PROGRAM_CACHE_DIR: &str = "./program_cache";
@@ -220,7 +221,9 @@ async fn handle_connection(
     state: Arc<Mutex<ServerState>>,
 ) -> anyhow::Result<()> {
     let ws_stream = accept_async(stream).await?;
-    println!("New WebSocket connection established.");
+
+    // print the detailed information of the connection
+    println!("New connection: {}", ws_stream.get_ref().peer_addr()?);
 
     let (mut write, mut read) = ws_stream.split();
 
@@ -382,40 +385,75 @@ async fn handle_client_message(
             hash,
             configuration,
         } => {
-            // Acquire path from the cache
-            let (path, engine) = {
-                let guard = state.lock();
-                let path = match guard.programs_in_disk.get(&hash) {
-                    Some(p) => p.clone(),
-                    None => {
-                        return vec![ServerMessage::Error {
-                            error: format!("No cached program found for hash {}", hash),
-                        }]
-                    }
-                };
-                // For demonstration, we create a default engine.
-                // You could parse `configuration` to set memory/cpu limits.
-                //let engine = Engine::default();
-                (path, 0)
-            };
+            // // First, check if the program is already in memory
+            // let component = {
+            //     let mut guard = state.lock();
+            //     if let Some(component) = guard.programs_in_memory.get(&hash) {
+            //         // Generate a unique instance_id
+            //         let instance_id = Uuid::new_v4().to_string();
+            //         let store = Store::new(&guard.engine, InstanceState::new());
+            //         let instance = component.instantiate(&store)?;
+            //         let handle = ProgramInstanceHandle {
+            //             hash: hash.clone(),
+            //             instance: Arc::new(instance),
+            //             store: Arc::new(Mutex::new(InstanceState::new())),
+            //         };
+            //         guard.running_instances.insert(instance_id.clone(), handle);
+            //         return vec![ServerMessage::ProgramLaunched {
+            //             hash: Box::leak(hash.into_boxed_str()),
+            //             instance_id: Box::leak(instance_id.into_boxed_str()),
+            //         }];
+            //     }
+            // }
 
-            // let data = match fs::read(&path) {
-            //     Ok(d) => d,
-            //     Err(e) => {
-            //         return vec![ServerMessage::Error {
-            //             error: format!("Failed to read cached program from disk: {}", e),
-            //         }]
-            //     }
-            // };
-            //
-            // let module = match Module::new(&engine, &data) {
-            //     Ok(m) => m,
-            //     Err(e) => {
-            //         return vec![ServerMessage::Error {
-            //             error: format!("Failed to compile program: {}", e),
-            //         }]
-            //     }
-            // };
+            // Acquire path from the cache
+            let mut guard = state.lock();
+            if guard.programs_in_memory.get(&hash).is_none() {
+                if let Some(path) = guard.programs_in_disk.get(&hash) {
+                    println!("Loading component from path: {hash}");
+                    let component = Component::from_file(&guard.engine, path)
+                        .with_context(|| format!("Failed to compile program: {hash}"));
+
+                    // Handle the error explicitly and return ServerMessage::Error
+                    match component {
+                        Ok(comp) => {
+                            // Add the component to the in-memory cache
+                            guard.programs_in_memory.insert(hash.clone(), comp);
+                        }
+                        Err(e) => {
+                            return vec![ServerMessage::Error {
+                                error: format!("Failed to read program from disk: {}", e),
+                            }];
+                        }
+                    }
+                } else {
+                    return vec![ServerMessage::Error {
+                        error: format!("No program found for hash {}", hash),
+                    }];
+                }
+            }
+
+            // get the component from in-memory
+            let component = guard.programs_in_memory.get(&hash).unwrap();
+
+            // linker and store
+            let mut linker: Linker<InstanceState> = Linker::new(&guard.engine);
+            let state = InstanceState::new();
+            let mut store = Store::new(&guard.engine, state);
+
+            if let Err(e) = App::add_to_linker(&mut linker, |s| s) {
+                return vec![ServerMessage::Error {
+                    error: format!("Failed to link SPI bindings: {}", e),
+                }];
+            }
+            if let Err(e) = link_wasi_bindings(&mut linker) {
+                return vec![ServerMessage::Error {
+                    error: format!("Failed to link WASI bindings: {}", e),
+                }];
+            }
+
+            println!("Instantiating...{hash}");
+
             //
             // let store = Store::new(&engine, ());
             //
@@ -500,4 +538,27 @@ async fn handle_client_message(
             }]
         }
     }
+}
+
+/// Copied from [wasmtime_wasi::type_annotate]
+pub fn type_annotate<T: WasiView, F>(val: F) -> F
+where
+    F: Fn(&mut T) -> WasiImpl<&mut T>,
+{
+    val
+}
+pub fn link_wasi_bindings<T: WasiView>(l: &mut Linker<T>) -> Result<(), wasmtime::Error> {
+    let closure = type_annotate::<T, _>(|t| WasiImpl(t));
+    let options = wasmtime_wasi::bindings::sync::LinkOptions::default();
+    wasmtime_wasi::bindings::sync::filesystem::types::add_to_linker_get_host(l, closure)?;
+    wasmtime_wasi::bindings::filesystem::preopens::add_to_linker_get_host(l, closure)?;
+    wasmtime_wasi::bindings::io::error::add_to_linker_get_host(l, closure)?;
+    wasmtime_wasi::bindings::sync::io::streams::add_to_linker_get_host(l, closure)?;
+    wasmtime_wasi::bindings::cli::exit::add_to_linker_get_host(l, &options.into(), closure)?;
+    wasmtime_wasi::bindings::cli::environment::add_to_linker_get_host(l, closure)?;
+    wasmtime_wasi::bindings::cli::stdin::add_to_linker_get_host(l, closure)?;
+    wasmtime_wasi::bindings::cli::stdout::add_to_linker_get_host(l, closure)?;
+    wasmtime_wasi::bindings::cli::stderr::add_to_linker_get_host(l, closure)?;
+
+    Ok(())
 }

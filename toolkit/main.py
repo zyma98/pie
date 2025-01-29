@@ -13,7 +13,7 @@ async def main():
         # 1) Query existence of a sample hash
         query_msg = {
             "type": "query_existence",
-            "hash": "some_non_existent_hash"
+            "hash": "fd4cf7193c818fc5fc464d441406ca29182c9e86966ed5c54a25bce720d14a44"
         }
         await ws.send(msgpack.packb(query_msg, use_bin_type=True))
         response_data = await ws.recv()  # This is binary
@@ -48,8 +48,11 @@ async def main():
             resp = msgpack.unpackb(resp_data, raw=False)
             print("Upload chunk response:", resp)
 
+        # Read server ack
+        resp_data = await ws.recv()
+        resp = msgpack.unpackb(resp_data, raw=False)
+        print("Final upload response:", resp)
         # 3) Start the program
-        return
 
         start_msg = {
             "type": "start_program",
@@ -59,6 +62,9 @@ async def main():
         await ws.send(msgpack.packb(start_msg, use_bin_type=True))
         start_resp_data = await ws.recv()
         start_resp = msgpack.unpackb(start_resp_data, raw=False)
+        print("Start response:", start_resp)
+        return;
+
         print("Start response:", start_resp)
 
         if start_resp.get("type") == "program_launched":
