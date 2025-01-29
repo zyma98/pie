@@ -84,6 +84,7 @@ struct ClientHandle {
 
 /// Minimal handle for a running program instance
 struct InstanceHandle {
+    client_id: ClientId,
     hash: String,
     sender: Sender<InstanceMessage>,
     join_handle: JoinHandle<()>,
@@ -210,31 +211,34 @@ async fn main() -> anyhow::Result<()> {
                 message,
             } = instance_msg;
 
+            // get handle
+            let instance_handle = state_.running_instances.get(&instance_id).unwrap();
+            let client_id = instance_handle.client_id;
+
+            // channel_id = 0: to symphony server.
+            // channel_id = 1: to client.
+            // channel_id = 2: to LLM server.
+            // channel_id > 4: to other instances.
+
+            // Construct a ProgramEvent message for the client
             if channel_id == 1 {
-                // Construct a ProgramEvent message for the client
                 // (Just parse or wrap the `message` into JSON)
-                let event_data = match serde_json::from_str::<serde_json::Value>(&message) {
-                    Ok(val) => val,
-                    Err(_) => serde_json::json!({"error": "malformed JSON"}),
-                };
+                let event_data = serde_json::from_str::<serde_json::Value>(&message)
+                    .unwrap_or_else(|_| serde_json::json!({"error": "malformed JSON"}));
 
                 let server_msg = ServerMessage::ProgramEvent {
                     instance_id: instance_id.to_string(),
                     event_data,
                 };
 
-                // TODO: You (the developer) decide how to dispatch this `server_msg`
-                // to the correct connected client(s). Possibly store a mapping from
-                // instance_id -> client writer or something similar.
-                //
-                // For now, just a placeholder:
-                //
-                // route_message_to_client(&global_state, instance_id, server_msg).await;
+                // get client handle
+                let client_handle = state_.clients.get(&client_id)?;
+                client_handle.sender.send(server_msg).await?
             } else {
                 // Currently do nothing for other channels,
-                // or put placeholder logic here if you want.
             }
         }
+        Ok(())
     });
 
     // Accept incoming connections
@@ -323,7 +327,7 @@ async fn handle_connection(stream: TcpStream, state: Arc<ServerState>) -> anyhow
             let data = msg.into_data();
             match from_slice::<ClientMessage>(&data) {
                 Ok(parsed) => {
-                    let responses = handle_client_message(state.clone(), parsed).await;
+                    let responses = handle_client_message(state.clone(), client_id, parsed).await;
                     for resp in responses {
                         sender.send(resp).await?;
                     }
@@ -354,7 +358,11 @@ async fn handle_connection(stream: TcpStream, state: Arc<ServerState>) -> anyhow
 // Message Dispatch
 // ---------------------------
 
-async fn handle_client_message(state: Arc<ServerState>, msg: ClientMessage) -> Vec<ServerMessage> {
+async fn handle_client_message(
+    state: Arc<ServerState>,
+    client_id: ClientId,
+    msg: ClientMessage,
+) -> Vec<ServerMessage> {
     match msg {
         ClientMessage::QueryExistence { hash } => {
             handle_client_message_query_existence(state, hash).await
@@ -373,7 +381,7 @@ async fn handle_client_message(state: Arc<ServerState>, msg: ClientMessage) -> V
         ClientMessage::StartProgram {
             hash,
             configuration,
-        } => handle_client_message_start_program(state, hash, configuration).await,
+        } => handle_client_message_start_program(state, hash, client_id, configuration).await,
 
         ClientMessage::SendEvent {
             instance_id,
@@ -510,6 +518,7 @@ async fn handle_client_message_upload_program(
 async fn handle_client_message_start_program(
     state: Arc<ServerState>,
     hash: String,
+    client_id: ClientId,
     configuration: serde_json::Value,
 ) -> Vec<ServerMessage> {
     // Load WASM component from disk if not already in memory
@@ -629,6 +638,7 @@ async fn handle_client_message_start_program(
     // later in SendEvent or TerminateProgram, etc.
     // Create a new instance handle
     let handle = InstanceHandle {
+        client_id,
         hash: hash.clone(),
         sender,
         join_handle,
