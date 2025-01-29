@@ -1,4 +1,3 @@
-use std::future::Future;
 use wasmtime::component::Resource;
 use wasmtime::component::{bindgen, ResourceTable};
 use wasmtime::Result;
@@ -16,13 +15,13 @@ bindgen!({
     trappable_imports: true,
 });
 
-pub struct ComponentRunStates {
+pub struct InstanceState {
     // These two are required basically as a standard way to enable the impl of WasiView
     pub wasi_ctx: WasiCtx,
     pub resource_table: ResourceTable,
 }
 
-impl WasiView for ComponentRunStates {
+impl WasiView for InstanceState {
     fn table(&mut self) -> &mut ResourceTable {
         &mut self.resource_table
     }
@@ -31,12 +30,12 @@ impl WasiView for ComponentRunStates {
     }
 }
 
-impl ComponentRunStates {
+impl InstanceState {
     pub fn new() -> Self {
         let mut builder = WasiCtx::builder();
         builder.inherit_stderr().inherit_network().inherit_stdout();
 
-        ComponentRunStates {
+        InstanceState {
             wasi_ctx: builder.build(),
             resource_table: ResourceTable::new(),
         }
@@ -47,8 +46,8 @@ pub struct LanguageModel {
     model_id: String,
 }
 
-impl spi::lm::inference::Host for ComponentRunStates {}
-impl spi::lm::inference::HostLanguageModel for ComponentRunStates {
+impl spi::lm::inference::Host for InstanceState {}
+impl spi::lm::inference::HostLanguageModel for InstanceState {
     async fn new(&mut self, model_id: String) -> Result<Resource<LanguageModel>, wasmtime::Error> {
         let handle = LanguageModel { model_id };
         Ok(self.resource_table.push(handle)?)
@@ -83,7 +82,7 @@ impl spi::lm::inference::HostLanguageModel for ComponentRunStates {
     }
 }
 //
-impl spi::app::system::Host for ComponentRunStates {
+impl spi::app::system::Host for InstanceState {
     async fn ask(&mut self, question: String) -> Result<String, wasmtime::Error> {
         // print the question, and randomly return an answer
         println!("Asked: {}", question);
@@ -95,6 +94,10 @@ impl spi::app::system::Host for ComponentRunStates {
         println!("Told: {}", message);
         Ok(())
     }
+
+    async fn poll(&mut self) -> Result<String, wasmtime::Error> {
+        Ok("sdsd".to_string())
+    }
 }
 
-impl spi::lm::kvcache::Host for ComponentRunStates {}
+impl spi::lm::kvcache::Host for InstanceState {}

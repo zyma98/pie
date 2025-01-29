@@ -1,3 +1,5 @@
+mod spi;
+
 use std::{
     collections::HashMap,
     fs,
@@ -17,11 +19,13 @@ use futures::{SinkExt, StreamExt};
 use uuid::Uuid;
 
 // Wasmtime imports
-use wasmtime::{Engine, Module, Store};
+use wasmtime::{Config, Engine, Module, Store};
 
 // For MessagePack serialization/deserialization.
+use crate::spi::InstanceState;
 use rmp_serde::{decode::from_slice, encode::to_vec_named};
 use serde::{Deserialize, Serialize};
+use wasmtime::component::{Component, Instance};
 
 /// Directory where we store (and load) program binaries:
 const PROGRAM_CACHE_DIR: &str = "./program_cache";
@@ -38,13 +42,18 @@ const CHUNK_SIZE_BYTES: usize = 64 * 1024; // 64 KiB
 /// - Program cache on disk
 /// - In-flight uploads
 /// - Running program instances
-#[derive(Default)]
 struct ServerState {
-    /// Maps a BLAKE3 hash -> Path to the cached binary on disk
-    program_cache: HashMap<String, PathBuf>,
+    /// Maps a BLAKE3 hash -> Path to the binary on disk
+    programs_in_disk: HashMap<String, PathBuf>,
+
+    // Compiled WASM components in memory
+    programs_in_memory: HashMap<String, Component>,
 
     /// Tracks partial uploads in progress
-    in_flight_uploads: HashMap<String, InFlightUpload>,
+    programs_in_flight: HashMap<String, InFlightUpload>,
+
+    // wasmtime engine
+    engine: Engine,
 
     /// Running program instances (instance_id -> handle)
     running_instances: HashMap<String, ProgramInstanceHandle>,
@@ -60,7 +69,8 @@ struct InFlightUpload {
 /// Minimal handle for a running program instance
 struct ProgramInstanceHandle {
     hash: String,
-    store: Store<()>,
+    instance: Arc<Instance>,
+    store: Arc<Mutex<InstanceState>>,
 }
 
 // ---------------------------
@@ -146,7 +156,18 @@ async fn main() -> anyhow::Result<()> {
     fs::create_dir_all(PROGRAM_CACHE_DIR)?;
 
     // Create default server state
-    let mut server_state = ServerState::default();
+
+    let mut config = Config::default();
+    config.async_support(true);
+
+    let mut server_state = ServerState {
+        programs_in_disk: HashMap::new(),
+        programs_in_memory: HashMap::new(),
+        programs_in_flight: HashMap::new(),
+        engine: Engine::new(&config)?,
+        running_instances: HashMap::new(),
+    };
+
     // Scan the existing cache_dir and load the programs
     load_existing_programs(Path::new(PROGRAM_CACHE_DIR), &mut server_state)?;
 
@@ -184,7 +205,7 @@ fn load_existing_programs(cache_dir: &Path, state: &mut ServerState) -> anyhow::
             let hash = hasher.finalize().to_hex().to_string();
 
             // Insert into cache map
-            state.program_cache.insert(hash, path);
+            state.programs_in_disk.insert(hash, path);
         }
     }
     Ok(())
@@ -254,7 +275,7 @@ async fn handle_client_message(
         ClientMessage::QueryExistence { hash } => {
             let exists = {
                 let guard = state.lock();
-                guard.program_cache.contains_key(&hash)
+                guard.programs_in_disk.contains_key(&hash)
             };
             vec![ServerMessage::QueryResponse {
                 hash: Box::leak(hash.into_boxed_str()),
@@ -281,7 +302,7 @@ async fn handle_client_message(
             }
 
             let entry = guard
-                .in_flight_uploads
+                .programs_in_flight
                 .entry(hash.clone())
                 .or_insert(InFlightUpload {
                     total_chunks,
@@ -319,7 +340,7 @@ async fn handle_client_message(
             // Check if all chunks have arrived
             if entry.received_chunks == entry.total_chunks {
                 let InFlightUpload { collected_data, .. } =
-                    guard.in_flight_uploads.remove(&hash).unwrap();
+                    guard.programs_in_flight.remove(&hash).unwrap();
 
                 // Compute BLAKE3 to verify correctness
                 let mut hasher = Hasher::new();
@@ -338,7 +359,7 @@ async fn handle_client_message(
                 }
 
                 // If not already in the cache, persist the file
-                if !guard.program_cache.contains_key(&hash) {
+                if !guard.programs_in_disk.contains_key(&hash) {
                     let file_path = Path::new(PROGRAM_CACHE_DIR).join(&hash);
                     if let Err(e) = fs::write(&file_path, &collected_data) {
                         drop(guard);
@@ -346,7 +367,7 @@ async fn handle_client_message(
                             error: format!("Failed to write program to disk: {}", e),
                         }];
                     }
-                    guard.program_cache.insert(hash.clone(), file_path);
+                    guard.programs_in_disk.insert(hash.clone(), file_path);
                 }
 
                 replies.push(ServerMessage::UploadComplete {
@@ -364,7 +385,7 @@ async fn handle_client_message(
             // Acquire path from the cache
             let (path, engine) = {
                 let guard = state.lock();
-                let path = match guard.program_cache.get(&hash) {
+                let path = match guard.programs_in_disk.get(&hash) {
                     Some(p) => p.clone(),
                     None => {
                         return vec![ServerMessage::Error {
@@ -374,45 +395,48 @@ async fn handle_client_message(
                 };
                 // For demonstration, we create a default engine.
                 // You could parse `configuration` to set memory/cpu limits.
-                let engine = Engine::default();
-                (path, engine)
+                //let engine = Engine::default();
+                (path, 0)
             };
 
-            let data = match fs::read(&path) {
-                Ok(d) => d,
-                Err(e) => {
-                    return vec![ServerMessage::Error {
-                        error: format!("Failed to read cached program from disk: {}", e),
-                    }]
-                }
-            };
-
-            let module = match Module::new(&engine, &data) {
-                Ok(m) => m,
-                Err(e) => {
-                    return vec![ServerMessage::Error {
-                        error: format!("Failed to compile program: {}", e),
-                    }]
-                }
-            };
-
-            let store = Store::new(&engine, ());
-
-            // Generate a unique instance_id
-            let instance_id = Uuid::new_v4().to_string();
-
-            {
-                let mut guard = state.lock();
-                let handle = ProgramInstanceHandle {
-                    hash: hash.clone(),
-                    store,
-                };
-                guard.running_instances.insert(instance_id.clone(), handle);
-            }
-
+            // let data = match fs::read(&path) {
+            //     Ok(d) => d,
+            //     Err(e) => {
+            //         return vec![ServerMessage::Error {
+            //             error: format!("Failed to read cached program from disk: {}", e),
+            //         }]
+            //     }
+            // };
+            //
+            // let module = match Module::new(&engine, &data) {
+            //     Ok(m) => m,
+            //     Err(e) => {
+            //         return vec![ServerMessage::Error {
+            //             error: format!("Failed to compile program: {}", e),
+            //         }]
+            //     }
+            // };
+            //
+            // let store = Store::new(&engine, ());
+            //
+            // // Generate a unique instance_id
+            // let instance_id = Uuid::new_v4().to_string();
+            // {
+            //     let mut guard = state.lock();
+            //     let handle = ProgramInstanceHandle {
+            //         hash: hash.clone(),
+            //         store,
+            //     };
+            //     guard.running_instances.insert(instance_id.clone(), handle);
+            // }
+            //
+            // vec![ServerMessage::ProgramLaunched {
+            //     hash: Box::leak(hash.into_boxed_str()),
+            //     instance_id: Box::leak(instance_id.into_boxed_str()),
+            // }]
             vec![ServerMessage::ProgramLaunched {
                 hash: Box::leak(hash.into_boxed_str()),
-                instance_id: Box::leak(instance_id.into_boxed_str()),
+                instance_id: "test_dummy",
             }]
         }
 
@@ -421,53 +445,58 @@ async fn handle_client_message(
             instance_id,
             event_data,
         } => {
-            let guard = state.lock();
-            let handle = match guard.running_instances.get(&instance_id) {
-                Some(h) => h,
-                None => {
-                    return vec![ServerMessage::Error {
-                        error: format!("No running instance with ID {}", instance_id),
-                    }]
-                }
-            };
-
-            if handle.hash != hash {
-                return vec![ServerMessage::Error {
-                    error: "Program hash mismatch for the given instance.".to_string(),
-                }];
-            }
-
-            // In a real scenario, you’d call an exported function or
-            // otherwise pass `event_data` into the Program instance.
-            // Here we simply echo back an event notification.
-            vec![ServerMessage::ProgramEvent {
-                hash: Box::leak(hash.into_boxed_str()),
-                instance_id: Box::leak(instance_id.into_boxed_str()),
-                event_data,
-            }]
+            // let guard = state.lock();
+            // let handle = match guard.running_instances.get(&instance_id) {
+            //     Some(h) => h,
+            //     None => {
+            //         return vec![ServerMessage::Error {
+            //             error: format!("No running instance with ID {}", instance_id),
+            //         }]
+            //     }
+            // };
+            //
+            // if handle.hash != hash {
+            //     return vec![ServerMessage::Error {
+            //         error: "Program hash mismatch for the given instance.".to_string(),
+            //     }];
+            // }
+            //
+            // // In a real scenario, you’d call an exported function or
+            // // otherwise pass `event_data` into the Program instance.
+            // // Here we simply echo back an event notification.
+            // vec![ServerMessage::ProgramEvent {
+            //     hash: Box::leak(hash.into_boxed_str()),
+            //     instance_id: Box::leak(instance_id.into_boxed_str()),
+            //     event_data,
+            // }]
+            vec![]
         }
 
         ClientMessage::TerminateProgram { hash, instance_id } => {
-            let mut guard = state.lock();
-            let handle = match guard.running_instances.remove(&instance_id) {
-                Some(h) => h,
-                None => {
-                    return vec![ServerMessage::Error {
-                        error: format!("No running instance with ID {}", instance_id),
-                    }]
-                }
-            };
+            // let mut guard = state.lock();
+            // let handle = match guard.running_instances.remove(&instance_id) {
+            //     Some(h) => h,
+            //     None => {
+            //         return vec![ServerMessage::Error {
+            //             error: format!("No running instance with ID {}", instance_id),
+            //         }]
+            //     }
+            // };
+            //
+            // if handle.hash != hash {
+            //     return vec![ServerMessage::Error {
+            //         error: "Program hash mismatch for the given instance.".to_string(),
+            //     }];
+            // }
 
-            if handle.hash != hash {
-                return vec![ServerMessage::Error {
-                    error: "Program hash mismatch for the given instance.".to_string(),
-                }];
-            }
-
-            // Drop the instance handle
+            // // Drop the instance handle
+            // vec![ServerMessage::ProgramTerminated {
+            //     hash: Box::leak(hash.into_boxed_str()),
+            //     instance_id: Box::leak(instance_id.into_boxed_str()),
+            // }]
             vec![ServerMessage::ProgramTerminated {
                 hash: Box::leak(hash.into_boxed_str()),
-                instance_id: Box::leak(instance_id.into_boxed_str()),
+                instance_id: "test_dummy",
             }]
         }
     }
