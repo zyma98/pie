@@ -3,13 +3,13 @@ mod spi;
 use anyhow::Context;
 use blake3::Hasher;
 use futures::{SinkExt, StreamExt};
-use parking_lot::Mutex;
 use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
     sync::Arc,
 };
+use tokio::sync::Mutex; // instead of parking_lot::Mutex
 use uuid::Uuid;
 
 use crate::spi::{App, InstanceMessage, InstanceState};
@@ -21,7 +21,7 @@ use tokio_tungstenite::accept_async;
 use tungstenite::protocol::Message as WsMessage;
 
 // Wasmtime imports
-use wasmtime::component::{Component, Instance, Linker};
+use wasmtime::component::{Component, Linker};
 use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{WasiImpl, WasiView};
 
@@ -113,41 +113,39 @@ enum ClientMessage {
     /// Send an event (arbitrary data) to a running program instance
     #[serde(rename = "send_event")]
     SendEvent {
-        hash: String,
         instance_id: String,
         event_data: serde_json::Value,
     },
 
     /// Terminate a running program instance
     #[serde(rename = "terminate_program")]
-    TerminateProgram { hash: String, instance_id: String },
+    TerminateProgram { instance_id: String },
 }
 
 /// Messages from server -> client (in MessagePack)
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
-enum ServerMessage<'a> {
+enum ServerMessage {
     #[serde(rename = "query_response")]
-    QueryResponse { hash: &'a str, exists: bool },
+    QueryResponse { hash: String, exists: bool },
 
     #[serde(rename = "upload_ack")]
-    UploadAck { hash: &'a str, chunk_index: usize },
+    UploadAck { hash: String, chunk_index: usize },
 
     #[serde(rename = "upload_complete")]
-    UploadComplete { hash: &'a str },
+    UploadComplete { hash: String },
 
     #[serde(rename = "program_launched")]
-    ProgramLaunched { hash: &'a str, instance_id: &'a str },
+    ProgramLaunched { hash: String, instance_id: String },
 
     #[serde(rename = "program_event")]
     ProgramEvent {
-        hash: &'a str,
-        instance_id: &'a str,
+        instance_id: String,
         event_data: serde_json::Value,
     },
 
     #[serde(rename = "program_terminated")]
-    ProgramTerminated { hash: &'a str, instance_id: &'a str },
+    ProgramTerminated { instance_id: String },
 
     #[serde(rename = "error")]
     Error { error: String },
@@ -285,15 +283,15 @@ async fn handle_connection(
 async fn handle_client_message(
     msg: ClientMessage,
     state: Arc<Mutex<ServerState>>,
-) -> Vec<ServerMessage<'static>> {
+) -> Vec<ServerMessage> {
     match msg {
         ClientMessage::QueryExistence { hash } => {
             let exists = {
-                let guard = state.lock();
+                let guard = state.lock().await;
                 guard.programs_in_disk.contains_key(&hash)
             };
             vec![ServerMessage::QueryResponse {
-                hash: Box::leak(hash.into_boxed_str()),
+                hash: hash.clone(),
                 exists,
             }]
         }
@@ -304,7 +302,7 @@ async fn handle_client_message(
             total_chunks,
             chunk_data,
         } => {
-            let mut guard = state.lock();
+            let mut guard = state.lock().await;
 
             if chunk_data.len() > CHUNK_SIZE_BYTES {
                 return vec![ServerMessage::Error {
@@ -348,7 +346,7 @@ async fn handle_client_message(
 
             // Build response
             let mut replies = vec![ServerMessage::UploadAck {
-                hash: Box::leak(hash.clone().into_boxed_str()),
+                hash: hash.clone(),
                 chunk_index,
             }];
 
@@ -385,9 +383,7 @@ async fn handle_client_message(
                     guard.programs_in_disk.insert(hash.clone(), file_path);
                 }
 
-                replies.push(ServerMessage::UploadComplete {
-                    hash: Box::leak(hash.into_boxed_str()),
-                });
+                replies.push(ServerMessage::UploadComplete { hash });
             }
 
             replies
@@ -398,7 +394,7 @@ async fn handle_client_message(
             configuration,
         } => {
             // Load WASM component from disk if not already in memory
-            let mut guard = state.lock();
+            let mut guard = state.lock().await;
             if guard.programs_in_memory.get(&hash).is_none() {
                 if let Some(path) = guard.programs_in_disk.get(&hash) {
                     println!("Loading component from path: {hash}");
@@ -517,73 +513,65 @@ async fn handle_client_message(
 
             // 4) Return ProgramLaunched *immediately*, without blocking
             vec![ServerMessage::ProgramLaunched {
-                hash: Box::leak(hash.into_boxed_str()),
-                instance_id: Box::leak(instance_id.to_string().into_boxed_str()),
+                hash,
+                instance_id: instance_id.to_string(),
             }]
-            ////////////////////////////////////////////////////////////////////////////////////
-            ////////////////////////////////////////////////////////////////////////////////////
-            // The problematic code block ends here
-            ////////////////////////////////////////////////////////////////////////////////////
-            ////////////////////////////////////////////////////////////////////////////////////
         }
 
         ClientMessage::SendEvent {
-            hash,
             instance_id,
             event_data,
         } => {
-            // let guard = state.lock();
-            // let handle = match guard.running_instances.get(&instance_id) {
-            //     Some(h) => h,
-            //     None => {
-            //         return vec![ServerMessage::Error {
-            //             error: format!("No running instance with ID {}", instance_id),
-            //         }]
-            //     }
-            // };
-            //
-            // if handle.hash != hash {
-            //     return vec![ServerMessage::Error {
-            //         error: "Program hash mismatch for the given instance.".to_string(),
-            //     }];
-            // }
-            //
-            // // In a real scenario, you’d call an exported function or
-            // // otherwise pass `event_data` into the Program instance.
-            // // Here we simply echo back an event notification.
-            // vec![ServerMessage::ProgramEvent {
-            //     hash: Box::leak(hash.into_boxed_str()),
-            //     instance_id: Box::leak(instance_id.into_boxed_str()),
-            //     event_data,
-            // }]
+            let instance_id = Uuid::parse_str(&instance_id).expect("Invalid UUID format");
+
+            let guard = state.lock().await;
+
+            let handle = match guard.running_instances.get(&instance_id) {
+                Some(h) => h,
+                None => {
+                    return vec![ServerMessage::Error {
+                        error: format!("No running instance with ID {}", instance_id),
+                    }]
+                }
+            };
+
+            if let Err(e) = handle
+                .sender
+                .send(InstanceMessage {
+                    instance_id,
+                    channel_id: 0,
+                    message: event_data.to_string(),
+                })
+                .await
+            {
+                return vec![ServerMessage::Error {
+                    error: format!("Failed to send event to instance: {}", e),
+                }];
+            }
+
             vec![]
         }
 
-        ClientMessage::TerminateProgram { hash, instance_id } => {
-            // let mut guard = state.lock();
-            // let handle = match guard.running_instances.remove(&instance_id) {
-            //     Some(h) => h,
-            //     None => {
-            //         return vec![ServerMessage::Error {
-            //             error: format!("No running instance with ID {}", instance_id),
-            //         }]
-            //     }
-            // };
-            //
-            // if handle.hash != hash {
-            //     return vec![ServerMessage::Error {
-            //         error: "Program hash mismatch for the given instance.".to_string(),
-            //     }];
-            // }
+        ClientMessage::TerminateProgram { instance_id } => {
+            let instance_id = Uuid::parse_str(&instance_id).expect("Invalid UUID format");
 
-            // // Drop the instance handle
-            // vec![ServerMessage::ProgramTerminated {
-            //     hash: Box::leak(hash.into_boxed_str()),
-            //     instance_id: Box::leak(instance_id.into_boxed_str()),
-            // }]
+            let guard = state.lock().await;
+
+            let handle = match guard.running_instances.get(&instance_id) {
+                Some(h) => h,
+                None => {
+                    return vec![ServerMessage::Error {
+                        error: format!("No running instance with ID {}", instance_id),
+                    }]
+                }
+            };
+
+            // abort
+            handle.join_handle.abort();
+
+            // Drop the instance handle
             vec![ServerMessage::ProgramTerminated {
-                hash: Box::leak(hash.into_boxed_str()),
-                instance_id: "test_dummy",
+                instance_id: instance_id.to_string(),
             }]
         }
     }
