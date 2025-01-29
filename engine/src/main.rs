@@ -9,13 +9,13 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tokio::sync::Mutex; // instead of parking_lot::Mutex
+use tokio::sync::Mutex; // async mutex
 use uuid::Uuid;
 
 use crate::spi::{App, InstanceMessage, InstanceState};
 
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::task::{self, JoinHandle};
 use tokio_tungstenite::accept_async;
 use tungstenite::protocol::Message as WsMessage;
@@ -40,29 +40,34 @@ const CHUNK_SIZE_BYTES: usize = 64 * 1024; // 64 KiB
 // Server State
 // ---------------------------
 
+pub type ClientId = Uuid;
+pub type InstanceId = Uuid;
+pub type ProgramHash = String;
+
 /// Global server state:
 /// - Program cache on disk
 /// - In-flight uploads
 /// - Running program instances
 struct ServerState {
     /// Maps a BLAKE3 hash -> Path to the binary on disk
-    programs_in_disk: DashMap<String, PathBuf>,
+    programs_in_disk: DashMap<ProgramHash, PathBuf>,
 
     // Compiled WASM components in memory
-    programs_in_memory: DashMap<String, Component>,
+    programs_in_memory: DashMap<ProgramHash, Component>,
 
     /// Tracks partial uploads in progress
-    programs_in_flight: DashMap<String, Arc<Mutex<InFlightUpload>>>,
+    programs_in_flight: DashMap<ProgramHash, Arc<Mutex<InFlightUpload>>>,
+
+    // Client WebSocket channels (server -> client)
+    clients: DashMap<ClientId, ClientHandle>,
+
+    /// Running program instances (instance_id -> handle)
+    running_instances: DashMap<InstanceId, InstanceHandle>,
 
     // wasmtime engine
     engine: Engine,
 
-    /// Running program instances (instance_id -> handle)
-    running_instances: DashMap<Uuid, InstanceHandle>,
-
-    // "The" receiver for all instance messages.
-    // Sender per instance is stored in the handle.
-    receiver: Receiver<InstanceMessage>,
+    // The "global" sender (instances -> server)
     sender: Sender<InstanceMessage>,
 }
 
@@ -71,6 +76,10 @@ struct InFlightUpload {
     total_chunks: usize,
     collected_data: Vec<u8>,
     received_chunks: usize,
+}
+
+struct ClientHandle {
+    sender: Sender<ServerMessage>,
 }
 
 /// Minimal handle for a running program instance
@@ -166,15 +175,15 @@ async fn main() -> anyhow::Result<()> {
     config.async_support(true);
 
     // create channel
-    let (sender, receiver) = tokio::sync::mpsc::channel(1024);
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(1024);
 
     let mut server_state = ServerState {
         programs_in_disk: DashMap::new(),
         programs_in_memory: DashMap::new(),
         programs_in_flight: DashMap::new(),
-        engine: Engine::new(&config)?,
+        clients: DashMap::new(),
         running_instances: DashMap::new(),
-        receiver,
+        engine: Engine::new(&config)?,
         sender,
     };
 
@@ -188,6 +197,45 @@ async fn main() -> anyhow::Result<()> {
     let addr = "127.0.0.1:9000";
     let listener = TcpListener::bind(addr).await?;
     println!("Symphony server listening on ws://{}", addr);
+
+    //
+    let state_ = state.clone();
+
+    tokio::spawn(async move {
+        // Global loop reading from the global MPSC receiver
+        while let Some(instance_msg) = receiver.recv().await {
+            let InstanceMessage {
+                instance_id,
+                channel_id,
+                message,
+            } = instance_msg;
+
+            if channel_id == 1 {
+                // Construct a ProgramEvent message for the client
+                // (Just parse or wrap the `message` into JSON)
+                let event_data = match serde_json::from_str::<serde_json::Value>(&message) {
+                    Ok(val) => val,
+                    Err(_) => serde_json::json!({"error": "malformed JSON"}),
+                };
+
+                let server_msg = ServerMessage::ProgramEvent {
+                    instance_id: instance_id.to_string(),
+                    event_data,
+                };
+
+                // TODO: You (the developer) decide how to dispatch this `server_msg`
+                // to the correct connected client(s). Possibly store a mapping from
+                // instance_id -> client writer or something similar.
+                //
+                // For now, just a placeholder:
+                //
+                // route_message_to_client(&global_state, instance_id, server_msg).await;
+            } else {
+                // Currently do nothing for other channels,
+                // or put placeholder logic here if you want.
+            }
+        }
+    });
 
     // Accept incoming connections
     loop {
@@ -234,6 +282,39 @@ async fn handle_connection(stream: TcpStream, state: Arc<ServerState>) -> anyhow
 
     let (mut write, mut read) = ws_stream.split();
 
+    // create external channel
+    let (sender, mut receiver) = channel(1024);
+
+    let client_id = Uuid::new_v4();
+    let client_handle = ClientHandle {
+        sender: sender.clone(),
+    };
+
+    // insert the client handle into the global state
+    state.clients.insert(client_id, client_handle);
+
+    // server -> client
+    let writer_task = {
+        // The 'write' half is not cloneable, so we move it into the task.
+        tokio::spawn(async move {
+            while let Some(msg) = receiver.recv().await {
+                match to_vec_named(&msg) {
+                    Ok(encoded) => {
+                        if let Err(e) = write.send(WsMessage::Binary(encoded.into())).await {
+                            eprintln!("Failed to write to ws: {}", e);
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to encode server_msg: {}", e);
+                        break;
+                    }
+                }
+            }
+        })
+    };
+
+    // reader task
     // Read messages in a loop
     while let Some(msg) = read.next().await {
         let msg = msg?;
@@ -244,17 +325,14 @@ async fn handle_connection(stream: TcpStream, state: Arc<ServerState>) -> anyhow
                 Ok(parsed) => {
                     let responses = handle_client_message(state.clone(), parsed).await;
                     for resp in responses {
-                        let encoded = to_vec_named(&resp)?;
-                        // Send as binary
-                        write.send(WsMessage::Binary(encoded.into())).await?;
+                        sender.send(resp).await?;
                     }
                 }
                 Err(err) => {
                     let error_msg = ServerMessage::Error {
                         error: format!("MessagePack decode error: {}", err),
                     };
-                    let encoded = to_vec_named(&error_msg)?;
-                    write.send(WsMessage::Binary(encoded.into())).await?;
+                    sender.send(error_msg).await?;
                 }
             }
         } else if msg.is_text() {
@@ -262,14 +340,13 @@ async fn handle_connection(stream: TcpStream, state: Arc<ServerState>) -> anyhow
             let error_msg = ServerMessage::Error {
                 error: "Text frames not supported. Please send MessagePack binary.".to_string(),
             };
-            let encoded = to_vec_named(&error_msg)?;
-            write.send(WsMessage::Binary(encoded.into())).await?;
+            sender.send(error_msg).await?;
         } else if msg.is_close() {
             println!("Client closed the connection.");
             break;
         }
     }
-
+    writer_task.abort();
     Ok(())
 }
 
