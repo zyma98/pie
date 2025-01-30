@@ -566,10 +566,17 @@ async fn handle_client_message_start_program(
                 eprintln!("Error adding App to linker: {}", e);
                 return; // or handle more gracefully
             }
-            if let Err(e) = link_wasi_bindings(&mut linker) {
+
+            if let Err(e) = wasmtime_wasi::add_to_linker_async(&mut linker) {
                 eprintln!("Failed to link WASI bindings: {}", e);
                 return;
             }
+
+            //
+            // if let Err(e) = link_wasi_bindings(&mut linker) {
+            //     eprintln!("Failed to link WASI bindings: {}", e);
+            //     return;
+            // }
 
             // Instantiate
             let instance = match linker.instantiate_async(&mut store, &component).await {
@@ -716,8 +723,12 @@ where
 pub fn link_wasi_bindings<T: WasiView>(l: &mut Linker<T>) -> Result<(), wasmtime::Error> {
     let closure = type_annotate::<T, _>(|t| WasiImpl(t));
     let options = wasmtime_wasi::bindings::sync::LinkOptions::default();
+
+    //wasmtime_wasi::add_to_linker_async(l, closure.clone())?;
+
     wasmtime_wasi::bindings::sync::filesystem::types::add_to_linker_get_host(l, closure)?;
     wasmtime_wasi::bindings::filesystem::preopens::add_to_linker_get_host(l, closure)?;
+
     wasmtime_wasi::bindings::io::error::add_to_linker_get_host(l, closure)?;
     wasmtime_wasi::bindings::sync::io::streams::add_to_linker_get_host(l, closure)?;
     wasmtime_wasi::bindings::cli::exit::add_to_linker_get_host(l, &options.into(), closure)?;
