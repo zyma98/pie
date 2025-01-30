@@ -12,6 +12,7 @@ bindgen!({
     async: true,
     with: {
         "spi:lm/inference/language-model": LanguageModel,
+        "spi:lm/inference/token-distribution": TokenDistribution,
         "spi:lm/kvcache/token": CachedToken,
         "spi:lm/kvcache/token-list": CachedTokenList,
     },
@@ -69,6 +70,8 @@ pub struct LanguageModel {
     model_id: String,
 }
 
+pub struct TokenDistribution {}
+
 #[derive(Clone, Copy)]
 pub struct CachedToken {
     token: u32,
@@ -77,6 +80,33 @@ pub struct CachedToken {
 
 pub struct CachedTokenList {
     tokens: Vec<CachedToken>,
+}
+
+//
+impl spi::app::system::Host for InstanceState {
+    async fn get_version(&mut self) -> Result<String, wasmtime::Error> {
+        Ok("0.1.0".to_string())
+    }
+
+    async fn send(&mut self, dest_id: u32, message: String) -> Result<()> {
+        self.inst2server
+            .send(InstanceMessage {
+                instance_id: self.instance_id,
+                dest_id,
+                message,
+            })
+            .await?;
+
+        Ok(())
+    }
+
+    async fn receive(&mut self) -> Result<String, wasmtime::Error> {
+        if let Some(message) = self.server2inst.recv().await {
+            return Ok(message.message);
+        }
+
+        Ok("".to_string())
+    }
 }
 
 impl spi::lm::inference::Host for InstanceState {}
@@ -116,30 +146,27 @@ impl spi::lm::inference::HostLanguageModel for InstanceState {
         Ok(())
     }
 }
-//
-impl spi::app::system::Host for InstanceState {
-    async fn get_version(&mut self) -> Result<String, wasmtime::Error> {
-        Ok("0.1.0".to_string())
+
+impl spi::lm::inference::HostTokenDistribution for InstanceState {
+    async fn sample_p(
+        &mut self,
+        resource: Resource<TokenDistribution>,
+    ) -> Result<u32, wasmtime::Error> {
+        Ok(0)
     }
 
-    async fn send(&mut self, dest_id: u32, message: String) -> Result<()> {
-        self.inst2server
-            .send(InstanceMessage {
-                instance_id: self.instance_id,
-                dest_id,
-                message,
-            })
-            .await?;
+    async fn top_k(
+        &mut self,
+        resource: Resource<TokenDistribution>,
+        k: u32,
+    ) -> Result<Vec<u32>, wasmtime::Error> {
+        Ok(vec![1, 2])
+    }
+
+    async fn drop(&mut self, resource: Resource<TokenDistribution>) -> Result<()> {
+        let _ = self.resource_table.delete(resource)?;
 
         Ok(())
-    }
-
-    async fn receive(&mut self) -> Result<String, wasmtime::Error> {
-        if let Some(message) = self.server2inst.recv().await {
-            return Ok(message.message);
-        }
-
-        Ok("".to_string())
     }
 }
 

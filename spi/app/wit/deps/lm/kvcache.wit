@@ -7,6 +7,8 @@ interface kvcache {
 
   // a sequence of cached tokens
   resource token-list {
+
+    // the list could be empty
     constructor(tokens: list<token>);
 
     // mutating methods
