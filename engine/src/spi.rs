@@ -14,7 +14,6 @@ bindgen!({
     async: true,
     with: {
         "spi:lm/inference/language-model": LanguageModel,
-        "spi:app/system/channel": Channel
     },
     // Interactions with `ResourceTable` can possibly trap so enable the ability
     // to return traps from generated functions.
@@ -34,7 +33,7 @@ pub struct InstanceState {
 
 pub struct InstanceMessage {
     pub instance_id: Uuid,
-    pub channel_id: u32,
+    pub dest_id: u32,
     pub message: String,
 }
 
@@ -68,10 +67,6 @@ impl InstanceState {
 
 pub struct LanguageModel {
     model_id: String,
-}
-
-pub struct Channel {
-    channel_id: u32,
 }
 
 impl spi::lm::inference::Host for InstanceState {}
@@ -116,20 +111,11 @@ impl spi::app::system::Host for InstanceState {
     async fn get_version(&mut self) -> Result<String, wasmtime::Error> {
         Ok("0.1.0".to_string())
     }
-}
 
-impl spi::app::system::HostChannel for InstanceState {
-    async fn new(&mut self, channel_id: u32) -> Result<Resource<Channel>, wasmtime::Error> {
-        let handle = Channel { channel_id };
-        Ok(self.resource_table.push(handle)?)
-    }
-
-    async fn send(&mut self, resource: Resource<Channel>, message: String) -> Result<()> {
-        let channel_id = self.resource_table.get(&resource)?.channel_id;
-
+    async fn send(&mut self, dest_id: u32, message: String) -> Result<()> {
         let message = InstanceMessage {
             instance_id: self.instance_id,
-            channel_id,
+            dest_id,
             message,
         };
 
@@ -138,23 +124,12 @@ impl spi::app::system::HostChannel for InstanceState {
         Ok(())
     }
 
-    async fn receive(&mut self, resource: Resource<Channel>) -> Result<String, wasmtime::Error> {
-        let channel_id = self.resource_table.get(&resource)?.channel_id;
-
-        let message = self.receiver.recv().await;
-
-        if let Some(message) = message {
-            if message.channel_id == channel_id && message.instance_id == self.instance_id {
-                return Ok(message.message);
-            }
+    async fn receive(&mut self) -> Result<String, wasmtime::Error> {
+        if let Some(message) = self.receiver.recv().await {
+            return Ok(message.message);
         }
 
         Ok("".to_string())
-    }
-
-    async fn drop(&mut self, resource: Resource<Channel>) -> Result<()> {
-        let _ = self.resource_table.delete(resource)?;
-        Ok(())
     }
 }
 

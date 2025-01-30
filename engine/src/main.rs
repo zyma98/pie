@@ -207,7 +207,7 @@ async fn main() -> anyhow::Result<()> {
         while let Some(instance_msg) = receiver.recv().await {
             let InstanceMessage {
                 instance_id,
-                channel_id,
+                dest_id: channel_id,
                 message,
             } = instance_msg;
 
@@ -232,13 +232,14 @@ async fn main() -> anyhow::Result<()> {
                 };
 
                 // get client handle
-                let client_handle = state_.clients.get(&client_id)?;
-                client_handle.sender.send(server_msg).await?
+                let client_handle = state_.clients.get(&client_id).unwrap();
+                client_handle.sender.send(server_msg).await.unwrap();
             } else {
                 // Currently do nothing for other channels,
             }
         }
-        Ok(())
+
+        // This is the end of the global loop
     });
 
     // Accept incoming connections
@@ -660,7 +661,7 @@ async fn handle_client_message_send_message(
 ) -> Vec<ServerMessage> {
     let instance_id = Uuid::parse_str(&instance_id).expect("Invalid UUID format");
 
-    let entry = match state.running_instances.get(&instance_id) {
+    let instance_handle = match state.running_instances.get(&instance_id) {
         Some(e) => e,
         None => {
             return vec![ServerMessage::Error {
@@ -669,12 +670,11 @@ async fn handle_client_message_send_message(
         }
     };
 
-    if let Err(e) = entry
-        .value()
+    if let Err(e) = instance_handle
         .sender
         .send(InstanceMessage {
             instance_id,
-            channel_id: 0,
+            dest_id: 0,
             message: event_data.to_string(),
         })
         .await
@@ -693,7 +693,7 @@ async fn handle_client_message_terminate_program(
 ) -> Vec<ServerMessage> {
     let instance_id = Uuid::parse_str(&instance_id).expect("Invalid UUID format");
 
-    let entry = match state.running_instances.get(&instance_id) {
+    let instance_handle = match state.running_instances.get(&instance_id) {
         Some(e) => e,
         None => {
             return vec![ServerMessage::Error {
@@ -703,7 +703,7 @@ async fn handle_client_message_terminate_program(
     };
 
     // abort
-    entry.value().join_handle.abort();
+    instance_handle.join_handle.abort();
 
     // remove the instance from the running_instances
     state.running_instances.remove(&instance_id);
