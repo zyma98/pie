@@ -1,5 +1,6 @@
 mod spi;
 
+use crate::spi::{App, InstanceMessage, InstanceState};
 use anyhow::Context;
 use blake3::Hasher;
 use dashmap::DashMap;
@@ -9,13 +10,11 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tokio::sync::Mutex; // async mutex
 use uuid::Uuid;
-
-use crate::spi::{App, InstanceMessage, InstanceState};
 
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::sync::Mutex; // async mutex
 use tokio::task::{self, JoinHandle};
 use tokio_tungstenite::accept_async;
 use tungstenite::protocol::Message as WsMessage;

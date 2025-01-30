@@ -1,10 +1,8 @@
-use std::future::Future;
 use wasmtime::component::Resource;
 use wasmtime::component::{bindgen, ResourceTable};
 use wasmtime::Result;
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiView};
 
-use crate::ClientId;
 use tokio::sync::mpsc::{Receiver, Sender};
 use uuid::Uuid;
 
@@ -113,13 +111,13 @@ impl spi::app::system::Host for InstanceState {
     }
 
     async fn send(&mut self, dest_id: u32, message: String) -> Result<()> {
-        let message = InstanceMessage {
-            instance_id: self.instance_id,
-            dest_id,
-            message,
-        };
-
-        self.inst2server.send(message).await?;
+        self.inst2server
+            .send(InstanceMessage {
+                instance_id: self.instance_id,
+                dest_id,
+                message,
+            })
+            .await?;
 
         Ok(())
     }
