@@ -27,8 +27,8 @@ pub struct InstanceState {
     pub resource_table: ResourceTable,
 
     // For communication between the instance and the host
-    pub sender: Sender<InstanceMessage>,
-    pub receiver: Receiver<InstanceMessage>,
+    pub inst2server: Sender<InstanceMessage>,
+    pub server2inst: Receiver<InstanceMessage>,
 }
 
 pub struct InstanceMessage {
@@ -49,8 +49,8 @@ impl WasiView for InstanceState {
 impl InstanceState {
     pub fn new(
         instance_id: Uuid,
-        sender: Sender<InstanceMessage>,
-        receiver: Receiver<InstanceMessage>,
+        inst2server: Sender<InstanceMessage>,
+        server2inst: Receiver<InstanceMessage>,
     ) -> Self {
         let mut builder = WasiCtx::builder();
         builder.inherit_stderr().inherit_network().inherit_stdout();
@@ -59,8 +59,8 @@ impl InstanceState {
             instance_id,
             wasi_ctx: builder.build(),
             resource_table: ResourceTable::new(),
-            sender,
-            receiver,
+            inst2server,
+            server2inst,
         }
     }
 }
@@ -119,13 +119,13 @@ impl spi::app::system::Host for InstanceState {
             message,
         };
 
-        self.sender.send(message).await?;
+        self.inst2server.send(message).await?;
 
         Ok(())
     }
 
     async fn receive(&mut self) -> Result<String, wasmtime::Error> {
-        if let Some(message) = self.receiver.recv().await {
+        if let Some(message) = self.server2inst.recv().await {
             return Ok(message.message);
         }
 

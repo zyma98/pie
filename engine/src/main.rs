@@ -68,7 +68,7 @@ struct ServerState {
     engine: Engine,
 
     // The "global" sender (instances -> server)
-    sender: Sender<InstanceMessage>,
+    inst2server: Sender<InstanceMessage>,
 }
 
 /// In-progress upload info
@@ -79,14 +79,14 @@ struct InFlightUpload {
 }
 
 struct ClientHandle {
-    sender: Sender<ServerMessage>,
+    server2client: Sender<ServerMessage>,
 }
 
 /// Minimal handle for a running program instance
 struct InstanceHandle {
     client_id: ClientId,
     hash: String,
-    sender: Sender<InstanceMessage>,
+    server2inst: Sender<InstanceMessage>,
     join_handle: JoinHandle<()>,
 }
 
@@ -114,17 +114,13 @@ enum ClientMessage {
 
     /// Start running a cached program
     #[serde(rename = "start_program")]
-    StartProgram {
-        hash: String,
-        #[serde(default)]
-        configuration: serde_json::Value,
-    },
+    StartProgram { hash: String },
 
     /// Send an event (arbitrary data) to a running program instance
     #[serde(rename = "send_event")]
     SendEvent {
         instance_id: String,
-        event_data: serde_json::Value,
+        event_data: String,
     },
 
     /// Terminate a running program instance
@@ -151,7 +147,7 @@ enum ServerMessage {
     #[serde(rename = "program_event")]
     ProgramEvent {
         instance_id: String,
-        event_data: serde_json::Value,
+        event_data: String,
     },
 
     #[serde(rename = "program_terminated")]
@@ -176,7 +172,7 @@ async fn main() -> anyhow::Result<()> {
     config.async_support(true);
 
     // create channel
-    let (sender, mut receiver) = tokio::sync::mpsc::channel(1024);
+    let (inst2server_tx, mut inst2server_rx) = channel(1024);
 
     let mut server_state = ServerState {
         programs_in_disk: DashMap::new(),
@@ -185,7 +181,7 @@ async fn main() -> anyhow::Result<()> {
         clients: DashMap::new(),
         running_instances: DashMap::new(),
         engine: Engine::new(&config)?,
-        sender,
+        inst2server: inst2server_tx,
     };
 
     // Scan the existing cache_dir and load the programs
@@ -204,10 +200,10 @@ async fn main() -> anyhow::Result<()> {
 
     tokio::spawn(async move {
         // Global loop reading from the global MPSC receiver
-        while let Some(instance_msg) = receiver.recv().await {
+        while let Some(instance_msg) = inst2server_rx.recv().await {
             let InstanceMessage {
                 instance_id,
-                dest_id: channel_id,
+                dest_id,
                 message,
             } = instance_msg;
 
@@ -215,25 +211,23 @@ async fn main() -> anyhow::Result<()> {
             let instance_handle = state_.running_instances.get(&instance_id).unwrap();
             let client_id = instance_handle.client_id;
 
-            // channel_id = 0: to symphony server.
-            // channel_id = 1: to client.
-            // channel_id = 2: to LLM server.
-            // channel_id > 4: to other instances.
+            // dest_id = 0: to symphony server.
+            // dest_id = 1: to client.
+            // dest_id = 2: to LLM server.
+            // dest_id > 4: to other instances.
 
             // Construct a ProgramEvent message for the client
-            if channel_id == 1 {
+            if dest_id == 1 {
                 // (Just parse or wrap the `message` into JSON)
-                let event_data = serde_json::from_str::<serde_json::Value>(&message)
-                    .unwrap_or_else(|_| serde_json::json!({"error": "malformed JSON"}));
 
                 let server_msg = ServerMessage::ProgramEvent {
                     instance_id: instance_id.to_string(),
-                    event_data,
+                    event_data: message,
                 };
 
                 // get client handle
                 let client_handle = state_.clients.get(&client_id).unwrap();
-                client_handle.sender.send(server_msg).await.unwrap();
+                client_handle.server2client.send(server_msg).await.unwrap();
             } else {
                 // Currently do nothing for other channels,
             }
@@ -288,11 +282,11 @@ async fn handle_connection(stream: TcpStream, state: Arc<ServerState>) -> anyhow
     let (mut write, mut read) = ws_stream.split();
 
     // create external channel
-    let (sender, mut receiver) = channel(1024);
+    let (server2client_tx, mut server2client_rx) = channel(1024);
 
     let client_id = Uuid::new_v4();
     let client_handle = ClientHandle {
-        sender: sender.clone(),
+        server2client: server2client_tx.clone(),
     };
 
     // insert the client handle into the global state
@@ -302,9 +296,10 @@ async fn handle_connection(stream: TcpStream, state: Arc<ServerState>) -> anyhow
     let writer_task = {
         // The 'write' half is not cloneable, so we move it into the task.
         tokio::spawn(async move {
-            while let Some(msg) = receiver.recv().await {
+            while let Some(msg) = server2client_rx.recv().await {
                 match to_vec_named(&msg) {
                     Ok(encoded) => {
+                        // Send the encoded message
                         if let Err(e) = write.send(WsMessage::Binary(encoded.into())).await {
                             eprintln!("Failed to write to ws: {}", e);
                             break;
@@ -330,14 +325,14 @@ async fn handle_connection(stream: TcpStream, state: Arc<ServerState>) -> anyhow
                 Ok(parsed) => {
                     let responses = handle_client_message(state.clone(), client_id, parsed).await;
                     for resp in responses {
-                        sender.send(resp).await?;
+                        server2client_tx.send(resp).await?;
                     }
                 }
                 Err(err) => {
                     let error_msg = ServerMessage::Error {
                         error: format!("MessagePack decode error: {}", err),
                     };
-                    sender.send(error_msg).await?;
+                    server2client_tx.send(error_msg).await?;
                 }
             }
         } else if msg.is_text() {
@@ -345,7 +340,7 @@ async fn handle_connection(stream: TcpStream, state: Arc<ServerState>) -> anyhow
             let error_msg = ServerMessage::Error {
                 error: "Text frames not supported. Please send MessagePack binary.".to_string(),
             };
-            sender.send(error_msg).await?;
+            server2client_tx.send(error_msg).await?;
         } else if msg.is_close() {
             println!("Client closed the connection.");
             break;
@@ -379,10 +374,9 @@ async fn handle_client_message(
                 .await
         }
 
-        ClientMessage::StartProgram {
-            hash,
-            configuration,
-        } => handle_client_message_start_program(state, hash, client_id, configuration).await,
+        ClientMessage::StartProgram { hash } => {
+            handle_client_message_start_program(state, hash, client_id).await
+        }
 
         ClientMessage::SendEvent {
             instance_id,
@@ -520,7 +514,6 @@ async fn handle_client_message_start_program(
     state: Arc<ServerState>,
     hash: String,
     client_id: ClientId,
-    configuration: serde_json::Value,
 ) -> Vec<ServerMessage> {
     // Load WASM component from disk if not already in memory
     if state.programs_in_memory.get(&hash).is_none() {
@@ -553,9 +546,9 @@ async fn handle_client_message_start_program(
     let instance_id = Uuid::new_v4();
 
     // create a channel
-    let (sender, receiver) = tokio::sync::mpsc::channel(32);
+    let (server2inst_tx, server2inst_rx) = channel(32);
 
-    let inst_state = InstanceState::new(instance_id, state.sender.clone(), receiver);
+    let inst_state = InstanceState::new(instance_id, state.inst2server.clone(), server2inst_rx);
 
     // linker and store
 
@@ -641,7 +634,7 @@ async fn handle_client_message_start_program(
     let handle = InstanceHandle {
         client_id,
         hash: hash.clone(),
-        sender,
+        server2inst: server2inst_tx,
         join_handle,
     };
 
@@ -657,7 +650,7 @@ async fn handle_client_message_start_program(
 async fn handle_client_message_send_message(
     state: Arc<ServerState>,
     instance_id: String,
-    event_data: serde_json::Value,
+    event_data: String,
 ) -> Vec<ServerMessage> {
     let instance_id = Uuid::parse_str(&instance_id).expect("Invalid UUID format");
 
@@ -671,11 +664,11 @@ async fn handle_client_message_send_message(
     };
 
     if let Err(e) = instance_handle
-        .sender
+        .server2inst
         .send(InstanceMessage {
             instance_id,
             dest_id: 0,
-            message: event_data.to_string(),
+            message: event_data,
         })
         .await
     {
