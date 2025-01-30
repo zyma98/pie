@@ -3,8 +3,8 @@ interface inference {
   use kvcache.{token-list};
 
   resource token-distribution {
-    sample_p: func() -> u32;
-    top_k: func(k: u32) -> list<u32>;
+    sample-p: func() -> u32;
+    top-k: func(k: u32) -> list<u32>;
   }
 
   resource language-model {
