@@ -1,27 +1,57 @@
 interface kvcache {
-  // a single cached token
-  resource token {
-     position: func() -> u32;
-     token-id: func() -> u32;
+
+  flags mask {
+    causal,
+    empty,
+    // more flags will be added later, e.g., windowed, etc.
   }
 
-  // a sequence of cached tokens
-  resource token-list {
+  resource block {
+     // keeps block_id internally.
+     allocated: func() -> bool;
+  }
 
-    // the list could be empty
-    constructor(tokens: list<token>);
-
-    // mutating methods
-    push: func(token: token);
-    pop: func() -> token;
-    extend: func(tokens: token-list);
-    splice: func(start: u32, delete-count: u32, tokens: token-list);
-
-    // non-mutating methods
+  // this is actually a set. The order is just for indexing purposes. So this is more like a ranged map.
+  resource block-list {
     length: func() -> u32;
-    slice: func(start: u32, end: u32) -> token-list;
-    concat: func(cache: token-list) -> token-list;
-    index: func(position: u32) -> token;
-
+    append: func(block: block);
+    remove: func(block: block);
+    extend: func(blocks: block-list);
+    slice: func(start: u32, end: u32) -> block-list;
+    index: func(position: u32) -> block;
   }
+
+  // return "initialized" block handles (block id reserved after 2^18)
+  allocate-block: func() -> block;
+  allocate-blocks: func(count:u32) -> block-list;
+
+
+
+  //
+  //
+  // // a single cached token
+  // resource token {
+  //    position: func() -> u32;
+  //    token-id: func() -> u32;
+  // }
+  //
+  // // a sequence of cached tokens
+  // resource token-list {
+  //
+  //   // the list could be empty
+  //   constructor(tokens: list<token>);
+  //
+  //   // mutating methods
+  //   push: func(token: token);
+  //   pop: func() -> token;
+  //   extend: func(tokens: token-list);
+  //   splice: func(start: u32, delete-count: u32, tokens: token-list);
+  //
+  //   // non-mutating methods
+  //   length: func() -> u32;
+  //   slice: func(start: u32, end: u32) -> token-list;
+  //   concat: func(cache: token-list) -> token-list;
+  //   index: func(position: u32) -> token;
+  //
+  // }
 }
