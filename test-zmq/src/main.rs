@@ -1,7 +1,7 @@
-use std::time::Duration;
 use rand::Rng;
 use rmp_serde::{from_slice, to_vec};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use tokio::{self, sync::mpsc};
 use uuid::Uuid;
 use zeromq::{DealerSocket, Socket, SocketRecv, SocketSend, ZmqMessage};
@@ -17,7 +17,9 @@ pub struct Request {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Command {
-    AllocateBlocks { num_blocks: u32 },
+    AllocateBlocks {
+        num_blocks: u32,
+    },
     AllocateBlock,
     Copy {
         src_block_id: u32,
@@ -31,8 +33,13 @@ pub enum Command {
         start: u32,
         end: u32,
     },
-    FreeBlock { block_id: u32 },
-    FreeBlocks { block_id_offset: u32, count: u32 },
+    FreeBlock {
+        block_id: u32,
+    },
+    FreeBlocks {
+        block_id_offset: u32,
+        count: u32,
+    },
     AvailableBlocks,
 }
 
@@ -44,20 +51,10 @@ pub struct Response {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ResponseData {
-    AllocatedBlocks {
-        block_id_offset: u32,
-        count: u32,
-    },
-    AvailableCount {
-        count: u32,
-    },
-    Awk {
-        message: String,
-    },
-    Error {
-        error_code: u32,
-        message: String,
-    },
+    AllocatedBlocks { block_id_offset: u32, count: u32 },
+    AvailableCount { count: u32 },
+    Awk { message: String },
+    Error { error_code: u32, message: String },
 }
 
 // -----------------------------------------------------------------------------
@@ -177,7 +174,9 @@ async fn sender_task(tx: mpsc::Sender<Request>) {
 fn random_command() -> Command {
     let mut rng = rand::thread_rng();
     match rng.gen_range(0..7) {
-        0 => Command::AllocateBlocks { num_blocks: rng.gen_range(1..5) },
+        0 => Command::AllocateBlocks {
+            num_blocks: rng.gen_range(1..5),
+        },
         1 => Command::AllocateBlock,
         2 => Command::Copy {
             src_block_id: rng.gen_range(1..50),
