@@ -6,7 +6,7 @@ interface kvcache {
     // more flags will be added later, e.g., windowed, etc.
   }
 
-  flags sink{
+  flags sink {
     fill, // fill all missing slots starting from the beginning
     fill-last, // start filling from the last empty block.
     new-block, // always sink into a new block
@@ -20,6 +20,7 @@ interface kvcache {
   }
 
   // this is actually a set. The order is just for indexing purposes. So this is more like a ranged map.
+  // RLE-like encoding could be used to compress the list.
   resource block-list {
     length: func() -> u32;
     append: func(block: block);
