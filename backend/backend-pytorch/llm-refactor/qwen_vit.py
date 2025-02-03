@@ -1,6 +1,5 @@
 import math
 
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -8,7 +7,8 @@ import torch.nn.functional as F
 from transformers.activations import ACT2FN
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import Qwen2_5_VLVisionConfig
 
-from common import Qwen2RMSNorm, rotate_half, Qwen2_5_VLPreTrainedModel
+from common import rotate_half, Qwen2_5_VLPreTrainedModel
+from l4ma import L4maRmsNorm
 
 
 def apply_rotary_pos_emb_vision(tensor: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
@@ -27,7 +27,7 @@ class Qwen2_5_VLPatchMerger(nn.Module):
     def __init__(self, dim: int, context_dim: int, spatial_merge_size: int = 2) -> None:
         super().__init__()
         self.hidden_size = context_dim * (spatial_merge_size ** 2)
-        self.ln_q = Qwen2RMSNorm(context_dim, eps=1e-6)
+        self.ln_q = L4maRmsNorm(context_dim, eps=1e-6)
         self.mlp = nn.Sequential(
             nn.Linear(self.hidden_size, self.hidden_size),
             nn.GELU(),
@@ -129,8 +129,8 @@ class Qwen2_5_VLMLP(nn.Module):
 class Qwen2_5_VLVisionBlock(nn.Module):
     def __init__(self, config) -> None:
         super().__init__()
-        self.norm1 = Qwen2RMSNorm(config.hidden_size, eps=1e-6)
-        self.norm2 = Qwen2RMSNorm(config.hidden_size, eps=1e-6)
+        self.norm1 = L4maRmsNorm(config.hidden_size, eps=1e-6)
+        self.norm2 = L4maRmsNorm(config.hidden_size, eps=1e-6)
         self.attn = Qwen2_5_VLVisionAttention(
             config.hidden_size, num_heads=config.num_heads
         )

@@ -21,6 +21,7 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import Qwen2_5_VLCo
 from qwen_vit import Qwen2_5_VisionTransformerPretrainedModel
 
 from common import Qwen2RMSNorm, rotate_half, Qwen2_5_VLPreTrainedModel
+from l4ma import L4maRmsNorm, L4maMlp
 
 
 class Qwen2_5_VLRotaryEmbedding(nn.Module):
@@ -38,31 +39,13 @@ class Qwen2_5_VLRotaryEmbedding(nn.Module):
         self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
 
         inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
+
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self.original_inv_freq = self.inv_freq
 
-    def _dynamic_frequency_update(self, position_ids, device):
-        """
-        dynamic RoPE layers should recompute `inv_freq` in the following situations:
-        1 - growing beyond the cached sequence length (allow scaling)
-        2 - the current sequence length is in the original scale (avoid losing precision with small sequences)
-        """
-        seq_len = torch.max(position_ids) + 1
-        if seq_len > self.max_seq_len_cached:  # growth
-            inv_freq, self.attention_scaling = self.rope_init_fn(
-                self.config, device, seq_len=seq_len, **self.rope_kwargs
-            )
-            self.register_buffer("inv_freq", inv_freq, persistent=False)  # TODO joao: may break with compilation
-            self.max_seq_len_cached = seq_len
-
-        if seq_len < self.original_max_seq_len and self.max_seq_len_cached > self.original_max_seq_len:  # reset
-            self.register_buffer("inv_freq", self.original_inv_freq, persistent=False)
-            self.max_seq_len_cached = self.original_max_seq_len
 
     @torch.no_grad()
     def forward(self, x, position_ids):
-        if "dynamic" in self.rope_type:
-            self._dynamic_frequency_update(position_ids, device=x.device)
 
         # Core RoPE block. In contrast to other models, Qwen2_5_VL has different position ids for thw grids
         # So we expand the inv_freq to shape (3, ...)
@@ -78,30 +61,16 @@ class Qwen2_5_VLRotaryEmbedding(nn.Module):
             sin = emb.sin()
 
         # Advanced RoPE types (e.g. yarn) apply a post-processing scaling factor, equivalent to scaling attention
-        cos = cos * self.attention_scaling
-        sin = sin * self.attention_scaling
+        #cos = cos * self.attention_scaling
+        #sin = sin * self.attention_scaling
 
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
 
-class Qwen2MLP(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.config = config
-        self.hidden_size = config.hidden_size
-        self.intermediate_size = config.intermediate_size
-        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
-        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
-        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
-        self.act_fn = ACT2FN[config.hidden_act]
-
-    def forward(self, x):
-        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
-        return down_proj
-
-
 def apply_multimodal_rotary_pos_emb(q, k, cos, sin, mrope_section, unsqueeze_dim=1):
     mrope_section = mrope_section * 2
+
+
     cos = torch.cat([m[i % 3] for i, m in enumerate(cos.split(mrope_section, dim=-1))], dim=-1).unsqueeze(
         unsqueeze_dim
     )
@@ -148,7 +117,7 @@ class Qwen2_5_VLAttention(nn.Module):
         self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=True)
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
 
-        self.rotary_emb = Qwen2_5_VLRotaryEmbedding(config=config)
+        #self.rotary_emb = Qwen2_5_VLRotaryEmbedding(config=config)
 
     def forward(
             self,
@@ -224,9 +193,9 @@ class Qwen2_5_VLDecoderLayer(nn.Module):
 
         self.self_attn = Qwen2_5_VLAttention(config, layer_idx)
 
-        self.mlp = Qwen2MLP(config)
-        self.input_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.mlp = L4maMlp(config)
+        self.input_layernorm = L4maRmsNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = L4maRmsNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
             self,
@@ -860,75 +829,75 @@ class Qwen2_5_VLForConditionalGeneration(Qwen2_5_VLPreTrainedModel, GenerationMi
             rope_deltas=self.rope_deltas,
         )
 
-    def prepare_inputs_for_generation(
-            self,
-            input_ids,
-            past_key_values=None,
-            attention_mask=None,
-            inputs_embeds=None,
-            cache_position=None,
-            position_ids=None,
-            use_cache=True,
-            pixel_values=None,
-            pixel_values_videos=None,
-            image_grid_thw=None,
-            video_grid_thw=None,
-            second_per_grid_ts=None,
-            **kwargs,
-    ):
-        # Overwritten -- in specific circumstances we don't want to forward image inputs to the model
-
-        # If we have cache: let's slice `input_ids` through `cache_position`, to keep only the unprocessed tokens
-        # Exception 1: when passing input_embeds, input_ids may be missing entries
-        # Exception 2: some generation methods do special slicing of input_ids, so we don't need to do it here
-        if past_key_values is not None:
-            if inputs_embeds is not None:  # Exception 1
-                input_ids = input_ids[:, -cache_position.shape[0]:]
-            elif input_ids.shape[1] != cache_position.shape[0]:  # Default case (the "else", a no op, is Exception 2)
-                input_ids = input_ids[:, cache_position]
-
-        if cache_position[0] != 0:
-            pixel_values = None
-            pixel_values_videos = None
-
-        # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
-        if inputs_embeds is not None and cache_position[0] == 0:
-            model_inputs = {"inputs_embeds": inputs_embeds, "input_ids": None}
-        else:
-            model_inputs = {"input_ids": input_ids, "inputs_embeds": None}
-
-        if isinstance(past_key_values, StaticCache) and attention_mask.ndim == 2:
-            if model_inputs["inputs_embeds"] is not None:
-                batch_size, sequence_length, _ = inputs_embeds.shape
-                device = inputs_embeds.device
-            else:
-                batch_size, sequence_length = input_ids.shape
-                device = input_ids.device
-
-            attention_mask = self.model._prepare_4d_causal_attention_mask_with_cache_position(
-                attention_mask,
-                sequence_length=sequence_length,
-                target_length=past_key_values.get_max_cache_shape(),
-                dtype=self.lm_head.weight.dtype,
-                device=device,
-                cache_position=cache_position,
-                batch_size=batch_size,
-                config=self.config,
-                past_key_values=past_key_values,
-            )
-
-        model_inputs.update(
-            {
-                "position_ids": position_ids,
-                "past_key_values": past_key_values,
-                "use_cache": use_cache,
-                "attention_mask": attention_mask,
-                "pixel_values": pixel_values,
-                "pixel_values_videos": pixel_values_videos,
-                "image_grid_thw": image_grid_thw,
-                "video_grid_thw": video_grid_thw,
-                "cache_position": cache_position,
-                "second_per_grid_ts": second_per_grid_ts,
-            }
-        )
-        return model_inputs
+    # def prepare_inputs_for_generation(
+    #         self,
+    #         input_ids,
+    #         past_key_values=None,
+    #         attention_mask=None,
+    #         inputs_embeds=None,
+    #         cache_position=None,
+    #         position_ids=None,
+    #         use_cache=True,
+    #         pixel_values=None,
+    #         pixel_values_videos=None,
+    #         image_grid_thw=None,
+    #         video_grid_thw=None,
+    #         second_per_grid_ts=None,
+    #         **kwargs,
+    # ):
+    #     # Overwritten -- in specific circumstances we don't want to forward image inputs to the model
+    #
+    #     # If we have cache: let's slice `input_ids` through `cache_position`, to keep only the unprocessed tokens
+    #     # Exception 1: when passing input_embeds, input_ids may be missing entries
+    #     # Exception 2: some generation methods do special slicing of input_ids, so we don't need to do it here
+    #     if past_key_values is not None:
+    #         if inputs_embeds is not None:  # Exception 1
+    #             input_ids = input_ids[:, -cache_position.shape[0]:]
+    #         elif input_ids.shape[1] != cache_position.shape[0]:  # Default case (the "else", a no op, is Exception 2)
+    #             input_ids = input_ids[:, cache_position]
+    #
+    #     if cache_position[0] != 0:
+    #         pixel_values = None
+    #         pixel_values_videos = None
+    #
+    #     # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
+    #     if inputs_embeds is not None and cache_position[0] == 0:
+    #         model_inputs = {"inputs_embeds": inputs_embeds, "input_ids": None}
+    #     else:
+    #         model_inputs = {"input_ids": input_ids, "inputs_embeds": None}
+    #
+    #     if isinstance(past_key_values, StaticCache) and attention_mask.ndim == 2:
+    #         if model_inputs["inputs_embeds"] is not None:
+    #             batch_size, sequence_length, _ = inputs_embeds.shape
+    #             device = inputs_embeds.device
+    #         else:
+    #             batch_size, sequence_length = input_ids.shape
+    #             device = input_ids.device
+    #
+    #         attention_mask = self.model._prepare_4d_causal_attention_mask_with_cache_position(
+    #             attention_mask,
+    #             sequence_length=sequence_length,
+    #             target_length=past_key_values.get_max_cache_shape(),
+    #             dtype=self.lm_head.weight.dtype,
+    #             device=device,
+    #             cache_position=cache_position,
+    #             batch_size=batch_size,
+    #             config=self.config,
+    #             past_key_values=past_key_values,
+    #         )
+    #
+    #     model_inputs.update(
+    #         {
+    #             "position_ids": position_ids,
+    #             "past_key_values": past_key_values,
+    #             "use_cache": use_cache,
+    #             "attention_mask": attention_mask,
+    #             "pixel_values": pixel_values,
+    #             "pixel_values_videos": pixel_values_videos,
+    #             "image_grid_thw": image_grid_thw,
+    #             "video_grid_thw": video_grid_thw,
+    #             "cache_position": cache_position,
+    #             "second_per_grid_ts": second_per_grid_ts,
+    #         }
+    #     )
+    #     return model_inputs

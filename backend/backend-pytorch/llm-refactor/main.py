@@ -2,7 +2,8 @@ import torch
 from transformers import AutoProcessor, QuantoConfig, GPTQConfig, TorchAoConfig, AutoTokenizer
 from qwen_utils import process_vision_info
 
-from qwen_vision import Qwen2_5_VLForConditionalGeneration
+from qwen import Qwen2_5_VLForConditionalGeneration
+from l4ma import AttentionBuffer
 
 
 # @torch.inference_mode()
@@ -35,6 +36,17 @@ def main(model):
     )
 
     print(text)
+    device = "cuda:0"
+
+    buffer = AttentionBuffer(
+        num_batch=1,
+        capacity=1024,
+        num_layers=model.config.num_hidden_layers,
+        num_heads=model.config.num_key_value_heads,
+        head_dim=model.config.hidden_size // model.config.num_attention_heads,
+        dtype=torch.bfloat16,
+        device=device
+    )
 
     image_inputs, video_inputs = process_vision_info(messages)
     inputs = processor(
@@ -45,81 +57,22 @@ def main(model):
         return_tensors="pt",
     )
 
-    device = "cuda:0"
-
     inputs = inputs.to(model.device)
 
-    # input_ids: tensor([[1741]], device='cuda:0')
-    # attention_mask: tensor([[1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    #                          1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    #                          1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    #                          1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    #                          1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    #                          1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]], device='cuda:0')
-    # position_ids: None
-    # past_key_values: DynamicCache()
-    # inputs_embeds: None
-    # use_cache: True
-    # output_attentions: None
-    # output_hidden_states: None
-    # return_dict: True
-    # pixel_values: None
-    # pixel_values_videos: None
-    # image_grid_thw: tensor([[1, 10, 10]], device='cuda:0')
-    # video_grid_thw: None
-    # rope_deltas: None
-    # cache_position: tensor([133], device='cuda:0')
-    # second_per_grid_ts: None
-
-    # input_ids: tensor([[60851]], device='cuda:0')
-    # attention_mask: tensor([[1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    #                          1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    #                          1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    #                          1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    #                          1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    #                          1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]], device='cuda:0')
-    # position_ids: None
-    # past_key_values: DynamicCache()
-    # inputs_embeds: None
-    # use_cache: True
-    # output_attentions: None
-    # output_hidden_states: None
-    # return_dict: True
-    # pixel_values: None
-    # pixel_values_videos: None
-    # image_grid_thw: tensor([[1, 10, 10]], device='cuda:0')
-    # video_grid_thw: None
-    # rope_deltas: None
-    # cache_position: tensor([134], device='cuda:0')
-    # second_per_grid_ts: None
-    # input_ids: tensor([[13]], device='cuda:0')
-    # attention_mask: tensor([[1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    #                          1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    #                          1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    #                          1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    #                          1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    #                          1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]], device='cuda:0')
-    # position_ids: None
-    # past_key_values: DynamicCache()
-    # inputs_embeds: None
-    # use_cache: True
-    # output_attentions: None
-    # output_hidden_states: None
-    # return_dict: True
-    # pixel_values: None
-    # pixel_values_videos: None
-    # image_grid_thw: tensor([[1, 10, 10]], device='cuda:0')
-    # video_grid_thw: None
-    # rope_deltas: None
-    # cache_position: tensor([135], device='cuda:0')
-    # second_per_grid_ts: None
-
-    max_new_tokens = 32
+    max_new_tokens = 3
     logits = None
     past_key_values = None
 
     token = 0
     output_ids = []
+
+    buffer.clear()
+
+    # input_ids = inputs.input_ids
+    # attention_mask = inputs.attention_mask
+    # pixel_values = inputs.pixel_values
+    # image_grid_thw = inputs.image_grid_thw
+
     for i in range(max_new_tokens):
 
         # prefill
@@ -141,7 +94,12 @@ def main(model):
             # cache_position: Optional[torch.LongTensor] = None,
             # second_per_grid_ts: Optional[torch.Tensor] = None,
 
-            output = model(**inputs)
+            output = model(
+                input_ids=inputs.input_ids,
+                attention_mask=inputs.attention_mask,
+                pixel_values=inputs.pixel_values,
+                image_grid_thw=inputs.image_grid_thw
+            )
             logits = output.logits
             past_key_values = output.past_key_values
 
@@ -184,7 +142,7 @@ if __name__ == "__main__":
     quantization_config = TorchAoConfig("int4_weight_only", group_size=128)
 
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-        "Qwen/Qwen2.5-VL-7B-Instruct", torch_dtype="auto", device_map="cuda:0", quantization_config=quantization_config,
+        "Qwen/Qwen2.5-VL-7B-Instruct", torch_dtype="bfloat16", device_map="cuda:0", quantization_config=quantization_config,
         attn_implementation="eager"
     )
 
