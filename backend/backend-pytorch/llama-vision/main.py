@@ -7,7 +7,8 @@ from qwen_vision import Qwen2_5_VLForConditionalGeneration
 quantization_config = TorchAoConfig("int4_weight_only", group_size=128)
 
 model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-    "Qwen/Qwen2.5-VL-7B-Instruct", torch_dtype="auto", device_map="cuda:0", quantization_config=quantization_config
+    "Qwen/Qwen2.5-VL-7B-Instruct", torch_dtype="auto", device_map="cuda:0", quantization_config=quantization_config,
+    attn_implementation="eager"
 )
 
 # We recommend enabling flash_attention_2 for better acceleration and memory saving, especially in multi-image and video scenarios.
@@ -39,7 +40,7 @@ messages = [
         ],
     }
 ]
-
+print(model.config._attn_implementation)
 # Preparation for inference
 text = processor.apply_chat_template(
     messages, tokenize=False, add_generation_prompt=True
@@ -57,7 +58,7 @@ inputs = inputs.to(model.device)
 # Inference: Generation of the output
 generated_ids = model.generate(**inputs, max_new_tokens=128)
 generated_ids_trimmed = [
-    out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+    out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
 ]
 output_text = processor.batch_decode(
     generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
