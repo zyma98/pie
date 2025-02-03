@@ -1,66 +1,191 @@
-from transformers import AutoProcessor, QuantoConfig, GPTQConfig, TorchAoConfig
+import torch
+from transformers import AutoProcessor, QuantoConfig, GPTQConfig, TorchAoConfig, AutoTokenizer
 from qwen_utils import process_vision_info
 
 from qwen_vision import Qwen2_5_VLForConditionalGeneration
 
-# default: Load the model on the available device(s)
-quantization_config = TorchAoConfig("int4_weight_only", group_size=128)
 
-model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-    "Qwen/Qwen2.5-VL-7B-Instruct", torch_dtype="auto", device_map="cuda:0", quantization_config=quantization_config,
-    attn_implementation="eager"
-)
+# @torch.inference_mode()
+def main(model):
+    # default processor
+    processor = AutoProcessor.from_pretrained("Qwen/Qwen2.5-VL-7B-Instruct")
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-VL-7B-Instruct")
+    # The default range for the number of visual tokens per image in the model is 4-16384.
+    # You can set min_pixels and max_pixels according to your needs, such as a token range of 256-1280, to balance performance and cost.
+    # min_pixels = 256*28*28
+    # max_pixels = 1280*28*28
+    # processor = AutoProcessor.from_pretrained("Qwen/Qwen2.5-VL-7B-Instruct", min_pixels=min_pixels, max_pixels=max_pixels)
 
-# We recommend enabling flash_attention_2 for better acceleration and memory saving, especially in multi-image and video scenarios.
-# model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-#     "Qwen/Qwen2.5-VL-7B-Instruct",
-#     torch_dtype=torch.bfloat16,
-#     attn_implementation="flash_attention_2",
-#     device_map="auto",
-# )
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "image": "./zebra.jpeg",
+                },
+                {"type": "text", "text": "Describe this image."},
+            ],
 
-# default processor
-processor = AutoProcessor.from_pretrained("Qwen/Qwen2.5-VL-7B-Instruct")
+        }
+    ]
+    # Preparation for inference
+    text = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
 
-# The default range for the number of visual tokens per image in the model is 4-16384.
-# You can set min_pixels and max_pixels according to your needs, such as a token range of 256-1280, to balance performance and cost.
-# min_pixels = 256*28*28
-# max_pixels = 1280*28*28
-# processor = AutoProcessor.from_pretrained("Qwen/Qwen2.5-VL-7B-Instruct", min_pixels=min_pixels, max_pixels=max_pixels)
+    print(text)
 
-messages = [
-    {
-        "role": "user",
-        "content": [
-            {
-                "type": "image",
-                "image": "./zebra.jpeg",
-            },
-            {"type": "text", "text": "Describe this image."},
-        ],
-    }
-]
-print(model.config._attn_implementation)
-# Preparation for inference
-text = processor.apply_chat_template(
-    messages, tokenize=False, add_generation_prompt=True
-)
-image_inputs, video_inputs = process_vision_info(messages)
-inputs = processor(
-    text=[text],
-    images=image_inputs,
-    videos=video_inputs,
-    padding=True,
-    return_tensors="pt",
-)
-inputs = inputs.to(model.device)
+    image_inputs, video_inputs = process_vision_info(messages)
+    inputs = processor(
+        text=[text],
+        images=image_inputs,
+        videos=video_inputs,
+        padding=True,
+        return_tensors="pt",
+    )
 
-# Inference: Generation of the output
-generated_ids = model.generate(**inputs, max_new_tokens=128)
-generated_ids_trimmed = [
-    out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-]
-output_text = processor.batch_decode(
-    generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
-)
-print(output_text)
+    device = "cuda:0"
+
+    inputs = inputs.to(model.device)
+
+    # input_ids: tensor([[1741]], device='cuda:0')
+    # attention_mask: tensor([[1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    #                          1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    #                          1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    #                          1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    #                          1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    #                          1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]], device='cuda:0')
+    # position_ids: None
+    # past_key_values: DynamicCache()
+    # inputs_embeds: None
+    # use_cache: True
+    # output_attentions: None
+    # output_hidden_states: None
+    # return_dict: True
+    # pixel_values: None
+    # pixel_values_videos: None
+    # image_grid_thw: tensor([[1, 10, 10]], device='cuda:0')
+    # video_grid_thw: None
+    # rope_deltas: None
+    # cache_position: tensor([133], device='cuda:0')
+    # second_per_grid_ts: None
+
+    # input_ids: tensor([[60851]], device='cuda:0')
+    # attention_mask: tensor([[1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    #                          1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    #                          1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    #                          1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    #                          1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    #                          1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]], device='cuda:0')
+    # position_ids: None
+    # past_key_values: DynamicCache()
+    # inputs_embeds: None
+    # use_cache: True
+    # output_attentions: None
+    # output_hidden_states: None
+    # return_dict: True
+    # pixel_values: None
+    # pixel_values_videos: None
+    # image_grid_thw: tensor([[1, 10, 10]], device='cuda:0')
+    # video_grid_thw: None
+    # rope_deltas: None
+    # cache_position: tensor([134], device='cuda:0')
+    # second_per_grid_ts: None
+    # input_ids: tensor([[13]], device='cuda:0')
+    # attention_mask: tensor([[1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    #                          1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    #                          1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    #                          1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    #                          1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    #                          1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]], device='cuda:0')
+    # position_ids: None
+    # past_key_values: DynamicCache()
+    # inputs_embeds: None
+    # use_cache: True
+    # output_attentions: None
+    # output_hidden_states: None
+    # return_dict: True
+    # pixel_values: None
+    # pixel_values_videos: None
+    # image_grid_thw: tensor([[1, 10, 10]], device='cuda:0')
+    # video_grid_thw: None
+    # rope_deltas: None
+    # cache_position: tensor([135], device='cuda:0')
+    # second_per_grid_ts: None
+
+    max_new_tokens = 32
+    logits = None
+    past_key_values = None
+
+    token = 0
+    output_ids = []
+    for i in range(max_new_tokens):
+
+        # prefill
+        if i == 0:
+            # input_ids: torch.LongTensor = None,
+            # attention_mask: Optional[torch.Tensor] = None,
+            # position_ids: Optional[torch.LongTensor] = None,
+            # past_key_values: Optional[List[torch.FloatTensor]] = None,
+            # inputs_embeds: Optional[torch.FloatTensor] = None,
+            # use_cache: Optional[bool] = None,
+            # output_attentions: Optional[bool] = None,
+            # output_hidden_states: Optional[bool] = None,
+            # return_dict: Optional[bool] = None,
+            # pixel_values: Optional[torch.Tensor] = None,
+            # pixel_values_videos: Optional[torch.FloatTensor] = None,
+            # image_grid_thw: Optional[torch.LongTensor] = None,
+            # video_grid_thw: Optional[torch.LongTensor] = None,
+            # rope_deltas: Optional[torch.LongTensor] = None,
+            # cache_position: Optional[torch.LongTensor] = None,
+            # second_per_grid_ts: Optional[torch.Tensor] = None,
+
+            output = model(**inputs)
+            logits = output.logits
+            past_key_values = output.past_key_values
+
+        else:
+            output = model(
+                input_ids=torch.as_tensor([[token]], device=device),
+                past_key_values=past_key_values,
+                cache_position=torch.as_tensor([[i + len(inputs.input_ids[0]) - 1]], device=device),
+            )
+            logits = output.logits
+            past_key_values = output.past_key_values
+
+        last_token_logits = logits[0, -1, :]
+        token = int(torch.argmax(last_token_logits))
+        output_ids.append(token)
+
+        if token == tokenizer.eos_token_id:
+            break
+
+        output_text = tokenizer.decode(output_ids, skip_special_tokens=True,
+                                       spaces_between_special_tokens=False, )
+        print(output_text)
+
+        ...
+    # print(model.config)
+
+    # Inference: Generation of the output
+    # generated_ids = model.generate(**inputs, max_new_tokens=128)
+    # generated_ids_trimmed = [
+    #     out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+    # ]
+    # output_text = processor.batch_decode(
+    #     generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+    # )
+    # print(output_text)
+
+
+if __name__ == "__main__":
+    # default: Load the model on the available device(s)
+    quantization_config = TorchAoConfig("int4_weight_only", group_size=128)
+
+    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+        "Qwen/Qwen2.5-VL-7B-Instruct", torch_dtype="auto", device_map="cuda:0", quantization_config=quantization_config,
+        attn_implementation="eager"
+    )
+
+    main(model)
