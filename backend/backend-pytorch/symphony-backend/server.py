@@ -60,7 +60,7 @@ class BatchItem:
         self.mask_blocks = mask_blocks
 
 
-class Batcher:
+class CommandBatcher:
     tasks: list[BlockFillCmd]
     items: list[BatchItem]
 
