@@ -4,70 +4,67 @@ from typing import List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from torch.nn import CrossEntropyLoss
 
-from transformers.activations import ACT2FN
-from transformers.cache_utils import Cache, DynamicCache, SlidingWindowCache, StaticCache
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import BaseModelOutputWithPast, ModelOutput
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
-from transformers.modeling_utils import PreTrainedModel
-from transformers.utils import (
-    logging,
-    replace_return_docstrings,
-)
+
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import Qwen2_5_VLConfig, Qwen2_5_VLVisionConfig
 from qwen_vit import Qwen2_5_VisionTransformerPretrainedModel
 
-from common import Qwen2RMSNorm, rotate_half, Qwen2_5_VLPreTrainedModel
-from l4ma import L4maRmsNorm, L4maMlp, AttentionBuffer, proc_mask
+from common import rotate_half, Qwen2_5_VLPreTrainedModel
+from l4ma import L4maRmsNorm, L4maMlp, AttentionBuffer, proc_mask, L4maRotaryEmbedding, apply_rotary_pos_emb
 
 
-class Qwen2_5_VLRotaryEmbedding(nn.Module):
-    def __init__(self, config: Qwen2_5_VLConfig, device=None):
-        super().__init__()
-        # BC: "rope_type" was originally "type"
-        if hasattr(config, "rope_scaling") and config.rope_scaling is not None:
-            self.rope_type = config.rope_scaling.get("rope_type", config.rope_scaling.get("type"))
-        else:
-            self.rope_type = "default"
-        self.max_seq_len_cached = config.max_position_embeddings
-        self.original_max_seq_len = config.max_position_embeddings
-
-        self.config = config
-        self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
-
-        inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
-
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
-        self.original_inv_freq = self.inv_freq
-
-    @torch.no_grad()
-    def forward(self, x, position_ids):
-
-        # Core RoPE block. In contrast to other models, Qwen2_5_VL has different position ids for thw grids
-        # So we expand the inv_freq to shape (3, ...)
-        inv_freq_expanded = self.inv_freq[None, None, :, None].float().expand(3, position_ids.shape[1], -1, 1)
-        position_ids_expanded = position_ids[:, :, None, :].float()  # shape (3, bs, 1, positions)
-        # Force float32 (see https://github.com/huggingface/transformers/pull/29285)
-        device_type = x.device.type
-        device_type = device_type if isinstance(device_type, str) and device_type != "mps" else "cpu"
-        with torch.autocast(device_type=device_type, enabled=False):
-            freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(2, 3)
-            emb = torch.cat((freqs, freqs), dim=-1)
-            cos = emb.cos()
-            sin = emb.sin()
-
-        # Advanced RoPE types (e.g. yarn) apply a post-processing scaling factor, equivalent to scaling attention
-        # cos = cos * self.attention_scaling
-        # sin = sin * self.attention_scaling
-
-        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
+#
+# class Qwen2_5_VLRotaryEmbedding(nn.Module):
+#     def __init__(self, config: Qwen2_5_VLConfig, device=None):
+#         super().__init__()
+#         # BC: "rope_type" was originally "type"
+#         if hasattr(config, "rope_scaling") and config.rope_scaling is not None:
+#             self.rope_type = config.rope_scaling.get("rope_type", config.rope_scaling.get("type"))
+#         else:
+#             self.rope_type = "default"
+#         self.max_seq_len_cached = config.max_position_embeddings
+#         self.original_max_seq_len = config.max_position_embeddings
+#
+#         self.config = config
+#         self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
+#
+#         print(self.rope_type)
+#
+#         inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
+#
+#         self.register_buffer("inv_freq", inv_freq, persistent=False)
+#         self.original_inv_freq = self.inv_freq
+#
+#     @torch.no_grad()
+#     def forward(self, x, position_ids):
+#
+#         # Core RoPE block. In contrast to other models, Qwen2_5_VL has different position ids for thw grids
+#         # So we expand the inv_freq to shape (3, ...)
+#         inv_freq_expanded = self.inv_freq[None, None, :, None].float().expand(3, position_ids.shape[1], -1, 1)
+#         position_ids_expanded = position_ids[:, :, None, :].float()  # shape (3, bs, 1, positions)
+#         # Force float32 (see https://github.com/huggingface/transformers/pull/29285)
+#         device_type = x.device.type
+#         device_type = device_type if isinstance(device_type, str) and device_type != "mps" else "cpu"
+#         with torch.autocast(device_type=device_type, enabled=False):
+#             freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(2, 3)
+#             emb = torch.cat((freqs, freqs), dim=-1)
+#             cos = emb.cos()
+#             sin = emb.sin()
+#
+#         # Advanced RoPE types (e.g. yarn) apply a post-processing scaling factor, equivalent to scaling attention
+#         # cos = cos * self.attention_scaling
+#         # sin = sin * self.attention_scaling
+#
+#         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
 
 def apply_multimodal_rotary_pos_emb(q, k, cos, sin, mrope_section, unsqueeze_dim=1):
     mrope_section = mrope_section * 2
+
+    print("original cos: ", cos.shape)
 
     cos = torch.cat([m[i % 3] for i, m in enumerate(cos.split(mrope_section, dim=-1))], dim=-1).unsqueeze(
         unsqueeze_dim
@@ -76,17 +73,11 @@ def apply_multimodal_rotary_pos_emb(q, k, cos, sin, mrope_section, unsqueeze_dim
         unsqueeze_dim
     )
 
+    print("new cos: ", cos.shape)
+
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
-
-
-def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
-    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
-    if n_rep == 1:
-        return hidden_states
-    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
-    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
 class Qwen2_5_VLAttention(nn.Module):
@@ -126,7 +117,8 @@ class Qwen2_5_VLAttention(nn.Module):
             # output_attentions: bool = False,
             # use_cache: bool = False,
             # cache_position: Optional[torch.LongTensor] = None,
-            position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
+            position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+
             buffer: AttentionBuffer | None = None,
             buffer_sink_ids: list[int] | None = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
@@ -141,9 +133,11 @@ class Qwen2_5_VLAttention(nn.Module):
         value_states = value_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
 
         cos, sin = position_embeddings
-        query_states, key_states = apply_multimodal_rotary_pos_emb(
-            query_states, key_states, cos, sin, self.rope_scaling["mrope_section"]
-        )
+        # query_states, key_states = apply_multimodal_rotary_pos_emb(
+        #     query_states, key_states, cos, sin, self.rope_scaling["mrope_section"]
+        # )
+
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
         # print("key_states: ", key_states.shape)
         # print("value_states: ", value_states.shape)
@@ -214,6 +208,7 @@ class Qwen2_5_VLDecoderLayer(nn.Module):
             # use_cache: Optional[bool] = False,
             # cache_position: Optional[torch.LongTensor] = None,
             position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
+
             buffer: AttentionBuffer | None = None,
             buffer_sink_ids: list[int] | None = None,
             # **kwargs,
@@ -278,9 +273,9 @@ class Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
         self.layers = nn.ModuleList(
             [Qwen2_5_VLDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
-        self.norm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.rotary_emb = Qwen2_5_VLRotaryEmbedding(config=config)
-
+        self.norm = L4maRmsNorm(config.hidden_size, eps=config.rms_norm_eps)
+        # self.rotary_emb = Qwen2_5_VLRotaryEmbedding(config=config)
+        self.rotary_emb_new = L4maRotaryEmbedding(config=config)
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
         self.post_init()
@@ -310,7 +305,50 @@ class Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
         hidden_states = inputs_embeds
 
         # create position embeddings to be shared across the decoder layers
-        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+        # position_embeddings = self.rotary_emb(hidden_states, position_ids)
+        position_embeddings2 = self.rotary_emb_new(hidden_states, position_ids.max().item() + 1)
+
+        # (bsz, dim)
+        # cos_ref, sin_ref = position_embeddings
+        cos, sin = position_embeddings2
+
+        dim = cos.shape[-1]
+        bsz = hidden_states.shape[0]
+        # (3, bsz, dim)
+        # print("cos: ", cos.shape)
+        # print("sin: ", sin.shape)
+        cos_ex = cos[None, None, :, :].expand(3, bsz, -1, -1)
+        sin_ex = sin[None, None, :, :].expand(3, bsz, -1, -1)
+
+        # print("position_ids: ", position_ids.max())
+        cos = torch.gather(cos_ex, dim=2, index=position_ids.unsqueeze(-1).expand(-1, -1, -1, dim))
+        sin = torch.gather(sin_ex, dim=2, index=position_ids.unsqueeze(-1).expand(-1, -1, -1, dim))
+
+        mrope_section = self.config.rope_scaling["mrope_section"] * 2
+
+        cos = torch.cat([m[i % 3] for i, m in enumerate(cos.split(mrope_section, dim=-1))], dim=-1).unsqueeze(
+            1
+        )
+        sin = torch.cat([m[i % 3] for i, m in enumerate(sin.split(mrope_section, dim=-1))], dim=-1).unsqueeze(
+            1
+        )
+
+        position_embeddings = (cos, sin)
+
+        # assert
+        # assert torch.allclose(cos, cos_ref)
+        # assert torch.allclose(sin, sin_ref)
+
+        # position_embeddings = (cos, sin)
+        # print("cos_ref: ", cos_ref.shape)
+        # print("sin_ref: ", sin_ref.shape)
+        # print("cos: ", cos.shape)
+        # print("sin: ", sin.shape)
+
+        # print("position_embeddings: ", position_embeddings[0][0])
+        # print(position_embeddings[0][0].shape)
+        # print("posemb: ", posemb[0])
+        # print(posemb[0].shape)
 
         for decoder_layer in self.layers:
             layer_outputs = decoder_layer(
@@ -331,92 +369,11 @@ class Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
         )
-    #
-    # def _update_causal_mask(
-    #         self,
-    #         attention_mask: torch.Tensor,
-    #         input_tensor: torch.Tensor,
-    #         cache_position: torch.Tensor,
-    #         past_key_values: Cache,
-    # ):
-    #
-    #     # For SDPA, when possible, we will rely on its `is_causal` argument instead of its `attn_mask` argument, in
-    #     # order to dispatch on Flash Attention 2. This feature is not compatible with static cache, as SDPA will fail
-    #     # to infer the attention mask.
-    #     past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
-    #
-    #     dtype, device = input_tensor.dtype, input_tensor.device
-    #     sequence_length = input_tensor.shape[1]
-    #     # SlidingWindowCache or StaticCache
-    #
-    #     target_length = (
-    #         attention_mask.shape[-1]
-    #         if isinstance(attention_mask, torch.Tensor)
-    #         else past_seen_tokens + sequence_length + 1
-    #     )
-    #
-    #     # In case the provided `attention` mask is 2D, we generate a causal mask here (4D).
-    #     causal_mask = self._prepare_4d_causal_attention_mask_with_cache_position(
-    #         attention_mask,
-    #         sequence_length=sequence_length,
-    #         target_length=target_length,
-    #         dtype=dtype,
-    #         device=device,
-    #         cache_position=cache_position,
-    #         batch_size=input_tensor.shape[0],
-    #         config=self.config,
-    #         past_key_values=past_key_values,
-    #     )
-    #
-    #     return causal_mask
-    #
-    # @staticmethod
-    # def _prepare_4d_causal_attention_mask_with_cache_position(
-    #         attention_mask: torch.Tensor,
-    #         sequence_length: int,
-    #         target_length: int,
-    #         dtype: torch.dtype,
-    #         device: torch.device,
-    #         cache_position: torch.Tensor,
-    #         batch_size: int,
-    #         config: Qwen2_5_VLConfig,
-    #         past_key_values: Cache,
-    # ):
-    #
-    #     if attention_mask is not None and attention_mask.dim() == 4:
-    #         # In this case we assume that the mask comes already in inverted form and requires no inversion or slicing.
-    #         causal_mask = attention_mask
-    #     else:
-    #         min_dtype = torch.finfo(dtype).min
-    #         causal_mask = torch.full(
-    #             (sequence_length, target_length), fill_value=min_dtype, dtype=dtype, device=device
-    #         )
-    #         diagonal_attend_mask = torch.arange(target_length, device=device) > cache_position.reshape(-1, 1)
-    #
-    #
-    #         causal_mask *= diagonal_attend_mask
-    #         causal_mask = causal_mask[None, None, :, :].expand(batch_size, 1, -1, -1)
-    #         if attention_mask is not None:
-    #             causal_mask = causal_mask.clone()  # copy to contiguous memory for in-place edit
-    #             if attention_mask.shape[-1] > target_length:
-    #                 attention_mask = attention_mask[:, :target_length]
-    #             mask_length = attention_mask.shape[-1]
-    #             padding_mask = causal_mask[:, :, :, :mask_length] + attention_mask[:, None, None, :]
-    #             padding_mask = padding_mask == 0
-    #             causal_mask[:, :, :, :mask_length] = causal_mask[:, :, :, :mask_length].masked_fill(
-    #                 padding_mask, min_dtype
-    #             )
-    #     return causal_mask
 
 
 @dataclass
 class Qwen2_5_VLCausalLMOutputWithPast(ModelOutput):
-    loss: Optional[torch.FloatTensor] = None
     logits: torch.FloatTensor = None
-    past_key_values: Optional[List[torch.FloatTensor]] = None
-    hidden_states: Optional[Tuple[torch.FloatTensor]] = None
-    attentions: Optional[Tuple[torch.FloatTensor]] = None
-    rope_deltas: Optional[torch.LongTensor] = None
 
 
 class Qwen2_5_VLForConditionalGeneration(Qwen2_5_VLPreTrainedModel, GenerationMixin):
@@ -574,12 +531,7 @@ class Qwen2_5_VLForConditionalGeneration(Qwen2_5_VLPreTrainedModel, GenerationMi
         logits = self.lm_head(hidden_states)
 
         return Qwen2_5_VLCausalLMOutputWithPast(
-            loss=None,
-            logits=logits,
-            past_key_values=outputs.past_key_values,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
-            rope_deltas=self.rope_deltas,
+            logits=logits
         )
 
     # def prepare_inputs_for_generation(

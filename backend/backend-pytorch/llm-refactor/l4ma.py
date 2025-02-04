@@ -1,6 +1,8 @@
 # Llama-Like Large Language Model Architecture (L4MA)
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import torch
 from torch import nn
@@ -105,6 +107,111 @@ def proc_mask(mask: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
     float_mask = mask.to(dtype)
 
     return float_mask.masked_fill(mask.to(torch.bool), torch.finfo(dtype).min)
+
+
+def _compute_default_rope_parameters(
+        base: int, dim: int, device: torch.device
+) -> torch.Tensor:
+    # Compute the inverse frequencies
+    inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.int64).float().to(device) / dim))
+    return inv_freq
+
+
+def _compute_llama3_parameters(
+        base: int,
+        dim: int,
+        factor: int,
+        low_freq_factor: int,
+        high_freq_factor: int,
+        old_context_len: int,
+        device: torch.device,
+) -> torch.Tensor:
+    inv_freq = _compute_default_rope_parameters(base, dim, device)
+
+    low_freq_wavelen = old_context_len / low_freq_factor
+    high_freq_wavelen = old_context_len / high_freq_factor
+
+    wavelen = 2 * math.pi / inv_freq
+    # wavelen < high_freq_wavelen: do nothing
+    # wavelen > low_freq_wavelen: divide by factor
+    inv_freq_llama = torch.where(wavelen > low_freq_wavelen, inv_freq / factor, inv_freq)
+    # otherwise: interpolate between the two, using a smooth factor
+    smooth_factor = (old_context_len / wavelen - low_freq_factor) / (high_freq_factor - low_freq_factor)
+    smoothed_inv_freq = (1 - smooth_factor) * inv_freq_llama / factor + smooth_factor * inv_freq_llama
+    is_medium_freq = ~(wavelen < high_freq_wavelen) * ~(wavelen > low_freq_wavelen)
+    inv_freq_llama = torch.where(is_medium_freq, smoothed_inv_freq, inv_freq_llama)
+
+    return inv_freq_llama
+
+
+class L4maRotaryEmbedding(nn.Module):
+    def __init__(self, config, device=None):
+        super().__init__()
+
+        self.dim = config.hidden_size // config.num_attention_heads
+
+        self.max_position_embeddings = config.max_position_embeddings
+        self.base = config.rope_theta
+        # print( config.rope_scaling)
+        if config.rope_scaling is not None and config.rope_scaling["rope_type"] == "llama3":
+            inv_freq = _compute_llama3_parameters(
+                base=self.base,
+                dim=self.dim,
+                factor=config.rope_scaling["factor"],
+                low_freq_factor=config.rope_scaling["low_freq_factor"],
+                high_freq_factor=config.rope_scaling["high_freq_factor"],
+                old_context_len=config.rope_scaling["original_max_position_embeddings"],
+                device=device,
+            )
+
+        else:
+            inv_freq = _compute_default_rope_parameters(self.base, self.dim, device)
+            # inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2).float().to(device) / self.dim))
+
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+        # Build here to make `torch.jit.trace` work.
+        self._set_cos_sin_cache(
+            seq_len=self.max_position_embeddings, device=self.inv_freq.device
+        )
+
+    def _set_cos_sin_cache(self, seq_len, device):
+        self.max_seq_len_cached = seq_len
+        # print(self.max_seq_len_cached, device, self.inv_freq.dtype)
+
+        t = torch.arange(self.max_seq_len_cached, device=device, dtype=torch.float)
+
+        freqs = torch.einsum("i,j->ij", t, self.inv_freq)
+        # Different from paper, but it uses a different permutation in order to obtain the same calculation
+        emb = torch.cat((freqs, freqs), dim=-1)
+        self.register_buffer("cos_cached", emb.cos().float(), persistent=False)
+        self.register_buffer("sin_cached", emb.sin().float(), persistent=False)
+
+    def forward(self, x, seq_len=None):
+        # x: [bs, num_attention_heads, seq_len, head_size]
+        if seq_len > self.max_seq_len_cached:
+            self._set_cos_sin_cache(seq_len=seq_len, device=x.device)
+
+        return (
+            self.cos_cached[:seq_len, ...].to(x.dtype),
+            self.sin_cached[:seq_len, ...].to(x.dtype),
+        )
+
+
+def apply_rotary_pos_emb(q, k, cos, sin):
+
+    # q, k: [bs, num_heads, seq_len, head_dim]
+    # cos, sin: [bs, 1, seq_len, head_dim]
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    return q_embed, k_embed
+
+
+def rotate_half(x):
+    """Rotates half the hidden dims of the input."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2:]
+    return torch.cat((-x2, x1), dim=-1)
 
 
 def get_rope_index(
