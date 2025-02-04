@@ -50,7 +50,7 @@ class L4maMlp(nn.Module):
 
 class L4maAttention(nn.Module):
 
-    def __init__(self, config, layer_idx: int, use_bias: bool = False):
+    def __init__(self, config, layer_idx: int):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
@@ -61,9 +61,9 @@ class L4maAttention(nn.Module):
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
 
-        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=use_bias)
-        self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=use_bias)
-        self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=use_bias)
+        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=config.use_qkv_bias)
+        self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.use_qkv_bias)
+        self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.use_qkv_bias)
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
 
     def forward(
@@ -133,10 +133,10 @@ class L4maAttention(nn.Module):
 
 
 class L4maDecoderLayer(nn.Module):
-    def __init__(self, config, layer_idx: int, use_bias: bool = False):
+    def __init__(self, config, layer_idx: int):
         super().__init__()
         self.hidden_size = config.hidden_size
-        self.self_attn = L4maAttention(config, layer_idx, use_bias=use_bias)
+        self.self_attn = L4maAttention(config, layer_idx)
 
         self.mlp = L4maMlp(config)
         self.input_layernorm = L4maRmsNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -184,7 +184,7 @@ class L4maModel(nn.Module):
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.layers = nn.ModuleList(
-            [L4maDecoderLayer(config, layer_idx, use_bias=True) for layer_idx in range(config.num_hidden_layers)]
+            [L4maDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
         self.norm = L4maRmsNorm(config.hidden_size, eps=config.rms_norm_eps)
 
