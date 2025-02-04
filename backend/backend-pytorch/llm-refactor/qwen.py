@@ -121,12 +121,14 @@ class Qwen2_5_VLAttention(nn.Module):
             self,
             hidden_states: torch.Tensor,
             attention_mask: Optional[torch.Tensor] = None,
-            position_ids: Optional[torch.LongTensor] = None,
-            past_key_value: Optional[Cache] = None,
-            output_attentions: bool = False,
-            use_cache: bool = False,
-            cache_position: Optional[torch.LongTensor] = None,
+            # position_ids: Optional[torch.LongTensor] = None,
+            # past_key_value: Optional[Cache] = None,
+            # output_attentions: bool = False,
+            # use_cache: bool = False,
+            # cache_position: Optional[torch.LongTensor] = None,
             position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
+            buffer: AttentionBuffer | None = None,
+            buffer_sink_ids: list[int] | None = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
 
@@ -143,19 +145,29 @@ class Qwen2_5_VLAttention(nn.Module):
             query_states, key_states, cos, sin, self.rope_scaling["mrope_section"]
         )
 
-        if past_key_value is not None:
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}  # Specific to RoPE models
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+        # print("key_states: ", key_states.shape)
+        # print("value_states: ", value_states.shape)
+
+        if buffer is not None:
+            buffer.sink(self.layer_idx, buffer_sink_ids, key_states, value_states)
+            key_states, value_states = buffer.cache(self.layer_idx, repeat=self.num_key_value_groups)
+
+        # print("akey_states: ", key_states.shape)
+        # print("avalue_states: ", value_states.shape)
+
+        # if past_key_value is not None:
+        #     cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}  # Specific to RoPE models
+        #     key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         # repeat k/v heads if n_kv_heads < n_heads
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
+        # key_states = repeat_kv(key_states, self.num_key_value_groups)
+        # value_states = repeat_kv(value_states, self.num_key_value_groups)
 
         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
         if attention_mask is not None:  # no matter the length, we just slice it
-            causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
-            attn_weights = attn_weights + causal_mask
+            # causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+            attn_weights = attn_weights + attention_mask
 
         # Fix precision issues in Qwen2-VL float16 inference
         # Replace inf values with zeros in attention weights to prevent NaN propagation
@@ -178,10 +190,7 @@ class Qwen2_5_VLAttention(nn.Module):
 
         attn_output = self.o_proj(attn_output)
 
-        if not output_attentions:
-            attn_weights = None
-
-        return attn_output, attn_weights, past_key_value
+        return attn_output
 
 
 class Qwen2_5_VLDecoderLayer(nn.Module):
@@ -199,13 +208,15 @@ class Qwen2_5_VLDecoderLayer(nn.Module):
             self,
             hidden_states: torch.Tensor,
             attention_mask: Optional[torch.Tensor] = None,
-            position_ids: Optional[torch.LongTensor] = None,
-            past_key_value: Optional[Tuple[torch.Tensor]] = None,
-            output_attentions: Optional[bool] = False,
-            use_cache: Optional[bool] = False,
-            cache_position: Optional[torch.LongTensor] = None,
+            # position_ids: Optional[torch.LongTensor] = None,
+            # past_key_value: Optional[Tuple[torch.Tensor]] = None,
+            # output_attentions: Optional[bool] = False,
+            # use_cache: Optional[bool] = False,
+            # cache_position: Optional[torch.LongTensor] = None,
             position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
-            **kwargs,
+            buffer: AttentionBuffer | None = None,
+            buffer_sink_ids: list[int] | None = None,
+            # **kwargs,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         """
         Args:
@@ -234,15 +245,17 @@ class Qwen2_5_VLDecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
-        hidden_states, self_attn_weights, present_key_value = self.self_attn(
+        hidden_states = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_value=past_key_value,
-            output_attentions=output_attentions,
-            use_cache=use_cache,
-            cache_position=cache_position,
+            # position_ids=position_ids,
+            # past_key_value=past_key_value,
+            # output_attentions=output_attentions,
+            # use_cache=use_cache,
+            # cache_position=cache_position,
             position_embeddings=position_embeddings,
+            buffer=buffer,
+            buffer_sink_ids=buffer_sink_ids,
         )
         hidden_states = residual + hidden_states
 
@@ -252,15 +265,7 @@ class Qwen2_5_VLDecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
-        outputs = (hidden_states,)
-
-        if output_attentions:
-            outputs += (self_attn_weights,)
-
-        if use_cache:
-            outputs += (present_key_value,)
-
-        return outputs
+        return hidden_states
 
 
 class Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
@@ -291,131 +296,117 @@ class Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
             inputs_embeds: torch.FloatTensor,
             position_ids: torch.LongTensor,
             attention_mask: torch.Tensor | None,
-            past_key_values: Cache | None,
-            cache_position: torch.LongTensor | None,
+            # past_key_values: Cache | None,
+            # cache_position: torch.LongTensor | None,
 
-            #buffer: AttentionBuffer | None = None,
-            #buffer_sink_ids: list[int] | None = None,
+            buffer: AttentionBuffer | None = None,
+            buffer_sink_ids: list[int] | None = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
-
-        #
-        # causal_mask = self._update_causal_mask(
-        #     attention_mask, inputs_embeds, cache_position, past_key_values, False
-        # )
-
-        if past_key_values is None:
-            past_key_values = DynamicCache()
+        # if past_key_values is None:
+        #     past_key_values = DynamicCache()
 
         attention_mask = proc_mask(attention_mask, inputs_embeds.dtype)
 
         hidden_states = inputs_embeds
 
-
-
         # create position embeddings to be shared across the decoder layers
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
-
-        # decoder layers
-        next_decoder_cache = None
 
         for decoder_layer in self.layers:
             layer_outputs = decoder_layer(
                 hidden_states,
                 attention_mask=attention_mask,
-                position_ids=position_ids,
-                past_key_value=past_key_values,
-                output_attentions=False,
-                use_cache=True,
-                cache_position=cache_position,
+                # position_ids=position_ids,
+                # past_key_value=past_key_values,
+                # cache_position=cache_position,
                 position_embeddings=position_embeddings,
+                buffer=buffer,
+                buffer_sink_ids=buffer_sink_ids,
             )
 
-            hidden_states, next_decoder_cache = layer_outputs
+            hidden_states = layer_outputs
 
         hidden_states = self.norm(hidden_states)
 
-        next_cache = next_decoder_cache
-
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
-            past_key_values=next_cache,
         )
-
-    def _update_causal_mask(
-            self,
-            attention_mask: torch.Tensor,
-            input_tensor: torch.Tensor,
-            cache_position: torch.Tensor,
-            past_key_values: Cache,
-    ):
-
-        # For SDPA, when possible, we will rely on its `is_causal` argument instead of its `attn_mask` argument, in
-        # order to dispatch on Flash Attention 2. This feature is not compatible with static cache, as SDPA will fail
-        # to infer the attention mask.
-        past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
-
-        dtype, device = input_tensor.dtype, input_tensor.device
-        sequence_length = input_tensor.shape[1]
-        # SlidingWindowCache or StaticCache
-
-        target_length = (
-            attention_mask.shape[-1]
-            if isinstance(attention_mask, torch.Tensor)
-            else past_seen_tokens + sequence_length + 1
-        )
-
-        # In case the provided `attention` mask is 2D, we generate a causal mask here (4D).
-        causal_mask = self._prepare_4d_causal_attention_mask_with_cache_position(
-            attention_mask,
-            sequence_length=sequence_length,
-            target_length=target_length,
-            dtype=dtype,
-            device=device,
-            cache_position=cache_position,
-            batch_size=input_tensor.shape[0],
-            config=self.config,
-            past_key_values=past_key_values,
-        )
-
-        return causal_mask
-
-    @staticmethod
-    def _prepare_4d_causal_attention_mask_with_cache_position(
-            attention_mask: torch.Tensor,
-            sequence_length: int,
-            target_length: int,
-            dtype: torch.dtype,
-            device: torch.device,
-            cache_position: torch.Tensor,
-            batch_size: int,
-            config: Qwen2_5_VLConfig,
-            past_key_values: Cache,
-    ):
-
-        if attention_mask is not None and attention_mask.dim() == 4:
-            # In this case we assume that the mask comes already in inverted form and requires no inversion or slicing.
-            causal_mask = attention_mask
-        else:
-            min_dtype = torch.finfo(dtype).min
-            causal_mask = torch.full(
-                (sequence_length, target_length), fill_value=min_dtype, dtype=dtype, device=device
-            )
-            diagonal_attend_mask = torch.arange(target_length, device=device) > cache_position.reshape(-1, 1)
-
-
-            causal_mask *= diagonal_attend_mask
-            causal_mask = causal_mask[None, None, :, :].expand(batch_size, 1, -1, -1)
-            if attention_mask is not None:
-                causal_mask = causal_mask.clone()  # copy to contiguous memory for in-place edit
-                if attention_mask.shape[-1] > target_length:
-                    attention_mask = attention_mask[:, :target_length]
-                mask_length = attention_mask.shape[-1]
-                padding_mask = causal_mask[:, :, :, :mask_length] + attention_mask[:, None, None, :]
-                padding_mask = padding_mask == 0
-                causal_mask[:, :, :, :mask_length] = causal_mask[:, :, :, :mask_length].masked_fill(
-                    padding_mask, min_dtype
-                )
-        return causal_mask
+    #
+    # def _update_causal_mask(
+    #         self,
+    #         attention_mask: torch.Tensor,
+    #         input_tensor: torch.Tensor,
+    #         cache_position: torch.Tensor,
+    #         past_key_values: Cache,
+    # ):
+    #
+    #     # For SDPA, when possible, we will rely on its `is_causal` argument instead of its `attn_mask` argument, in
+    #     # order to dispatch on Flash Attention 2. This feature is not compatible with static cache, as SDPA will fail
+    #     # to infer the attention mask.
+    #     past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+    #
+    #     dtype, device = input_tensor.dtype, input_tensor.device
+    #     sequence_length = input_tensor.shape[1]
+    #     # SlidingWindowCache or StaticCache
+    #
+    #     target_length = (
+    #         attention_mask.shape[-1]
+    #         if isinstance(attention_mask, torch.Tensor)
+    #         else past_seen_tokens + sequence_length + 1
+    #     )
+    #
+    #     # In case the provided `attention` mask is 2D, we generate a causal mask here (4D).
+    #     causal_mask = self._prepare_4d_causal_attention_mask_with_cache_position(
+    #         attention_mask,
+    #         sequence_length=sequence_length,
+    #         target_length=target_length,
+    #         dtype=dtype,
+    #         device=device,
+    #         cache_position=cache_position,
+    #         batch_size=input_tensor.shape[0],
+    #         config=self.config,
+    #         past_key_values=past_key_values,
+    #     )
+    #
+    #     return causal_mask
+    #
+    # @staticmethod
+    # def _prepare_4d_causal_attention_mask_with_cache_position(
+    #         attention_mask: torch.Tensor,
+    #         sequence_length: int,
+    #         target_length: int,
+    #         dtype: torch.dtype,
+    #         device: torch.device,
+    #         cache_position: torch.Tensor,
+    #         batch_size: int,
+    #         config: Qwen2_5_VLConfig,
+    #         past_key_values: Cache,
+    # ):
+    #
+    #     if attention_mask is not None and attention_mask.dim() == 4:
+    #         # In this case we assume that the mask comes already in inverted form and requires no inversion or slicing.
+    #         causal_mask = attention_mask
+    #     else:
+    #         min_dtype = torch.finfo(dtype).min
+    #         causal_mask = torch.full(
+    #             (sequence_length, target_length), fill_value=min_dtype, dtype=dtype, device=device
+    #         )
+    #         diagonal_attend_mask = torch.arange(target_length, device=device) > cache_position.reshape(-1, 1)
+    #
+    #
+    #         causal_mask *= diagonal_attend_mask
+    #         causal_mask = causal_mask[None, None, :, :].expand(batch_size, 1, -1, -1)
+    #         if attention_mask is not None:
+    #             causal_mask = causal_mask.clone()  # copy to contiguous memory for in-place edit
+    #             if attention_mask.shape[-1] > target_length:
+    #                 attention_mask = attention_mask[:, :target_length]
+    #             mask_length = attention_mask.shape[-1]
+    #             padding_mask = causal_mask[:, :, :, :mask_length] + attention_mask[:, None, None, :]
+    #             padding_mask = padding_mask == 0
+    #             causal_mask[:, :, :, :mask_length] = causal_mask[:, :, :, :mask_length].masked_fill(
+    #                 padding_mask, min_dtype
+    #             )
+    #     return causal_mask
 
 
 @dataclass
@@ -472,10 +463,10 @@ class Qwen2_5_VLForConditionalGeneration(Qwen2_5_VLPreTrainedModel, GenerationMi
             image_grid_thw: Optional[torch.LongTensor] = None,
             video_grid_thw: Optional[torch.LongTensor] = None,
             second_per_grid_ts: Optional[torch.Tensor] = None,
-            cache_position: Optional[torch.LongTensor] = None,
-            past_key_values: Optional[List[torch.FloatTensor]] = None,
-            #buffer: AttentionBuffer | None = None,
-            #buffer_sink_ids: list[int] | None = None,
+            # cache_position: Optional[torch.LongTensor] = None,
+            # past_key_values: Optional[List[torch.FloatTensor]] = None,
+            buffer: AttentionBuffer | None = None,
+            buffer_sink_ids: list[int] | None = None,
     ) -> Union[Tuple, Qwen2_5_VLCausalLMOutputWithPast]:
 
         # print all the inputs
@@ -573,10 +564,10 @@ class Qwen2_5_VLForConditionalGeneration(Qwen2_5_VLPreTrainedModel, GenerationMi
             position_ids=position_ids,
             attention_mask=attention_mask,
             inputs_embeds=inputs_embeds,
-            past_key_values=past_key_values,
-            cache_position=cache_position,
-            #buffer=buffer,
-            #buffer_sink_ids=buffer_sink_ids,
+            # past_key_values=past_key_values,
+            # cache_position=cache_position,
+            buffer=buffer,
+            buffer_sink_ids=buffer_sink_ids,
         )
 
         hidden_states = outputs[0]

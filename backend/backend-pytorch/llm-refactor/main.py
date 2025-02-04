@@ -91,6 +91,7 @@ def main(model):
                                               second_per_grid_ts=None
                                               )
 
+
     # print(position_ids)
     pos_offset += num_input_tokens - 1
     for i in range(max_new_tokens):
@@ -116,35 +117,38 @@ def main(model):
 
             aaa = torch.arange(num_input_tokens, device=position_ids.device)
             attention_mask = create_causal_mask(aaa, num_input_tokens)
-
+            buffer_sink_ids = buffer.allocate(num_input_tokens)
             # print(attention_mask)
             output = model(
                 input_ids=inputs.input_ids,
                 position_ids=position_ids,
                 attention_mask=attention_mask,
                 pixel_values=inputs.pixel_values,
-                image_grid_thw=inputs.image_grid_thw
+                image_grid_thw=inputs.image_grid_thw,
+                buffer=buffer,
+                buffer_sink_ids=buffer_sink_ids
             )
             logits = output.logits
-            past_key_values = output.past_key_values
+            #past_key_values = output.past_key_values
 
         else:
 
             position_ids = torch.as_tensor([[pos_offset + i]], device=device)
             aaa = torch.tensor([num_input_tokens + i], device=device)
             attention_mask = create_causal_mask(aaa, num_input_tokens + i)
-            # print(attention_mask)
 
-            # print(pos_offset + i)
+            buffer_sink_ids = buffer.allocate(1)
             output = model(
                 input_ids=torch.as_tensor([[token]], device=device),
                 position_ids=position_ids.view(1, -1).expand(3, 1, 1),
                 attention_mask=attention_mask,
-                past_key_values=past_key_values,
-                cache_position=torch.as_tensor([[i + len(inputs.input_ids[0]) - 1]], device=device),
+                #past_key_values=past_key_values,
+                #cache_position=torch.as_tensor([[i + len(inputs.input_ids[0]) - 1]], device=device),
+                buffer=buffer,
+                buffer_sink_ids=buffer_sink_ids
             )
             logits = output.logits
-            past_key_values = output.past_key_values
+            #past_key_values = output.past_key_values
 
         last_token_logits = logits[0, -1, :]
         token = int(torch.argmax(last_token_logits))
