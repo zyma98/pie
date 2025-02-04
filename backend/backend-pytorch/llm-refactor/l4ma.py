@@ -99,6 +99,14 @@ def get_video_position_ids(offset, patch_t, patch_h, patch_w, time_scale) -> lis
     return output_ids
 
 
+# mask = 1 (true) for tokens that are masked
+# mask = 0 (false) for tokens that are not masked
+def proc_mask(mask: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    float_mask = mask.to(dtype)
+
+    return float_mask.masked_fill(mask.to(torch.bool), torch.finfo(dtype).min)
+
+
 def get_rope_index(
         config,
         input_ids: torch.LongTensor,

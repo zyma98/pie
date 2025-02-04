@@ -21,7 +21,7 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import Qwen2_5_VLCo
 from qwen_vit import Qwen2_5_VisionTransformerPretrainedModel
 
 from common import Qwen2RMSNorm, rotate_half, Qwen2_5_VLPreTrainedModel
-from l4ma import L4maRmsNorm, L4maMlp, AttentionBuffer
+from l4ma import L4maRmsNorm, L4maMlp, AttentionBuffer, proc_mask
 
 
 class Qwen2_5_VLRotaryEmbedding(nn.Module):
@@ -291,35 +291,26 @@ class Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
             inputs_embeds: torch.FloatTensor,
             position_ids: torch.LongTensor,
             attention_mask: torch.Tensor | None,
-            buffer: AttentionBuffer | None = None,
-            buffer_sink_ids: list[int] | None = None,
+            past_key_values: Cache | None,
+            cache_position: torch.LongTensor | None,
+
+            #buffer: AttentionBuffer | None = None,
+            #buffer_sink_ids: list[int] | None = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
 
+        #
+        # causal_mask = self._update_causal_mask(
+        #     attention_mask, inputs_embeds, cache_position, past_key_values, False
+        # )
 
-        # torch.jit.trace() doesn't support cache objects in the output
         if past_key_values is None:
             past_key_values = DynamicCache()
 
-        if inputs_embeds is None:
-            inputs_embeds = self.embed_tokens(input_ids)
-
-        if cache_position is None:
-            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
-            cache_position = torch.arange(
-                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
-            )
-
-        # the hard coded `3` is for temporal, height and width.
-        if position_ids is None:
-            position_ids = cache_position.view(1, 1, -1).expand(3, inputs_embeds.shape[0], -1)
-        elif position_ids.dim() == 2:
-            position_ids = position_ids[None, ...].expand(3, position_ids.shape[0], -1)
-
-        causal_mask = self._update_causal_mask(
-            attention_mask, inputs_embeds, cache_position, past_key_values, False
-        )
+        attention_mask = proc_mask(attention_mask, inputs_embeds.dtype)
 
         hidden_states = inputs_embeds
+
+
 
         # create position embeddings to be shared across the decoder layers
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
@@ -330,7 +321,7 @@ class Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
         for decoder_layer in self.layers:
             layer_outputs = decoder_layer(
                 hidden_states,
-                attention_mask=causal_mask,
+                attention_mask=attention_mask,
                 position_ids=position_ids,
                 past_key_value=past_key_values,
                 output_attentions=False,
@@ -356,29 +347,22 @@ class Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
             input_tensor: torch.Tensor,
             cache_position: torch.Tensor,
             past_key_values: Cache,
-            output_attentions: bool,
     ):
 
         # For SDPA, when possible, we will rely on its `is_causal` argument instead of its `attn_mask` argument, in
         # order to dispatch on Flash Attention 2. This feature is not compatible with static cache, as SDPA will fail
         # to infer the attention mask.
         past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
-        using_static_cache = isinstance(past_key_values, StaticCache)
-        using_sliding_window_cache = isinstance(past_key_values, SlidingWindowCache)
 
         dtype, device = input_tensor.dtype, input_tensor.device
-        min_dtype = torch.finfo(dtype).min
         sequence_length = input_tensor.shape[1]
         # SlidingWindowCache or StaticCache
-        if using_sliding_window_cache or using_static_cache:
-            target_length = past_key_values.get_max_cache_shape()
-        # DynamicCache or no cache
-        else:
-            target_length = (
-                attention_mask.shape[-1]
-                if isinstance(attention_mask, torch.Tensor)
-                else past_seen_tokens + sequence_length + 1
-            )
+
+        target_length = (
+            attention_mask.shape[-1]
+            if isinstance(attention_mask, torch.Tensor)
+            else past_seen_tokens + sequence_length + 1
+        )
 
         # In case the provided `attention` mask is 2D, we generate a causal mask here (4D).
         causal_mask = self._prepare_4d_causal_attention_mask_with_cache_position(
@@ -417,14 +401,8 @@ class Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
                 (sequence_length, target_length), fill_value=min_dtype, dtype=dtype, device=device
             )
             diagonal_attend_mask = torch.arange(target_length, device=device) > cache_position.reshape(-1, 1)
-            if config.sliding_window is not None:
-                # if we have sliding window, we should not attend to tokens beyond sliding window length, so we mask them out also
-                # the check is needed to verify is current checkpoint was trained with sliding window or not
-                if not isinstance(past_key_values, SlidingWindowCache) or sequence_length > target_length:
-                    sliding_attend_mask = torch.arange(target_length, device=device) <= (
-                            cache_position.reshape(-1, 1) - config.sliding_window
-                    )
-                    diagonal_attend_mask.bitwise_or_(sliding_attend_mask)
+
+
             causal_mask *= diagonal_attend_mask
             causal_mask = causal_mask[None, None, :, :].expand(batch_size, 1, -1, -1)
             if attention_mask is not None:
@@ -494,10 +472,10 @@ class Qwen2_5_VLForConditionalGeneration(Qwen2_5_VLPreTrainedModel, GenerationMi
             image_grid_thw: Optional[torch.LongTensor] = None,
             video_grid_thw: Optional[torch.LongTensor] = None,
             second_per_grid_ts: Optional[torch.Tensor] = None,
-            # cache_position: Optional[torch.LongTensor] = None,
-            # past_key_values: Optional[List[torch.FloatTensor]] = None,
-            buffer: AttentionBuffer | None = None,
-            buffer_sink_ids: list[int] | None = None,
+            cache_position: Optional[torch.LongTensor] = None,
+            past_key_values: Optional[List[torch.FloatTensor]] = None,
+            #buffer: AttentionBuffer | None = None,
+            #buffer_sink_ids: list[int] | None = None,
     ) -> Union[Tuple, Qwen2_5_VLCausalLMOutputWithPast]:
 
         # print all the inputs
@@ -595,8 +573,10 @@ class Qwen2_5_VLForConditionalGeneration(Qwen2_5_VLPreTrainedModel, GenerationMi
             position_ids=position_ids,
             attention_mask=attention_mask,
             inputs_embeds=inputs_embeds,
-            buffer=buffer,
-            buffer_sink_ids=buffer_sink_ids,
+            past_key_values=past_key_values,
+            cache_position=cache_position,
+            #buffer=buffer,
+            #buffer_sink_ids=buffer_sink_ids,
         )
 
         hidden_states = outputs[0]

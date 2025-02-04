@@ -6,6 +6,17 @@ from qwen import Qwen2_5_VLForConditionalGeneration
 from l4ma import AttentionBuffer, get_rope_index
 
 
+def create_causal_mask(position_ids, ctx_len):
+    # (batch, num_hd, q_len, head_dim) * (batch, num_hd, head_dim, ctx_len)
+    #  (batch, num_hd, q_len, ctx_len) ->
+
+    attn_mask = position_ids[:, None] < torch.arange(ctx_len, device=position_ids.device)[None, :]
+    attn_mask = attn_mask.unsqueeze(0).unsqueeze(0)
+    # hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+
+    return attn_mask
+
+
 # @torch.inference_mode()
 def main(model):
     # default processor
@@ -72,7 +83,7 @@ def main(model):
     # attention_mask = inputs.attention_mask
     # pixel_values = inputs.pixel_values
     # image_grid_thw = inputs.image_grid_thw
-
+    num_input_tokens = len(inputs.input_ids[0])
     position_ids, pos_offset = get_rope_index(model.config,
                                               input_ids=inputs.input_ids,
                                               image_grid_thw=inputs.image_grid_thw,
@@ -81,7 +92,7 @@ def main(model):
                                               )
 
     # print(position_ids)
-    pos_offset += len(inputs.input_ids[0]) - 1
+    pos_offset += num_input_tokens - 1
     for i in range(max_new_tokens):
 
         # prefill
@@ -103,10 +114,14 @@ def main(model):
             # cache_position: Optional[torch.LongTensor] = None,
             # second_per_grid_ts: Optional[torch.Tensor] = None,
 
+            aaa = torch.arange(num_input_tokens, device=position_ids.device)
+            attention_mask = create_causal_mask(aaa, num_input_tokens)
+
+            # print(attention_mask)
             output = model(
                 input_ids=inputs.input_ids,
                 position_ids=position_ids,
-                attention_mask=inputs.attention_mask,
+                attention_mask=attention_mask,
                 pixel_values=inputs.pixel_values,
                 image_grid_thw=inputs.image_grid_thw
             )
@@ -114,10 +129,17 @@ def main(model):
             past_key_values = output.past_key_values
 
         else:
+
+            position_ids = torch.as_tensor([[pos_offset + i]], device=device)
+            aaa = torch.tensor([num_input_tokens + i], device=device)
+            attention_mask = create_causal_mask(aaa, num_input_tokens + i)
+            # print(attention_mask)
+
             # print(pos_offset + i)
             output = model(
                 input_ids=torch.as_tensor([[token]], device=device),
-                position_ids=torch.as_tensor([[pos_offset + i]], device=device).view(1, -1).expand(3, 1, 1),
+                position_ids=position_ids.view(1, -1).expand(3, 1, 1),
+                attention_mask=attention_mask,
                 past_key_values=past_key_values,
                 cache_position=torch.as_tensor([[i + len(inputs.input_ids[0]) - 1]], device=device),
             )
