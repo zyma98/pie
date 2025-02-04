@@ -43,7 +43,6 @@ class Qwen2_5_VLRotaryEmbedding(nn.Module):
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self.original_inv_freq = self.inv_freq
 
-
     @torch.no_grad()
     def forward(self, x, position_ids):
 
@@ -61,15 +60,14 @@ class Qwen2_5_VLRotaryEmbedding(nn.Module):
             sin = emb.sin()
 
         # Advanced RoPE types (e.g. yarn) apply a post-processing scaling factor, equivalent to scaling attention
-        #cos = cos * self.attention_scaling
-        #sin = sin * self.attention_scaling
+        # cos = cos * self.attention_scaling
+        # sin = sin * self.attention_scaling
 
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
 
 def apply_multimodal_rotary_pos_emb(q, k, cos, sin, mrope_section, unsqueeze_dim=1):
     mrope_section = mrope_section * 2
-
 
     cos = torch.cat([m[i % 3] for i, m in enumerate(cos.split(mrope_section, dim=-1))], dim=-1).unsqueeze(
         unsqueeze_dim
@@ -117,7 +115,7 @@ class Qwen2_5_VLAttention(nn.Module):
         self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=True)
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
 
-        #self.rotary_emb = Qwen2_5_VLRotaryEmbedding(config=config)
+        # self.rotary_emb = Qwen2_5_VLRotaryEmbedding(config=config)
 
     def forward(
             self,
@@ -523,6 +521,13 @@ class Qwen2_5_VLForConditionalGeneration(Qwen2_5_VLPreTrainedModel, GenerationMi
             second_per_grid_ts: Optional[torch.Tensor] = None,
             attention_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+
+        # print("input_ids: ", input_ids)
+        # print("image_grid_thw: ", image_grid_thw)
+        # print("video_grid_thw: ", video_grid_thw)
+        # print("second_per_grid_ts: ", second_per_grid_ts)
+        # print("attention_mask: ", attention_mask)
+
         """
         Calculate the 3D rope index based on image and video's temporal, height and width in LLM.
 
@@ -670,6 +675,8 @@ class Qwen2_5_VLForConditionalGeneration(Qwen2_5_VLPreTrainedModel, GenerationMi
                 position_ids[..., i, attention_mask[i] == 1] = llm_positions.to(position_ids.device)
                 mrope_position_deltas.append(llm_positions.max() + 1 - len(total_input_ids[i]))
             mrope_position_deltas = torch.tensor(mrope_position_deltas, device=input_ids.device).unsqueeze(1)
+            # print(position_ids)
+
             return position_ids, mrope_position_deltas
         else:
             if attention_mask is not None:
@@ -689,7 +696,6 @@ class Qwen2_5_VLForConditionalGeneration(Qwen2_5_VLPreTrainedModel, GenerationMi
                     device=input_ids.device,
                     dtype=input_ids.dtype,
                 )
-
             return position_ids, mrope_position_deltas
 
     def forward(
@@ -789,6 +795,7 @@ class Qwen2_5_VLForConditionalGeneration(Qwen2_5_VLPreTrainedModel, GenerationMi
                     attention_mask,
                 )
                 self.rope_deltas = rope_deltas
+                # print("rope_deltas: ", rope_deltas)
             # then use the prev pre-calculated rope-deltas to get the correct position ids
             else:
                 batch_size, seq_length, _ = inputs_embeds.shape
@@ -797,6 +804,9 @@ class Qwen2_5_VLForConditionalGeneration(Qwen2_5_VLPreTrainedModel, GenerationMi
                     if cache_position is not None
                     else 0
                 )
+                # print("cache_position", cache_position)
+                # print("cache_position[0]", cache_position[0])
+                # print("delta: ", delta)
                 position_ids = torch.arange(seq_length, device=inputs_embeds.device)
                 position_ids = position_ids.view(1, -1).expand(batch_size, -1)
                 if cache_position is not None:  # otherwise `deltas` is an int `0`
@@ -804,6 +814,9 @@ class Qwen2_5_VLForConditionalGeneration(Qwen2_5_VLPreTrainedModel, GenerationMi
                 position_ids = position_ids.add(delta)
                 position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
 
+                # print("position_ids: ", position_ids)
+
+        # print("position_ids: ", position_ids)
         outputs = self.model(
             input_ids=None,
             position_ids=position_ids,

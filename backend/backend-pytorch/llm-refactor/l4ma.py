@@ -1,6 +1,7 @@
 # Llama-Like Large Language Model Architecture (L4MA)
 from __future__ import annotations
 
+import numpy as np
 import torch
 from torch import nn
 from sortedcontainers import SortedList
@@ -69,6 +70,33 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
         return hidden_states
     hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+
+
+def get_image_position_ids(offset: int, patch_h: int, patch_w: int) -> list[tuple[int, int, int]]:
+    output_ids = []
+    for i in range(patch_h * patch_w):
+        output_ids.append((
+            offset,
+            offset + i // patch_w,
+            offset + i % patch_w
+        ))
+    return output_ids
+
+
+def get_video_position_ids(offset, patch_t, patch_h, patch_w, time_scale) -> list[tuple[int, int, int]]:
+    output_ids = []
+
+    for i in range(patch_t * patch_h * patch_w):
+        patch_t_i = i // (patch_h * patch_w)
+        patch_hw_i = i % (patch_h * patch_w)
+
+        output_ids.append((
+            offset + patch_t_i * time_scale,
+            offset + patch_hw_i // patch_w,
+            offset + patch_hw_i % patch_w
+        ))
+
+    return output_ids
 
 
 # token-level attention buffer
