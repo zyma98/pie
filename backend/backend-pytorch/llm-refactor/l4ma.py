@@ -44,6 +44,90 @@ class L4maMlp(nn.Module):
         return down_proj
 
 
+class L4maAttention(nn.Module):
+
+    def __init__(self, config, layer_idx: int, use_bias: bool = False):
+        super().__init__()
+        self.config = config
+        self.layer_idx = layer_idx
+
+        self.hidden_size = config.hidden_size
+        self.num_heads = config.num_attention_heads
+        self.head_dim = self.hidden_size // self.num_heads
+        self.num_key_value_heads = config.num_key_value_heads
+        self.num_key_value_groups = self.num_heads // self.num_key_value_heads
+
+        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=use_bias)
+        self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=use_bias)
+        self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=use_bias)
+        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=use_bias)
+
+    def forward(
+            self,
+            hidden_states: torch.Tensor,
+            position_embeddings: tuple[torch.Tensor, torch.Tensor] | None,
+            attention_mask: torch.Tensor | None = None,
+            buffer: AttentionBuffer | None = None,
+            buffer_sink_ids: list[int] | None = None,
+
+    ) -> torch.Tensor:
+
+        bsz, q_len, _ = hidden_states.size()
+
+        query_states = self.q_proj(hidden_states)
+        key_states = self.k_proj(hidden_states)
+        value_states = self.v_proj(hidden_states)
+
+        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+
+        cos, sin = position_embeddings
+
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+
+        if buffer is not None:
+            buffer.sink(self.layer_idx, buffer_sink_ids, key_states, value_states)
+            key_states, value_states = buffer.cache(self.layer_idx, repeat=self.num_key_value_groups)
+
+        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+        #
+        # if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
+        #     raise ValueError(
+        #         f"Attention weights should be of size {(bsz, self.num_heads, q_len, kv_seq_len)}, but is"
+        #         f" {attn_weights.size()}"
+        #     )
+
+        if attention_mask is not None:
+            # if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
+            #     raise ValueError(
+            #         f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
+            #     )
+            attn_weights = attn_weights + attention_mask
+
+        # Fix precision issues in Qwen2-VL float16 inference
+        # Replace inf values with zeros in attention weights to prevent NaN propagation
+        if query_states.dtype == torch.float16:
+            attn_weights = torch.where(torch.isinf(attn_weights), torch.zeros_like(attn_weights), attn_weights)
+
+        # upcast attention to fp32
+        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        attn_output = torch.matmul(attn_weights, value_states)
+
+        # if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
+        #     raise ValueError(
+        #         f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
+        #         f" {attn_output.size()}"
+        #     )
+
+        attn_output = attn_output.transpose(1, 2).contiguous()
+
+        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
+
+        attn_output = self.o_proj(attn_output)
+        return attn_output
+
+
 def get_relocation_map(free_ids: SortedList, allocated_ids: SortedList) -> tuple[list[int], list[int]]:
     free_ids = list(reversed(free_ids))
     allocated_ids = list(allocated_ids)
@@ -199,7 +283,6 @@ class L4maRotaryEmbedding(nn.Module):
 
 
 def apply_rotary_pos_emb(q, k, cos, sin):
-
     # q, k: [bs, num_heads, seq_len, head_dim]
     # cos, sin: [bs, 1, seq_len, head_dim]
     q_embed = (q * cos) + (rotate_half(q) * sin)
