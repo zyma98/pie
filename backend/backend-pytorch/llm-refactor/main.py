@@ -91,35 +91,17 @@ def main(model):
                                               second_per_grid_ts=None
                                               )
 
-
     # print(position_ids)
     pos_offset += num_input_tokens - 1
     for i in range(max_new_tokens):
 
         # prefill
         if i == 0:
-            # input_ids: torch.LongTensor = None,
-            # attention_mask: Optional[torch.Tensor] = None,
-            # position_ids: Optional[torch.LongTensor] = None,
-            # past_key_values: Optional[List[torch.FloatTensor]] = None,
-            # inputs_embeds: Optional[torch.FloatTensor] = None,
-            # use_cache: Optional[bool] = None,
-            # output_attentions: Optional[bool] = None,
-            # output_hidden_states: Optional[bool] = None,
-            # return_dict: Optional[bool] = None,
-            # pixel_values: Optional[torch.Tensor] = None,
-            # pixel_values_videos: Optional[torch.FloatTensor] = None,
-            # image_grid_thw: Optional[torch.LongTensor] = None,
-            # video_grid_thw: Optional[torch.LongTensor] = None,
-            # rope_deltas: Optional[torch.LongTensor] = None,
-            # cache_position: Optional[torch.LongTensor] = None,
-            # second_per_grid_ts: Optional[torch.Tensor] = None,
 
             aaa = torch.arange(num_input_tokens, device=position_ids.device)
             attention_mask = create_causal_mask(aaa, num_input_tokens)
             buffer_sink_ids = buffer.allocate(num_input_tokens)
-            # print(attention_mask)
-            output = model(
+            logits = model(
                 input_ids=inputs.input_ids,
                 position_ids=position_ids,
                 attention_mask=attention_mask,
@@ -128,8 +110,7 @@ def main(model):
                 buffer=buffer,
                 buffer_sink_ids=buffer_sink_ids
             )
-            logits = output.logits
-            #past_key_values = output.past_key_values
+
 
         else:
 
@@ -138,17 +119,13 @@ def main(model):
             attention_mask = create_causal_mask(aaa, num_input_tokens + i)
 
             buffer_sink_ids = buffer.allocate(1)
-            output = model(
+            logits = model(
                 input_ids=torch.as_tensor([[token]], device=device),
                 position_ids=position_ids.view(1, -1).expand(3, 1, 1),
                 attention_mask=attention_mask,
-                #past_key_values=past_key_values,
-                #cache_position=torch.as_tensor([[i + len(inputs.input_ids[0]) - 1]], device=device),
                 buffer=buffer,
                 buffer_sink_ids=buffer_sink_ids
             )
-            logits = output.logits
-            #past_key_values = output.past_key_values
 
         last_token_logits = logits[0, -1, :]
         token = int(torch.argmax(last_token_logits))
