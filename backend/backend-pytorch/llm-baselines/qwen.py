@@ -1,5 +1,3 @@
-from typing import List, Optional, Tuple, Union
-
 import torch
 import torch.nn as nn
 from transformers import PreTrainedModel
@@ -13,30 +11,30 @@ from l4ma import AttentionBuffer, L4maRotaryEmbedding, L4maModel
 class Qwen2_5_VLForConditionalGeneration(PreTrainedModel):
     config_class = Qwen2_5_VLConfig
 
-    # base_model_prefix = "model"
-
-    # _tied_weights_keys = ["lm_head.weight"]
-    # _no_split_modules = ["Qwen2VLDecoderLayer", "Qwen2_5_VLVisionBlock"]
-
     def __init__(self, config):
+
+        config.use_qkv_bias = True
+
         super().__init__(config)
         self.visual = Qwen2_5_VisionTransformerPretrainedModel._from_config(config.vision_config)
         self.model = L4maModel(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-        self.rotary_emb_new = L4maRotaryEmbedding(config=config)
+        self.rotary_emb = L4maRotaryEmbedding(config=config)
 
     def forward(
             self,
-            input_ids: torch.LongTensor = None,
-            attention_mask: Optional[torch.Tensor] = None,
-            position_ids: Optional[torch.LongTensor] = None,
-            pixel_values: Optional[torch.Tensor] = None,
-            pixel_values_videos: Optional[torch.FloatTensor] = None,
-            image_grid_thw: Optional[torch.LongTensor] = None,
-            video_grid_thw: Optional[torch.LongTensor] = None,
-            buffer: AttentionBuffer | None = None,
-            buffer_sink_ids: list[int] | None = None,
+            input_ids: torch.LongTensor,
+            position_ids: torch.LongTensor,
+            attention_mask: torch.BoolTensor,
+            buffer: AttentionBuffer,
+            buffer_sink_ids: list[int],
+
+            pixel_values: torch.Tensor | None = None,
+            pixel_values_videos: torch.FloatTensor | None = None,
+            image_grid_thw: torch.LongTensor | None = None,
+            video_grid_thw: torch.LongTensor | None = None,
+
     ) -> torch.Tensor:
 
         inputs_embeds = self.model.embed_tokens(input_ids)
@@ -85,7 +83,7 @@ class Qwen2_5_VLForConditionalGeneration(PreTrainedModel):
         # position_embeddings = self.rotary_emb(hidden_states, position_ids)
         # (bsz, dim)
         # cos_ref, sin_ref = position_embeddings
-        cos, sin = self.rotary_emb_new(inputs_embeds, position_ids.max().item() + 1)
+        cos, sin = self.rotary_emb(inputs_embeds, position_ids.max().item() + 1)
 
         dim = cos.shape[-1]
         bsz = inputs_embeds.shape[0]
@@ -111,9 +109,9 @@ class Qwen2_5_VLForConditionalGeneration(PreTrainedModel):
         position_embeddings = (cos, sin)
 
         final_hidden_states = self.model(
+            inputs_embeds=inputs_embeds,
             position_embeds=position_embeddings,
             attention_mask=attention_mask,
-            inputs_embeds=inputs_embeds,
             buffer=buffer,
             buffer_sink_ids=buffer_sink_ids,
         )

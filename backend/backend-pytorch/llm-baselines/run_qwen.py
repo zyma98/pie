@@ -1,5 +1,5 @@
 import torch
-from transformers import AutoProcessor, QuantoConfig, GPTQConfig, TorchAoConfig, AutoTokenizer
+from transformers import AutoProcessor, TorchAoConfig, AutoTokenizer
 from qwen_utils import process_vision_info
 
 from qwen import Qwen2_5_VLForConditionalGeneration
@@ -15,7 +15,7 @@ def create_causal_mask(position_ids, ctx_len):
     # hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
     return attn_mask
-
+ 
 
 # @torch.inference_mode()
 def main(model):
@@ -138,27 +138,12 @@ def main(model):
                                        spaces_between_special_tokens=False, )
         print(output_text)
 
-        ...
-    # print(model.config)
-
-    # Inference: Generation of the output
-    # generated_ids = model.generate(**inputs, max_new_tokens=128)
-    # generated_ids_trimmed = [
-    #     out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-    # ]
-    # output_text = processor.batch_decode(
-    #     generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
-    # )
-    # print(output_text)
-
 
 if __name__ == "__main__":
     # default: Load the model on the available device(s)
     quantization_config = TorchAoConfig("int4_weight_only", group_size=128)
 
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-        "Qwen/Qwen2.5-VL-7B-Instruct", torch_dtype="bfloat16", device_map="cuda:0", quantization_config=quantization_config,
-        attn_implementation="eager"
-    )
+        "Qwen/Qwen2.5-VL-7B-Instruct", torch_dtype="bfloat16", device_map="cuda:0", quantization_config=quantization_config)
 
     main(model)
