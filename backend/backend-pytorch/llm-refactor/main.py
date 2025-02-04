@@ -3,7 +3,7 @@ from transformers import AutoProcessor, QuantoConfig, GPTQConfig, TorchAoConfig,
 from qwen_utils import process_vision_info
 
 from qwen import Qwen2_5_VLForConditionalGeneration
-from l4ma import AttentionBuffer
+from l4ma import AttentionBuffer, get_rope_index
 
 
 # @torch.inference_mode()
@@ -73,6 +73,15 @@ def main(model):
     # pixel_values = inputs.pixel_values
     # image_grid_thw = inputs.image_grid_thw
 
+    position_ids, pos_offset = get_rope_index(model.config,
+                                              input_ids=inputs.input_ids,
+                                              image_grid_thw=inputs.image_grid_thw,
+                                              video_grid_thw=None,
+                                              second_per_grid_ts=None
+                                              )
+
+    # print(position_ids)
+    pos_offset += len(inputs.input_ids[0]) - 1
     for i in range(max_new_tokens):
 
         # prefill
@@ -96,6 +105,7 @@ def main(model):
 
             output = model(
                 input_ids=inputs.input_ids,
+                position_ids=position_ids,
                 attention_mask=inputs.attention_mask,
                 pixel_values=inputs.pixel_values,
                 image_grid_thw=inputs.image_grid_thw
@@ -104,8 +114,10 @@ def main(model):
             past_key_values = output.past_key_values
 
         else:
+            # print(pos_offset + i)
             output = model(
                 input_ids=torch.as_tensor([[token]], device=device),
+                position_ids=torch.as_tensor([[pos_offset + i]], device=device).view(1, -1).expand(3, 1, 1),
                 past_key_values=past_key_values,
                 cache_position=torch.as_tensor([[i + len(inputs.input_ids[0]) - 1]], device=device),
             )
