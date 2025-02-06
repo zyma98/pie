@@ -4,6 +4,7 @@ from enum import Enum
 import numpy as np
 import torch
 
+type InstanceId = bytes
 type BlockId = int
 type BlockPointer = int
 
@@ -12,73 +13,144 @@ class BlockError(Exception):
     ...
 
 
+class InstanceAddrSpace:
+    blocks: dict[BlockId, BlockPointer]
+    id_counter: int
+
+    def __init__(self):
+        self.blocks = {}
+        self.id_counter = 0
+
+    def translate(self, block_id: BlockId) -> BlockPointer:
+        return self.blocks[block_id]
+
+    def map(self, block_ptr: BlockPointer) -> BlockId:
+        # create a new id
+        block_id = self.id_counter
+        self.id_counter += 1
+        self.blocks[block_id] = block_ptr
+
+        return block_id
+
+    def unmap(self, block_id: BlockId):
+        del self.blocks[block_id]
+
+    def block_ids(self) -> list[BlockId]:
+        return list(self.blocks.keys())
+
+
 class BlockManager:
-    addr_space: dict[BlockId, Block]
+    # block manager's job is to keep safe address space and storage per each user
+
+    global_addr_space: dict[BlockPointer, Block]
+    virtual_addr_space: dict[InstanceId, InstanceAddrSpace]
 
     # in the future, we may want to have multiple block storages
     storage: BlockStorage
 
     def __init__(self, storage: BlockStorage):
-        self.addr_space = {}
+        self.global_addr_space = {}
+        self.virtual_addr_space = {}
         self.storage = storage
 
     def num_free_blocks(self) -> int:
         return self.storage.num_free_blocks()
 
-    def get_block(self, block_id: BlockId) -> Block:
-        return self.get_blocks([block_id])[0]
+    ## --- Methods to manage address space ---
+    def create_address_space(self, inst_id: InstanceId):
+        self.virtual_addr_space[inst_id] = InstanceAddrSpace()
 
-    def create_block(self) -> BlockId:
-        return self.create_blocks(1)[0]
+    def destroy_address_space(self, inst_id: InstanceId):
+        for block_id in self.virtual_addr_space[inst_id].block_ids():
+            self.delete_block(inst_id, block_id)
+        del self.virtual_addr_space[inst_id]
 
-    def delete_block(self, block: BlockId):
-        self.delete_blocks([block])
+    ## --------------------------------------------------------
 
-    def copy_tokens(self, src: BlockId, dst: BlockId, src_offset: int, dst_offset: int, size: int):
-        src_block = self.get_block(src)
-        dst_block = self.get_block(dst)
+    ## --- Just helper functions to make the code more readable ----
+
+    def get_block(self, inst_id: InstanceId, block_id: BlockId) -> Block:
+        return self.get_blocks(inst_id, [block_id])[0]
+
+    def create_block(self, inst_id: InstanceId) -> BlockId:
+        return self.create_blocks(inst_id, 1)[0]
+
+    def delete_block(self, inst_id: InstanceId, block: BlockId):
+        self.delete_blocks(inst_id, [block])
+
+    ## --------------------------------------------------------
+
+    def copy_tokens(self, inst_id: InstanceId, src: BlockId, dst: BlockId, src_offset: int, dst_offset: int, size: int):
+        src_block = self.get_block(inst_id, src)
+        dst_block = self.get_block(inst_id, dst)
         self.storage.copy(self.storage, src_block.pointer, dst_block.pointer, src_offset, dst_offset, size)
 
-    def drop_tokens(self, block: BlockId, start: int, end: int):
-        block = self.get_block(block)
+    def drop_tokens(self, inst_id: InstanceId, block: BlockId, start: int, end: int):
+        block = self.get_block(inst_id, block)
         block.drop(start, end)
 
-    def get_blocks(self, block_ids: list[BlockId]) -> list[Block]:
+    ## --- Methods to manage blocks --------------------------------
+
+    def get_blocks(self, inst_id: InstanceId, block_ids: list[BlockId]) -> list[Block]:
+        addr_space = self.virtual_addr_space[inst_id]
+
         blocks = []
+
         for block_id in block_ids:
-            if block_id not in self.addr_space:
-                raise BlockError(f"Block with id {block_id} does not exist")
-            blocks.append(self.addr_space[block_id])
+            b_ptr = addr_space.translate(block_id)
+            blocks.append(self.global_addr_space[b_ptr])
         return blocks
 
-    def create_blocks(self, num_blocks: int) -> list[BlockId]:
+    def create_blocks(self, inst_id: InstanceId, num_blocks: int) -> list[BlockId]:
+
+        addr_space = self.virtual_addr_space[inst_id]
+
         # first, allocate the blocks in the storage
         block_ptrs = self.storage.allocate(num_blocks)
         block_size = self.storage.block_size
 
         # then, create the block objects
-        blocks = []
+        blocks_ids = []
         for block_ptr in block_ptrs:
-            block = Block(block_ptr, BlockLocation.GPU, block_size)
+            self.global_addr_space[block_ptr] = Block(block_ptr, BlockLocation.GPU, block_size)
+            block_id = addr_space.map(block_ptr)
+            blocks_ids.append(block_id)
 
-            self.addr_space[block_ptr] = block
-            blocks.append(block)
+        return blocks_ids
 
-        return block_ptrs
+    def create_linked_blocks(self, inst_id: InstanceId, src_inst_id: InstanceId, src_block_ids: list[BlockId]) -> list[BlockId]:
 
-    def delete_blocks(self, block_ids: list[BlockId]):
+        dst_addr_space = self.virtual_addr_space[inst_id]
+        src_addr_space = self.virtual_addr_space[src_inst_id]
+
+        dst_block_ids = []
+        for src_block_id in src_block_ids:
+            src_block_ptr = src_addr_space.translate(src_block_id)
+            src_block = self.global_addr_space[src_block_ptr]
+            src_block.increase_ref_count()
+
+            dst_block_id = dst_addr_space.map(src_block_ptr)
+            dst_block_ids.append(dst_block_id)
+
+        return dst_block_ids
+
+    def delete_blocks(self, inst_id: InstanceId, block_ids: list[BlockId]):
+
+        addr_space = self.virtual_addr_space[inst_id]
 
         for block_id in block_ids:
 
-            if block_id not in self.addr_space:
-                raise BlockError(f"Block with id {block_id} does not exist")
-
-            block = self.addr_space[block_id]
+            block_ptr = addr_space.translate(block_id)
+            block = self.global_addr_space[block_ptr]
             block.decrease_ref_count()
 
+            addr_space.unmap(block_id)
+
             if block.ref_count <= 0:
-                self.storage.free([block.pointer])
-                del self.addr_space[block_id]
+                self.storage.free([block_ptr])
+                del self.global_addr_space[block_ptr]
+
+    ## --------------------------------------------------------
 
 
 class BlockStorage:
