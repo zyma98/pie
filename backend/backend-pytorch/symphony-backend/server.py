@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Union
 import numpy as np
+import torch
 
 from blocks import BlockManager, BlockStorage, Block, BlockId, BlockPointer
 
@@ -333,6 +334,8 @@ def handle_command(req: Request, state: ServerState) -> tuple[Response | None, b
 
         case (CommandKind.FILL_BLOCK, FillBlockCmd(block_id=block_id, ctx_block_ids=ctx_block_ids, block_mask=block_mask, tokens=embeddings, retain_output_embed=retain_output_embed)):
 
+            # fill the block with the position id and occupancy mask
+
             return None, True
 
         case (CommandKind.FREE_BLOCK, FreeBlockCmd(block_id_offset=offset, count=c)):
@@ -502,12 +505,10 @@ class FillBlockCmdBatcher:
 
                 # get token ids and position ids
                 token_ids = []
-                pos_ids = []
 
                 for b in cmd.embeddings:
                     if isinstance(b, TextToken):
                         token_ids.append(b.token_id)
-                        pos_ids.append(b.position_id)
 
                     elif isinstance(b, ImageToken):
                         # get the image token
@@ -521,7 +522,7 @@ class FillBlockCmdBatcher:
                 # most of the masks will be zeros anyway. so this kinda leverages the sparsity.
 
                 ctx_pos_ids = np.hstack([b.position_ids for b in ctx_blocks])  # int
-                tgt_pos_ids = np.array(pos_ids)
+                tgt_pos_ids = np.array(cmd.block.position_ids)
                 ctx_occupancy = np.hstack([b.occupancy for b in ctx_blocks])  # bool
 
                 # get the full attn mask
@@ -540,12 +541,30 @@ class FillBlockCmdBatcher:
                 cmd_grp.append(len(batched_token_ids) - 1)
 
             cmd_groups.append(cmd_grp)
-        ...
+
+        # create a torch tensor
+        batched_tgt_block_ptrs = torch.as_tensor(batched_tgt_block_ptrs)
+        batched_ctx_block_ptrs = torch.as_tensor(batched_ctx_block_ptrs)
+        batched_token_ids = torch.as_tensor(batched_token_ids)
+        batched_pos_ids = torch.as_tensor(batched_pos_ids)
+        batched_mask = torch.as_tensor(batched_mask)
+
+        cmd_grp_max_size = max(len(g) for g in cmd_groups)
+        cmd_groups = [g + [-1] * (cmd_grp_max_size - len(g)) for g in cmd_groups]
+        cmd_groups = torch.as_tensor(cmd_groups)
+
+        return {
+            "tgt_block_ptrs": batched_tgt_block_ptrs,
+            "ctx_block_ptrs": batched_ctx_block_ptrs,
+            "token_ids": batched_token_ids,
+            "pos_ids": batched_pos_ids,
+            "mask": batched_mask,
+            "cmd_groups": cmd_groups
+        }
 
     def clear(self):
         self.queue.clear()
         self.redundancy_check.clear()
-        ...
 
 
 class CreateImageTokensCmdBatcher:
