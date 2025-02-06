@@ -8,22 +8,22 @@ import numpy as np
 from blocks import BlockManager, BlockStorage, Block, BlockId
 
 
-class TextTokenEmbedding:
+class TextToken:
     token_id: int
     position_id: int
 
 
-class ImageTokenEmbedding:
+class ImageToken:
     image_url: str  # the url is used as an identifier
     position_id: tuple[int, int, int]
 
 
-class VideoTokenEmbedding:
+class VideoToken:
     video_url: str  # the url is used as an identifier
     position_id: tuple[int, int, int]
 
 
-TokenEmbedding = Union[TextTokenEmbedding, ImageTokenEmbedding]
+Token = Union[TextToken, ImageToken, VideoToken]
 
 
 # =============================================================================
@@ -38,12 +38,12 @@ class CommandKind(StrEnum):
     AVAILABLE_BLOCKS = "AvailableBlocks"
 
     # Token-level operations
-    COPY_TOKENS = "Copy"
-    DROP = "Drop"
+    COPY_TOKENS = "CopyTokens"
+    DROP_TOKENS = "DropTokens"
 
     # Embedding-level operations
-    EMBED_IMAGE = "EmbedImage"
-    EMBED_VIDEO = "EmbedVideo"
+    CREATE_IMAGE_TOKENS = "CreateImageTokens"
+    CREATE_VIDEO_TOKENS = "CreateVideoTokens"
 
     # Add more if needed
 
@@ -58,11 +58,11 @@ class FillBlockCmd:
     block_ids: list[int]
     ctx_block_ids: list[int]
     block_mask: list[list[bool]]  # 2d array of bools
-    embeddings: list[TokenEmbedding]
+    embeddings: list[Token]
 
 
 @dataclass
-class CopyCmd:
+class CopyTokensCmd:
     src_block_id: int
     dst_block_id: int
     src_offset: int
@@ -71,7 +71,7 @@ class CopyCmd:
 
 
 @dataclass
-class DropCmd:
+class DropTokensCmd:
     block_id: int
     offset: int
     size: int
@@ -89,12 +89,12 @@ class AvailableBlocksCmd:
 
 
 @dataclass
-class EmbedImageCmd:
+class CreateImageTokensCmd:
     image_url: str
 
 
 @dataclass
-class EmbedVideoCmd:
+class CreateVideoTokensCmd:
     video_url: str
 
 
@@ -103,10 +103,10 @@ CommandPayload = Union[
     FillBlockCmd,
     FreeBlockCmd,
     AvailableBlocksCmd,
-    CopyCmd,
-    DropCmd,
-    EmbedImageCmd,
-    EmbedVideoCmd
+    CopyTokensCmd,
+    DropTokensCmd,
+    CreateImageTokensCmd,
+    CreateVideoTokensCmd
 ]
 
 
@@ -172,7 +172,6 @@ class ServerState:
     block_manager: BlockManager
 
     def __init__(self, block_storage: BlockStorage):
-
         self.block_manager = BlockManager(block_storage)
 
     def allocate_blocks(self, num_blocks: int) -> list[BlockId]:
@@ -188,11 +187,11 @@ class ServerState:
     def free_blocks_range(self, offset: BlockId, count: int):
         self.block_manager.delete_blocks(list(range(offset, offset + count)))
 
-    def copy_block(self, src_block_id: BlockId, dst_block_id: BlockId, src_offset:int, dst_offset:int, size:int):
-        self.block_manager.copy_block(src_block_id, dst_block_id, src_offset, dst_offset, size)
+    def copy_tokens(self, src_block_id: BlockId, dst_block_id: BlockId, src_offset: int, dst_offset: int, size: int):
+        self.block_manager.copy_tokens(src_block_id, dst_block_id, src_offset, dst_offset, size)
 
-    def drop_block(self, block_id: int, offset: int, size: int):
-        self.block_manager.drop_block
+    def drop_tokens(self, block_id: BlockId, offset: int, size: int):
+        self.block_manager.drop_tokens(block_id, offset, size)
 
 
 def parse_incoming_message(msg: list) -> Request:
@@ -224,23 +223,27 @@ def parse_incoming_message(msg: list) -> Request:
 
     # In a typical scenario, parameters is a list. We'll match on (kind, parameters).
     match kind, parameters:
-        case (CommandKind.ALLOCATE_BLOCKS, [int(num_blocks)]):
-            payload = AllocateBlocksCmd(num_blocks=num_blocks)
-        case (CommandKind.ALLOCATE_BLOCK, []):
-            payload = AllocateBlockCmd()
-        case (CommandKind.COPY, [int(src), int(dst), int(src_start), int(dst_start), int(length)]):
-            payload = CopyCmd(
-                src_block_id=src, dst_block_id=dst,
-                src_start=src_start, dst_start=dst_start, length=length
-            )
-        case (CommandKind.DROP, [int(block_id), int(start), int(end)]):
-            payload = DropCmd(block_id=block_id, start=start, end=end)
-        case (CommandKind.FREE_BLOCK, [int(block_id)]):
-            payload = FreeBlockCmd(block_id=block_id)
-        case (CommandKind.FREE_BLOCKS, [int(offset), int(count)]):
-            payload = FreeBlocksCmd(block_id_offset=offset, count=count)
+        case (CommandKind.ALLOCATE_BLOCK, [num_blocks]):
+            payload = AllocateBlockCmd(num_blocks=num_blocks)
+
+        case (CommandKind.FREE_BLOCK, [offset, count]):
+            payload = FreeBlockCmd(block_id_offset=offset, count=count)
+
+        case (CommandKind.FILL_BLOCK, [block_ids, ctx_block_ids, block_mask, embeddings]):
+            payload = FillBlockCmd(block_ids=block_ids, ctx_block_ids=ctx_block_ids, block_mask=block_mask, embeddings=embeddings)
+
         case (CommandKind.AVAILABLE_BLOCKS, []):
             payload = AvailableBlocksCmd()
+
+        case (CommandKind.COPY_TOKENS, [src, dst, src_offset, dst_offset, size]):
+            payload = CopyTokensCmd(
+                src_block_id=src, dst_block_id=dst,
+                src_offset=src_offset, dst_offset=dst_offset, size=size
+            )
+
+        case (CommandKind.DROP_TOKENS, [block_id, offset, size]):
+            payload = DropTokensCmd(block_id=block_id, offset=offset, size=size)
+
         case _:
             raise ValueError(f"Invalid parameters for command: {cmd_str}")
 
@@ -299,7 +302,7 @@ def handle_command(req: Request, state: ServerState) -> Optional[Response]:
             return None
 
         case (CommandKind.DROP, DropCmd(block_id=b, start=_, end=_)):
-            state.drop_block(b)
+            state.drop_tokens(b)
             return None
 
         case _:

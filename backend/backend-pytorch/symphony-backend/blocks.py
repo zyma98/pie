@@ -34,10 +34,14 @@ class BlockManager:
     def delete_block(self, block: BlockId):
         self.delete_blocks([block])
 
-    def copy_block(self, src: BlockId, dst: BlockId, src_offset: int, dst_offset: int, size: int):
+    def copy_tokens(self, src: BlockId, dst: BlockId, src_offset: int, dst_offset: int, size: int):
         src_block = self.get_block(src)
         dst_block = self.get_block(dst)
         self.storage.copy(self.storage, src_block.pointer, dst_block.pointer, src_offset, dst_offset, size)
+
+    def drop_tokens(self, block: BlockId, start: int, end: int):
+        block = self.get_block(block)
+        block.drop(start, end)
 
     def get_blocks(self, block_ids: list[BlockId]) -> list[Block]:
         blocks = []
@@ -50,11 +54,13 @@ class BlockManager:
     def create_blocks(self, num_blocks: int) -> list[BlockId]:
         # first, allocate the blocks in the storage
         block_ptrs = self.storage.allocate(num_blocks)
+        block_size = self.storage.block_size
 
         # then, create the block objects
         blocks = []
         for block_ptr in block_ptrs:
-            block = Block(block_ptr, BlockLocation.GPU)
+            block = Block(block_ptr, BlockLocation.GPU, block_size)
+
             self.addr_space[block_ptr] = block
             blocks.append(block)
 
@@ -166,12 +172,16 @@ class Block:
     _ref_count: int
     _last_used: int
 
-    def __init__(self, ptr: BlockPointer, location: BlockLocation):
+    def __init__(self, ptr: BlockPointer, location: BlockLocation, block_size: int):
         self._pointer = ptr
         self._location = location
-        self._position_indices = []
-        self._occupancy = []
+        self._position_indices = [0] * block_size
+        self._occupancy = [False] * block_size
         self.increase_ref_count()
+
+    def drop(self, start: int, end: int):
+        for i in range(start, end):
+            self._occupancy[i] = False
 
     @property
     def pointer(self):
