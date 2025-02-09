@@ -8,7 +8,7 @@ from typing import Union
 import numpy as np
 import torch
 
-from blocks import KvBlockManager, BlockStorage, KvBlock, Address, Address, EmbeddingManager, EmbeddingStorage
+from blocks import KvBlockManager, BlockStorage, KvBlock, Address, Address, EmbeddingManager, EmbeddingStorage, KvBlockStorage
 
 type InstanceId = bytes
 
@@ -21,13 +21,13 @@ class TextToken:
 
 @dataclass
 class ImageToken:
-    image_url: str  # the url is used as an identifier
+    embed_addr: Address
     position_id: tuple[int, int, int]
 
 
 @dataclass
 class VideoToken:
-    video_url: str  # the url is used as an identifier
+    embed_addr: Address
     position_id: tuple[int, int, int]
 
 
@@ -40,43 +40,120 @@ Token = Union[TextToken, ImageToken, VideoToken]
 
 class CommandKind(StrEnum):
     # Block-level operations
-    ALLOCATE_BLOCK = "AllocateBlock"
-    FILL_BLOCK = "FillBlock"
-    FREE_BLOCK = "FreeBlock"
-    AVAILABLE_BLOCKS = "AvailableBlocks"
+    ALLOCATE_KV_BLOCKS = "AllocateKvBlocks"
+    DEALLOCATE_KV_BLOCKS = "FreeKvBlocks"
+    AVAILABLE_KV_BLOCKS = "AvailableKvBlocks"
 
     # Token-level operations
-    COPY_TOKENS = "CopyTokens"
-    DROP_TOKENS = "DropTokens"
+    COPY_KV_BLOCK = "CopyTokens"
+    MASK_KV_BLOCK = "DropTokens"
+    FILL_KV_BLOCK = "FillKvBlock"
 
-    # Embedding-level operations
-    CREATE_IMAGE_TOKENS = "CreateImageTokens"
-    CREATE_VIDEO_TOKENS = "CreateVideoTokens"
+    # Embedding vector operations (input/output)
+    ALLOCATE_TOKEN_EMBEDS = "AllocateTokenEmbeds"
+    DEALLOCATE_TOKEN_EMBEDS = "DeallocateTokenEmbeds"
+    AVAILABLE_TOKEN_EMBEDS = "AvailableTokenEmbeds"
 
-    # C
+    #  Input embedding operations
+    EMBED_IMAGE = "EmbedImage"
+    EMBED_VIDEO = "EmbedVideo"
+
+    # Output embedding operations
     GET_NEXT_TOKEN_DIST = "GetNextTokenDist"
     GET_FEATURE_VECTOR = "GetFeatureVector"
+    DECODE = "Decode"
 
     # Add more if needed
 
 
+######## BLOCK ALLOC/DEALLOC ########
+
 @dataclass
-class AllocateBlockCmd:
+class AllocateKvBlocksCmd:
     num_blocks: int
 
 
 @dataclass
-class FillBlockCmd:
-    block_id: int
-    ctx_block_ids: list[int]
-    block_mask: list[bool]
-    tokens: list[Token]
-    retain_output_embed: bool
+class FreeKvBlocksCmd:
+    addr_offset: int
+    count: int
+
+
+@dataclass
+class AvailableKvBlocksCmd:
+    pass
+
+
+######## BLOCK CTRL ########
+
+@dataclass
+class FillKvBlockCmd:
+    addr: Address
+    ctx_addrs: list[Address]
+    mask: list[bool]
+
+    input_embeds: list[Token]
+    output_embeds: list[Address]
+    output_embed_offset: int
+
+
+@dataclass
+class CopyKvBlockCmd:
+    src_addr: int
+    dst_addr: int
+    src_offset: int
+    dst_offset: int
+    size: int
+
+
+@dataclass
+class MaskKvBlockCmd:
+    addr: int
+    offset: int
+    size: int
+
+
+######## BLOCK ALLOC/DEALLOC ########
+
+@dataclass
+class AllocateTokenEmbedsCmd:
+    num_embeds: int
+
+
+@dataclass
+class DeallocateTokenEmbedsCmd:
+    addr_offset: int
+    count: int
+
+
+@dataclass
+class AvailableTokenEmbedsCmd:
+    ...
+
+
+#### INPUT EMBEDDING ####
+
+@dataclass
+class EmbedImageCmd:
+    image_url: str
+
+
+@dataclass
+class EmbedVideoCmd:
+    video_url: str
+
+
+#### OUTPUT EMBEDDING ####
+
+
+@dataclass
+class DecodeCmd:
+    ...
 
 
 @dataclass
 class GetNextTokenDistCmd:
-    block_id: int
+    addr: int
     offset: int
     size: int
     drop_output_embed: bool
@@ -84,58 +161,21 @@ class GetNextTokenDistCmd:
 
 @dataclass
 class GetFeatureVectorCmd:
-    block_id: int
+    addr: int
     offset: int
     size: int
     drop_output_embed: bool
 
 
-@dataclass
-class CopyTokensCmd:
-    src_block_id: int
-    dst_block_id: int
-    src_offset: int
-    dst_offset: int
-    size: int
-
-
-@dataclass
-class DropTokensCmd:
-    block_id: int
-    offset: int
-    size: int
-
-
-@dataclass
-class FreeBlockCmd:
-    block_id_offset: int
-    count: int
-
-
-@dataclass
-class AvailableBlocksCmd:
-    pass
-
-
-@dataclass
-class CreateImageTokensCmd:
-    image_url: str
-
-
-@dataclass
-class CreateVideoTokensCmd:
-    video_url: str
-
-
 CommandPayload = Union[
-    AllocateBlockCmd,
-    FillBlockCmd,
-    FreeBlockCmd,
-    AvailableBlocksCmd,
-    CopyTokensCmd,
-    DropTokensCmd,
-    CreateImageTokensCmd,
-    CreateVideoTokensCmd
+    AllocateKvBlocksCmd,
+    FillKvBlockCmd,
+    FreeKvBlocksCmd,
+    AvailableKvBlocksCmd,
+    CopyKvBlockCmd,
+    MaskKvBlockCmd,
+    EmbedImageCmd,
+    EmbedVideoCmd
 ]
 
 
@@ -192,11 +232,9 @@ class Response:
     payload: ResponsePayload
 
 
-
-
 # Any reusable states, blocks and embeddings
 class Resource:
-    name:str
+    name: str
 
     # ones that are not in the list are denied
     access_control: list[str]
@@ -207,7 +245,6 @@ class Resource:
 
 
 class ServerState:
-
     # resource name resolution.
 
     # public resources should be visible to the users.
@@ -222,13 +259,16 @@ class ServerState:
     fill_cmd_batcher: FillBlockCmdBatcher
     img_cmd_batcher: CreateImageTokensCmdBatcher
 
-    def __init__(self, block_storage: BlockStorage, embedding_storage: EmbeddingStorage):
+    def __init__(self, block_storage: KvBlockStorage, embedding_storage: EmbeddingStorage):
         self.block_manager = KvBlockManager(block_storage)
 
         # input and output managers actually share the same physical storage
         self.input_manager = EmbeddingManager(embedding_storage)
         self.output_manager = EmbeddingManager(embedding_storage)
+
+        # command batchers
         self.fill_cmd_batcher = FillBlockCmdBatcher()
+        self.img_cmd_batcher = CreateImageTokensCmdBatcher()
 
     def allocate_blocks(self, inst_id: InstanceId, num_blocks: int) -> list[Address]:
         new_block_ids = self.block_manager.allocate_blocks(inst_id, num_blocks)
@@ -293,38 +333,38 @@ def parse_incoming_message(msg: list) -> Request:
 
     # In a typical scenario, parameters is a list. We'll match on (kind, parameters).
     match kind, parameters:
-        case (CommandKind.ALLOCATE_BLOCK, [num_blocks]):
-            payload = AllocateBlockCmd(num_blocks=num_blocks)
+        case (CommandKind.ALLOCATE_KV_BLOCKS, [num_blocks]):
+            payload = AllocateKvBlocksCmd(num_blocks=num_blocks)
 
-        case (CommandKind.FREE_BLOCK, [offset, count]):
-            payload = FreeBlockCmd(block_id_offset=offset, count=count)
+        case (CommandKind.DEALLOCATE_KV_BLOCKS, [offset, count]):
+            payload = FreeKvBlocksCmd(addr_offset=offset, count=count)
 
-        case (CommandKind.FILL_BLOCK, [block_id, ctx_block_ids, block_mask, embeddings, retain_output_embed]):
-            payload = FillBlockCmd(block_id=block_id, ctx_block_ids=ctx_block_ids, block_mask=block_mask, tokens=embeddings, retain_output_embed=retain_output_embed)
+        case (CommandKind.FILL_KV_BLOCK, [block_id, ctx_block_ids, block_mask, embeddings, retain_output_embed]):
+            payload = FillKvBlockCmd(addr=block_id, ctx_addrs=ctx_block_ids, mask=block_mask, tokens=embeddings, retain_output_embed=retain_output_embed)
 
-        case (CommandKind.AVAILABLE_BLOCKS, []):
-            payload = AvailableBlocksCmd()
+        case (CommandKind.AVAILABLE_KV_BLOCKS, []):
+            payload = AvailableKvBlocksCmd()
 
         case (CommandKind.COPY_TOKENS, [src, dst, src_offset, dst_offset, size]):
-            payload = CopyTokensCmd(
-                src_block_id=src, dst_block_id=dst,
+            payload = CopyKvBlockCmd(
+                src_addr=src, dst_addr=dst,
                 src_offset=src_offset, dst_offset=dst_offset, size=size
             )
 
-        case (CommandKind.DROP_TOKENS, [block_id, offset, size]):
-            payload = DropTokensCmd(block_id=block_id, offset=offset, size=size)
+        case (CommandKind.MASK_KV_BLOCK, [block_id, offset, size]):
+            payload = MaskKvBlockCmd(addr=block_id, offset=offset, size=size)
 
-        case (CommandKind.CREATE_IMAGE_TOKENS, [image_url]):
-            payload = CreateImageTokensCmd(image_url=image_url)
+        case (CommandKind.EMBED_IMAGE, [image_url]):
+            payload = EmbedImageCmd(image_url=image_url)
 
-        case (CommandKind.CREATE_VIDEO_TOKENS, [video_url]):
-            payload = CreateVideoTokensCmd(video_url=video_url)
+        case (CommandKind.EMBED_VIDEO, [video_url]):
+            payload = EmbedVideoCmd(video_url=video_url)
 
         case (CommandKind.GET_NEXT_TOKEN_DIST, [block_id, offset, size, drop_output_embed]):
-            payload = GetNextTokenDistCmd(block_id=block_id, offset=offset, size=size, drop_output_embed=drop_output_embed)
+            payload = GetNextTokenDistCmd(addr=block_id, offset=offset, size=size, drop_output_embed=drop_output_embed)
 
         case (CommandKind.GET_FEATURE_VECTOR, [block_id, offset, size, drop_output_embed]):
-            payload = GetFeatureVectorCmd(block_id=block_id, offset=offset, size=size, drop_output_embed=drop_output_embed)
+            payload = GetFeatureVectorCmd(addr=block_id, offset=offset, size=size, drop_output_embed=drop_output_embed)
 
         case _:
             raise ValueError(f"Invalid parameters for command: {cmd_str}")
@@ -351,7 +391,7 @@ def handle_command(state: ServerState, req: Request) -> tuple[Response | None, b
     # this function may DENY the request if the command is not ready to be processed.
 
     match req.kind, req.payload:
-        case (CommandKind.ALLOCATE_BLOCK, AllocateBlockCmd(num_blocks)):
+        case (CommandKind.ALLOCATE_KV_BLOCKS, AllocateKvBlocksCmd(num_blocks)):
             allocated_ids = state.allocate_blocks(num_blocks)
             if not allocated_ids:
                 raise ValueError("Allocation returned empty")
@@ -363,7 +403,7 @@ def handle_command(state: ServerState, req: Request) -> tuple[Response | None, b
                 payload=AllocatedBlocksResp(block_id_offset=offset, count=count)
             ), True
 
-        case (CommandKind.FILL_BLOCK, FillBlockCmd(block_id=block_id, ctx_block_ids=ctx_block_ids, block_mask=block_mask, tokens=embeddings, retain_output_embed=retain_output_embed)):
+        case (CommandKind.FILL_KV_BLOCK, FillKvBlockCmd(addr=block_id, ctx_addrs=ctx_block_ids, mask=block_mask, tokens=embeddings, retain_output_embed=retain_output_embed)):
 
             # inspect the embedding to see if they are ready. if not, return None, False
             for b in embeddings:
@@ -390,11 +430,11 @@ def handle_command(state: ServerState, req: Request) -> tuple[Response | None, b
 
             return None, True
 
-        case (CommandKind.FREE_BLOCK, FreeBlockCmd(block_id_offset=offset, count=c)):
+        case (CommandKind.DEALLOCATE_KV_BLOCKS, FreeKvBlocksCmd(addr_offset=offset, count=c)):
             state.free_blocks(req.instance_id, offset, c)
             return None, True
 
-        case (CommandKind.AVAILABLE_BLOCKS, AvailableBlocksCmd()):
+        case (CommandKind.AVAILABLE_KV_BLOCKS, AvailableKvBlocksCmd()):
             available = state.available_blocks()
             return Response(
                 instance_id=req.instance_id,
@@ -402,24 +442,24 @@ def handle_command(state: ServerState, req: Request) -> tuple[Response | None, b
                 payload=AvailableCountResp(count=available)
             ), True
 
-        case (CommandKind.COPY_TOKENS, CopyTokensCmd(src_block_id=src, dst_block_id=dst, src_offset=src_offset, dst_offset=dst_offset, size=size)):
+        case (CommandKind.COPY_TOKENS, CopyKvBlockCmd(src_addr=src, dst_addr=dst, src_offset=src_offset, dst_offset=dst_offset, size=size)):
             state.copy_tokens(req.instance_id, src, dst, src_offset, dst_offset, size)
             return None, True
 
-        case (CommandKind.DROP_TOKENS, DropTokensCmd(block_id=b, offset=offset, size=size)):
+        case (CommandKind.MASK_KV_BLOCK, MaskKvBlockCmd(addr=b, offset=offset, size=size)):
             state.drop_tokens(req.instance_id, b, offset, size)
             return None, True
 
-        case (CommandKind.CREATE_IMAGE_TOKENS, CreateImageTokensCmd(image_url=url)):
+        case (CommandKind.EMBED_IMAGE, EmbedImageCmd(image_url=url)):
             return None, True
 
-        case (CommandKind.CREATE_VIDEO_TOKENS, CreateVideoTokensCmd(video_url=url)):
+        case (CommandKind.EMBED_VIDEO, EmbedVideoCmd(video_url=url)):
             return None, True
 
-        case (CommandKind.GET_NEXT_TOKEN_DIST, GetNextTokenDistCmd(block_id=b, offset=offset, size=size, drop_output_embed=drop_output_embed)):
+        case (CommandKind.GET_NEXT_TOKEN_DIST, GetNextTokenDistCmd(addr=b, offset=offset, size=size, drop_output_embed=drop_output_embed)):
             return None, True
 
-        case (CommandKind.GET_FEATURE_VECTOR, GetFeatureVectorCmd(block_id=b, offset=offset, size=size, drop_output_embed=drop_output_embed)):
+        case (CommandKind.GET_FEATURE_VECTOR, GetFeatureVectorCmd(addr=b, offset=offset, size=size, drop_output_embed=drop_output_embed)):
             return None, True
 
         case _:
