@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import abc
 import time
-from enum import Enum
-from typing import Type
+from itertools import count
 
 import numpy as np
 import torch
@@ -12,9 +11,6 @@ type InstanceId = bytes
 
 type Address = int
 type BlockPointer = int
-
-type KvBlockId = Address
-from itertools import count
 
 
 class BlockError(Exception):
@@ -317,9 +313,6 @@ class KvBlockManager(BlockManager[KvBlock, KvBlockStorage]):
 ## ------------------------------------------------------------------------------------------------------------------------------
 
 
-type TokenEmbeddingPointer = int
-
-
 # Token-level Embedding. This can be either input embedding out output embedding.
 
 class Embedding(Block):
@@ -328,68 +321,37 @@ class Embedding(Block):
         super().__init__(ptr)
 
 
-class EmbeddingManager:
-    storage: EmbeddingStorage
-
-    def __init__(self, storage: EmbeddingStorage):
-        self.storage = storage
-
-    # some stubs
-
-    def is_ready(self, inst_id: InstanceId, url: str) -> bool:
-        ...
-
-
-class EmbeddingStorage:
+class EmbeddingStorage(BlockStorage):
     ptr: torch.Tensor
+
+    block_dim: int
+
     device: torch.device
-
-    addr_map: dict[TokenEmbeddingPointer, int]
-    index: np.ndarray
-
-    num_layers: int
+    dtype: torch.dtype
 
     def __init__(self,
                  max_capacity: int,
                  block_dim: int,
                  device: torch.device,
                  dtype=torch.bfloat16):
+        super().__init__(max_capacity)
 
-        self.max_capacity = max_capacity
+        self.block_dim = block_dim
+
         self.device = device
-        self.addr_map = {}
-        self.index = np.ones((max_capacity,), dtype=np.bool_)
+        self.dtype = dtype
 
         self.ptr = torch.empty((max_capacity, block_dim), device=device, dtype=dtype)
 
-    def allocate(self, num_tokens: int) -> list[TokenEmbeddingPointer]:
-
-        if self.num_free_tokens() == 0:
-            raise BlockError("No free blocks available")
-
-        allocated = []
-        for i in range(self.max_capacity):
-
-            if len(allocated) == num_tokens:
-                break
-
-            if self.index[i]:
-                allocated.append(i)
-
-        if len(allocated) < num_tokens:
-            raise BlockError(f"Not enough free tokens available. Requested: {num_tokens}, Available: {len(allocated)}")
-
-        for te_ptr in allocated:
-            self.index[te_ptr] = False
-
-        return allocated
-
-    def free(self, te_ptrs: list[TokenEmbeddingPointer]):
-        for te_ptr in te_ptrs:
-            self.index[te_ptr] = True
-
-    def num_free_tokens(self) -> int:
-        return self.index.sum()
-
     def num_bytes(self) -> int:
         return sum([ptr.numel() * ptr.element_size() for ptr in self.ptr])
+
+
+class EmbeddingManager(BlockManager[Embedding, EmbeddingStorage]):
+
+    def __init__(self, storage: EmbeddingStorage):
+        super().__init__(storage)
+
+    def create_block(self, ptr: BlockPointer) -> Embedding:
+        emb = Embedding(ptr)
+        return emb
