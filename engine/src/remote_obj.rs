@@ -1,17 +1,13 @@
-use std::collections::BTreeSet;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::hash::Hash;
-use std::slice;
 use std::sync::atomic::{AtomicIsize, Ordering};
 
 use num_traits::PrimInt;
-use rmp_serde::decode::Reference;
-use std::time::{Duration, Instant};
+
 use uuid::Uuid;
 
 pub type InstanceId = Uuid;
 pub type Addr = usize;
-pub type BlockPtr = usize;
 
 // ------------------------------------------------------------
 
@@ -58,7 +54,7 @@ pub trait RemoteObjManager<T: RemoteObj, S: RemoteObjStorage> {
         Ok(())
     }
 
-    fn destroy_instance(&mut self, inst_id: InstanceId) -> Result<(), BlockError> {
+    fn destroy_instance(&mut self, inst_id: &InstanceId) -> Result<(), BlockError> {
         // Collect the keys into a Vec, which drops the borrow on `self` after collection.
         let addrs: Vec<_> = self
             .addr_maps()
@@ -79,7 +75,7 @@ pub trait RemoteObjManager<T: RemoteObj, S: RemoteObjStorage> {
         Ok(())
     }
 
-    fn alloc(&mut self, inst_id: InstanceId) -> Result<Addr, BlockError> {
+    fn alloc(&mut self, inst_id: &InstanceId) -> Result<Addr, BlockError> {
         let new_g_addr = self.storage_mut().alloc()?;
 
         let new_addr = self
@@ -97,8 +93,8 @@ pub trait RemoteObjManager<T: RemoteObj, S: RemoteObjStorage> {
 
     fn create_ref(
         &mut self,
-        inst_id: InstanceId,
-        src_inst_id: InstanceId,
+        inst_id: &InstanceId,
+        src_inst_id: &InstanceId,
         src_addr: Addr,
     ) -> Result<Addr, BlockError> {
         let src_g_addr = self
@@ -124,7 +120,7 @@ pub trait RemoteObjManager<T: RemoteObj, S: RemoteObjStorage> {
         Ok(new_v_addr)
     }
 
-    fn dealloc(&mut self, inst_id: InstanceId, addr: Addr) -> Result<(), BlockError> {
+    fn dealloc(&mut self, inst_id: &InstanceId, addr: Addr) -> Result<(), BlockError> {
         // remove and get the global address
         let g_addr = self
             .addr_maps_mut()
@@ -149,7 +145,7 @@ pub trait RemoteObjManager<T: RemoteObj, S: RemoteObjStorage> {
         Ok(())
     }
 
-    fn get(&self, inst_id: InstanceId, addr: Addr) -> Result<&T, BlockError> {
+    fn get(&self, inst_id: &InstanceId, addr: Addr) -> Result<&T, BlockError> {
         let g_addr = self
             .addr_maps()
             .get(&inst_id)
@@ -158,7 +154,7 @@ pub trait RemoteObjManager<T: RemoteObj, S: RemoteObjStorage> {
         self.objects().get(&g_addr).ok_or(BlockError::BlockNotFound)
     }
 
-    fn get_mut(&mut self, inst_id: InstanceId, addr: Addr) -> Result<&mut T, BlockError> {
+    fn get_mut(&mut self, inst_id: &InstanceId, addr: Addr) -> Result<&mut T, BlockError> {
         let g_addr = self
             .addr_maps()
             .get(&inst_id)
@@ -168,7 +164,20 @@ pub trait RemoteObjManager<T: RemoteObj, S: RemoteObjStorage> {
             .get_mut(&g_addr)
             .ok_or(BlockError::BlockNotFound)
     }
-
+    
+    fn get_many(&self, inst_id: &InstanceId, addrs: &[Addr]) -> Result<Vec<&T>, BlockError> {
+        let mut objs = Vec::with_capacity(addrs.len());
+        for addr in addrs {
+            let g_addr = self
+                .addr_maps()
+                .get(&inst_id)
+                .ok_or(BlockError::InstanceNotFound)?
+                .resolve(*addr)?;
+            objs.push(self.objects().get(&g_addr).ok_or(BlockError::BlockNotFound)?);
+        }
+        Ok(objs)
+    }
+    
     fn available_objs(&self) -> usize {
         self.storage().available()
     }
@@ -181,9 +190,9 @@ pub struct KvBlock {
     references: Counter,
 
     // pos ids and vacancy maps
-    position_ids: Vec<u32>,
-    occupied: Vec<bool>,
-    filled: bool,
+    pub position_ids: Vec<u32>,
+    pub occupied: Vec<bool>,
+    pub filled: bool,
 }
 
 impl RemoteObj for KvBlock {
@@ -275,7 +284,7 @@ impl KvBlockManager {
 
     pub fn copy_tokens(
         &mut self,
-        inst_id: InstanceId,
+        inst_id: &InstanceId,
         src_addr: Addr,
         dst_addr: Addr,
         src_token_offset: usize,
@@ -314,7 +323,7 @@ impl KvBlockManager {
 
     pub fn mask_tokens(
         &mut self,
-        inst_id: InstanceId,
+        inst_id: &InstanceId,
         virtual_addr: Addr,
         mask: &[bool],
     ) -> Result<(), BlockError> {
@@ -355,7 +364,7 @@ impl RemoteObjManager<KvBlock, KvBlockStorage> for KvBlockManager {
 // ------------------------------------------------------------
 
 pub struct TokenEmb {
-    ptr: BlockPtr,
+    ptr: RemoteObjId,
     reference: Counter,
 }
 
@@ -450,6 +459,8 @@ pub enum BlockError {
     BlockNotFound,
     InstanceNotFound,
     InstanceAlreadyExists,
+    ResourceNotFound,
+    ResourcePermissionDenied
 }
 
 // ------------------------------------------------------------
