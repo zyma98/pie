@@ -13,8 +13,18 @@ pub type Addr = usize;
 
 pub type RemoteObjId = usize;
 
+// this helps the backend to make optimization decisions.
+pub enum TensorKind {
+    KvBlock,
+    TokenEmb,
+    Dist,
+    Flex,
+}
+
 pub trait RemoteObj {
-    fn new(obj_id: RemoteObjId) -> Self;
+    fn new(id: RemoteObjId) -> Self;
+
+    fn kind() -> TensorKind;
 
     fn id(&self) -> RemoteObjId;
 
@@ -22,17 +32,16 @@ pub trait RemoteObj {
     fn rc(&self) -> &Counter;
 }
 
-pub trait RemoteObjStorage {
-    fn alloc(&mut self) -> Result<RemoteObjId, BlockError>;
+pub trait ObjectAllocator<T: RemoteObj> {
+    fn alloc(&self, stream_id: &InstanceId) -> Result<RemoteObjId, BlockError>;
 
-    fn dealloc(&mut self, obj_id: RemoteObjId) -> Result<(), BlockError>;
+    fn dealloc(&self, stream_id: &InstanceId, obj_id: RemoteObjId) -> Result<(), BlockError>;
 
     fn available(&self) -> usize;
-
-    // get_commands()
 }
 
-pub trait RemoteObjManager<T: RemoteObj, S: RemoteObjStorage> {
+// reference-counted object manager
+pub trait RcObjectManager<T: RemoteObj, B: ObjectAllocator<T>> {
     fn objects(&self) -> &HashMap<RemoteObjId, T>;
 
     fn objects_mut(&mut self) -> &mut HashMap<RemoteObjId, T>;
@@ -41,9 +50,7 @@ pub trait RemoteObjManager<T: RemoteObj, S: RemoteObjStorage> {
 
     fn addr_maps_mut(&mut self) -> &mut HashMap<InstanceId, AddrMap<Addr, RemoteObjId>>;
 
-    fn storage(&self) -> &S;
-
-    fn storage_mut(&mut self) -> &mut S;
+    fn backend(&self) -> &B;
 
     fn init_instance(&mut self, inst_id: InstanceId) -> Result<(), BlockError> {
         if self.addr_maps().contains_key(&inst_id) {
@@ -76,7 +83,7 @@ pub trait RemoteObjManager<T: RemoteObj, S: RemoteObjStorage> {
     }
 
     fn alloc(&mut self, inst_id: &InstanceId) -> Result<Addr, BlockError> {
-        let new_g_addr = self.storage_mut().alloc()?;
+        let new_g_addr = self.backend().alloc(inst_id)?;
 
         let new_addr = self
             .addr_maps_mut()
@@ -138,7 +145,7 @@ pub trait RemoteObjManager<T: RemoteObj, S: RemoteObjStorage> {
 
         // remove the block if the ref count is 0
         if remove_entirely {
-            self.storage_mut().dealloc(g_addr)?;
+            self.backend().dealloc(inst_id, g_addr)?;
             self.objects_mut().remove(&g_addr);
         }
 
@@ -164,7 +171,7 @@ pub trait RemoteObjManager<T: RemoteObj, S: RemoteObjStorage> {
             .get_mut(&g_addr)
             .ok_or(BlockError::BlockNotFound)
     }
-    
+
     fn get_many(&self, inst_id: &InstanceId, addrs: &[Addr]) -> Result<Vec<&T>, BlockError> {
         let mut objs = Vec::with_capacity(addrs.len());
         for addr in addrs {
@@ -173,13 +180,17 @@ pub trait RemoteObjManager<T: RemoteObj, S: RemoteObjStorage> {
                 .get(&inst_id)
                 .ok_or(BlockError::InstanceNotFound)?
                 .resolve(*addr)?;
-            objs.push(self.objects().get(&g_addr).ok_or(BlockError::BlockNotFound)?);
+            objs.push(
+                self.objects()
+                    .get(&g_addr)
+                    .ok_or(BlockError::BlockNotFound)?,
+            );
         }
         Ok(objs)
     }
-    
+
     fn available_objs(&self) -> usize {
-        self.storage().available()
+        self.backend().available()
     }
 }
 
@@ -195,6 +206,20 @@ pub struct KvBlock {
     pub filled: bool,
 }
 
+pub trait KvBlockAllocator: ObjectAllocator<KvBlock> {
+    fn copy_tokens(
+        &self,
+        stream_id: &InstanceId,
+        src_ptr: RemoteObjId,
+        dst_ptr: RemoteObjId,
+        src_offset: usize,
+        dst_offset: usize,
+        size: usize,
+    ) -> Result<(), BlockError>;
+
+    fn mask_tokens(&self, ptr: RemoteObjId, mask: &[bool]) -> Result<(), BlockError>;
+}
+
 impl RemoteObj for KvBlock {
     fn new(id: RemoteObjId) -> Self {
         KvBlock {
@@ -206,6 +231,10 @@ impl RemoteObj for KvBlock {
         }
     }
 
+    fn kind() -> TensorKind {
+        TensorKind::KvBlock
+    }
+
     fn id(&self) -> RemoteObjId {
         self.id
     }
@@ -215,70 +244,25 @@ impl RemoteObj for KvBlock {
     }
 }
 
-enum KvBlockStorageAction {
-    Allocate(Addr),
-    Deallocate(Addr),
-    Copy(Addr, Addr, usize, usize, usize),
-}
-
-// The "mirror" of the block in the storage in the backend
-pub struct KvBlockStorage {
-    block_size: usize,
-    ptr_pool: IdPool<RemoteObjId>,
-    staged_actions: Vec<KvBlockStorageAction>,
-}
-
-impl RemoteObjStorage for KvBlockStorage {
-    fn alloc(&mut self) -> Result<RemoteObjId, BlockError> {
-        let ptr = self.ptr_pool.acquire().ok_or(BlockError::NoFreeBlocks)?;
-
-        self.staged_actions
-            .push(KvBlockStorageAction::Allocate(ptr));
-        Ok(ptr)
-    }
-
-    fn dealloc(&mut self, ptr: RemoteObjId) -> Result<(), BlockError> {
-        self.ptr_pool.release(ptr)?;
-        self.staged_actions
-            .push(KvBlockStorageAction::Deallocate(ptr));
-        Ok(())
-    }
-
-    fn available(&self) -> usize {
-        self.ptr_pool.available()
-    }
-}
-
-impl KvBlockStorage {
-    fn copy(
-        &mut self,
-        src_ptr: RemoteObjId,
-        dst_ptr: RemoteObjId,
-        src_offset: usize,
-        dst_offset: usize,
-        size: usize,
-    ) -> Result<(), BlockError> {
-        self.staged_actions.push(KvBlockStorageAction::Copy(
-            src_ptr, dst_ptr, src_offset, dst_offset, size,
-        ));
-        Ok(())
-    }
-}
-
-pub struct KvBlockManager {
+pub struct KvBlockManager<B> {
     kv_blocks: HashMap<RemoteObjId, KvBlock>,
+    token_embs: HashMap<RemoteObjId, TokenEmb>,
     virtual_addr_maps: HashMap<InstanceId, AddrMap<Addr, RemoteObjId>>,
 
     // primary storage
-    storage: KvBlockStorage,
+    backend: B,
 }
 
-impl KvBlockManager {
-    pub fn new(storage: KvBlockStorage) -> Self {
+impl<B> KvBlockManager<B>
+where
+    B: KvBlockAllocator,
+{
+    pub fn new(backend: B) -> Self {
         Self {
             kv_blocks: HashMap::new(),
+            token_embs: HashMap::new(),
             virtual_addr_maps: HashMap::new(),
-            storage,
+            backend,
         }
     }
 
@@ -294,7 +278,8 @@ impl KvBlockManager {
         let src_block_ptr = self.get(inst_id, src_addr)?.id();
         let dst_block_ptr = self.get(inst_id, dst_addr)?.id();
 
-        self.storage.copy(
+        self.backend().copy_tokens(
+            inst_id,
             src_block_ptr,
             dst_block_ptr,
             src_token_offset,
@@ -327,15 +312,23 @@ impl KvBlockManager {
         virtual_addr: Addr,
         mask: &[bool],
     ) -> Result<(), BlockError> {
-        let block = self.get_mut(inst_id, virtual_addr)?;
-        for i in 0..mask.len() {
-            block.occupied[i] = mask[i];
-        }
+        let block_id = {
+            let block = self.get_mut(inst_id, virtual_addr)?;
+            for i in 0..mask.len() {
+                block.occupied[i] = mask[i];
+            }
+            block.id()
+        };
+        self.backend.mask_tokens(block_id, mask)?;
+
         Ok(())
     }
 }
 
-impl RemoteObjManager<KvBlock, KvBlockStorage> for KvBlockManager {
+impl<B> RcObjectManager<KvBlock, B> for KvBlockManager<B>
+where
+    B: ObjectAllocator<KvBlock>,
+{
     fn objects(&self) -> &HashMap<Addr, KvBlock> {
         &self.kv_blocks
     }
@@ -352,12 +345,8 @@ impl RemoteObjManager<KvBlock, KvBlockStorage> for KvBlockManager {
         &mut self.virtual_addr_maps
     }
 
-    fn storage(&self) -> &KvBlockStorage {
-        &self.storage
-    }
-
-    fn storage_mut(&mut self) -> &mut KvBlockStorage {
-        &mut self.storage
+    fn backend(&self) -> &B {
+        &self.backend
     }
 }
 
@@ -376,6 +365,10 @@ impl RemoteObj for TokenEmb {
         }
     }
 
+    fn kind() -> TensorKind {
+        TensorKind::TokenEmb
+    }
+
     fn id(&self) -> RemoteObjId {
         self.ptr
     }
@@ -385,36 +378,16 @@ impl RemoteObj for TokenEmb {
     }
 }
 
-pub struct TokenEmbStorage {
-    ptr_pool: IdPool<RemoteObjId>,
-}
-
-impl RemoteObjStorage for TokenEmbStorage {
-    fn alloc(&mut self) -> Result<RemoteObjId, BlockError> {
-        let ptr = self.ptr_pool.acquire().ok_or(BlockError::NoFreeBlocks)?;
-        Ok(ptr)
-    }
-
-    fn dealloc(&mut self, ptr: RemoteObjId) -> Result<(), BlockError> {
-        self.ptr_pool.release(ptr)?;
-        Ok(())
-    }
-
-    fn available(&self) -> usize {
-        self.ptr_pool.available()
-    }
-}
-
-pub struct TokenEmbManager {
+pub struct TokenEmbManager<B> {
     token_embs: HashMap<RemoteObjId, TokenEmb>,
     virtual_addr_maps: HashMap<InstanceId, AddrMap<Addr, RemoteObjId>>,
 
     // primary storage
-    storage: TokenEmbStorage,
+    storage: B,
 }
 
-impl TokenEmbManager {
-    pub fn new(storage: TokenEmbStorage) -> Self {
+impl<B> TokenEmbManager<B> {
+    pub fn new(storage: B) -> Self {
         Self {
             token_embs: HashMap::new(),
             virtual_addr_maps: HashMap::new(),
@@ -423,7 +396,10 @@ impl TokenEmbManager {
     }
 }
 
-impl RemoteObjManager<TokenEmb, TokenEmbStorage> for TokenEmbManager {
+impl<B> RcObjectManager<TokenEmb, B> for TokenEmbManager<B>
+where
+    B: ObjectAllocator<TokenEmb>,
+{
     fn objects(&self) -> &HashMap<Addr, TokenEmb> {
         &self.token_embs
     }
@@ -440,12 +416,8 @@ impl RemoteObjManager<TokenEmb, TokenEmbStorage> for TokenEmbManager {
         &mut self.virtual_addr_maps
     }
 
-    fn storage(&self) -> &TokenEmbStorage {
+    fn backend(&self) -> &B {
         &self.storage
-    }
-
-    fn storage_mut(&mut self) -> &mut TokenEmbStorage {
-        &mut self.storage
     }
 }
 
@@ -460,7 +432,7 @@ pub enum BlockError {
     InstanceNotFound,
     InstanceAlreadyExists,
     ResourceNotFound,
-    ResourcePermissionDenied
+    ResourcePermissionDenied,
 }
 
 // ------------------------------------------------------------

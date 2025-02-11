@@ -1,8 +1,9 @@
+use crate::backend::Backend;
 use crate::remote_obj::{
-    Addr, BlockError, InstanceId, KvBlockManager, KvBlockStorage, RemoteObj, RemoteObjId,
-    RemoteObjManager, TokenEmbManager, TokenEmbStorage,
+    Addr, BlockError, DefaultTensorStorage, InstanceId, KvBlockManager, RemoteObj,
+    RemoteObjId, RcObjectManager, TokenEmbManager, TokenEmbStorage,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug)]
 pub struct Resource {
@@ -38,21 +39,28 @@ pub struct ServerState {
     instances: HashMap<InstanceId, Instance>,
 
     // managers
-    kv_blocks: KvBlockManager,
-    token_embs: TokenEmbManager,
+    kv_blocks: KvBlockManager<Backend>,
+    token_embs: TokenEmbManager<Backend>,
     // command batchers
-    fill_cmd_batcher: FillBlockCmdBatcher,
+    //fill_cmd_batcher: FillBlockCmdBatcher,
     //img_cmd_batcher: CreateImageTokensCmdBatcher,
 }
 
+// Remote Tensor Interface. (RTI)
+// RemoteTensorCollection
+// RemoteTensorStorage...
+//     -- alloc(type, addr)
+//     -- dealloc(addr)
+//     -- compute( input_addrs, output_addrs, op, etc. )
+
 impl ServerState {
-    pub fn new(kv_block_storage: KvBlockStorage, token_emb_storage: TokenEmbStorage) -> Self {
+    pub fn new(backend: Backend) -> Self {
         Self {
             resources: HashMap::new(),
             instances: HashMap::new(),
-            kv_blocks: KvBlockManager::new(kv_block_storage),
-            token_embs: TokenEmbManager::new(token_emb_storage),
-            fill_cmd_batcher: FillBlockCmdBatcher::new(),
+            kv_blocks: KvBlockManager::new(backend.clone()),
+            token_embs: TokenEmbManager::new(backend),
+            //fill_cmd_batcher: FillBlockCmdBatcher::new(),
         }
     }
 
@@ -167,57 +175,51 @@ impl ServerState {
         };
 
         self.kv_blocks.get_mut(inst_id, addr)?.filled = false;
-        self.fill_cmd_batcher.add(cmd);
+        //self.fill_cmd_batcher.add(cmd);
 
         Ok(())
     }
 }
-
-pub struct FillBlockCmdBatcher {
-    queue: Vec<_FillBlockCmd>,
-    redundancy_check: HashMap<Addr, _FillBlockCmd>,
-}
-
-impl FillBlockCmdBatcher {
-    pub fn new() -> Self {
-        Self {
-            queue: vec![],
-            redundancy_check: HashMap::new(),
-        }
-    }
-
-    pub fn add(&mut self, cmd: _FillBlockCmd) {
-        let ptr = cmd.block.pointer;
-        // If there's already a command for this block, replace it
-        if let Some(prev) = self.redundancy_check.remove(&ptr) {
-            // remove from the queue
-            let idx = self.queue.iter().position(|c| c.block.pointer == ptr);
-            if let Some(i) = idx {
-                self.queue.remove(i);
-            }
-        }
-        self.redundancy_check.insert(ptr, cmd.clone());
-        self.queue.push(cmd);
-    }
-
-    /// Very simplified version of the "batch" concept (the Python code uses numpy/torch).
-    pub fn batch(&self) {
-        // We won't replicate the entire numeric logic here.
-        // We'll just show how you might iterate over the queued commands.
-        for cmd in &self.queue {
-            println!(
-                "Batch item for block pointer={} with {} context blocks",
-                cmd.block.pointer,
-                cmd.ctx_blocks.len()
-            );
-        }
-    }
-
-    pub fn clear(&mut self) {
-        self.queue.clear();
-        self.redundancy_check.clear();
-    }
-}
+//
+// pub struct FillBlockCmdBatcher {
+//     queue: Vec<_FillBlockCmd>,
+//     redundancy_check: HashSet<RemoteObjId>,
+// }
+//
+// impl FillBlockCmdBatcher {
+//     pub fn new() -> Self {
+//         Self {
+//             queue: vec![],
+//             redundancy_check: HashSet::new(),
+//         }
+//     }
+//
+//     pub fn add(&mut self, cmd: _FillBlockCmd) {
+//         let ptr = cmd.block_ptr;
+//         // If there's already a command for this block, replace it
+//         if self.redundancy_check.remove(&ptr) {
+//             // remove from the queue
+//             let idx = self.queue.iter().position(|c| c.block_ptr == ptr);
+//             if let Some(i) = idx {
+//                 self.queue.remove(i);
+//             }
+//         }
+//         self.redundancy_check.insert(ptr);
+//         self.queue.push(cmd);
+//     }
+//
+//     pub fn batch(&self) {
+//
+//
+//
+//         ///
+//     }
+//
+//     pub fn clear(&mut self) {
+//         self.queue.clear();
+//         self.redundancy_check.clear();
+//     }
+// }
 
 /// Internal struct that won't be exposed outside the module
 #[derive(Debug, Clone)]
