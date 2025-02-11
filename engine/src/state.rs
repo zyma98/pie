@@ -1,9 +1,9 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::hash::Hash;
-use std::sync::atomic::{AtomicIsize, Ordering};
 
 use num_traits::PrimInt;
 
+use crate::utils::{Counter, IdPool};
 use uuid::Uuid;
 
 pub type InstanceId = Uuid;
@@ -14,25 +14,22 @@ pub type Addr = usize;
 pub type RemoteObjId = usize;
 
 // this helps the backend to make optimization decisions.
-pub enum TensorKind {
-    KvBlock,
-    TokenEmb,
-    Dist,
-    Flex,
+
+pub trait ReferenceCounted {
+    /// Increments the reference count.
+    fn add_ref(&self);
+
+    /// Decrements the reference count.
+    ///
+    /// Returns `true` if the count has reached zero, indicating that the object
+    /// can be safely cleaned up.
+    fn release(&self) -> bool;
+
+    /// Returns the current reference count.
+    fn ref_count(&self) -> usize;
 }
 
-pub trait RemoteObj {
-    fn new(id: RemoteObjId) -> Self;
-
-    fn kind() -> TensorKind;
-
-    fn id(&self) -> RemoteObjId;
-
-    // reference counter
-    fn rc(&self) -> &Counter;
-}
-
-pub trait ObjectAllocator<T: RemoteObj> {
+pub trait ObjectAllocator<T: ReferenceCounted> {
     fn alloc(&self, stream_id: &InstanceId) -> Result<RemoteObjId, BlockError>;
 
     fn dealloc(&self, stream_id: &InstanceId, obj_id: RemoteObjId) -> Result<(), BlockError>;
@@ -41,7 +38,7 @@ pub trait ObjectAllocator<T: RemoteObj> {
 }
 
 // reference-counted object manager
-pub trait RcObjectManager<T: RemoteObj, B: ObjectAllocator<T>> {
+pub trait ObjectManager<T: ReferenceCounted, B: ObjectAllocator<T>> {
     fn objects(&self) -> &HashMap<RemoteObjId, T>;
 
     fn objects_mut(&mut self) -> &mut HashMap<RemoteObjId, T>;
@@ -82,7 +79,7 @@ pub trait RcObjectManager<T: RemoteObj, B: ObjectAllocator<T>> {
         Ok(())
     }
 
-    fn alloc(&mut self, inst_id: &InstanceId) -> Result<Addr, BlockError> {
+    fn alloc(&mut self, inst_id: &InstanceId, obj: T) -> Result<Addr, BlockError> {
         let new_g_addr = self.backend().alloc(inst_id)?;
 
         let new_addr = self
@@ -91,10 +88,9 @@ pub trait RcObjectManager<T: RemoteObj, B: ObjectAllocator<T>> {
             .ok_or(BlockError::InstanceNotFound)?
             .register(new_g_addr);
 
-        let new_obj = T::new(new_g_addr);
-        new_obj.rc().inc();
+        obj.add_ref();
 
-        self.objects_mut().insert(new_g_addr, new_obj);
+        self.objects_mut().insert(new_g_addr, obj);
         Ok(new_addr)
     }
 
@@ -121,8 +117,7 @@ pub trait RcObjectManager<T: RemoteObj, B: ObjectAllocator<T>> {
         self.objects()
             .get(&src_g_addr)
             .ok_or(BlockError::BlockNotFound)?
-            .rc()
-            .inc();
+            .add_ref();
 
         Ok(new_v_addr)
     }
@@ -139,9 +134,7 @@ pub trait RcObjectManager<T: RemoteObj, B: ObjectAllocator<T>> {
             .objects()
             .get(&g_addr)
             .ok_or(BlockError::BlockNotFound)?
-            .rc()
-            .dec()
-            <= 0;
+            .release();
 
         // remove the block if the ref count is 0
         if remove_entirely {
@@ -152,41 +145,41 @@ pub trait RcObjectManager<T: RemoteObj, B: ObjectAllocator<T>> {
         Ok(())
     }
 
-    fn get(&self, inst_id: &InstanceId, addr: Addr) -> Result<&T, BlockError> {
-        let g_addr = self
-            .addr_maps()
+    fn resolve(&self, inst_id: &InstanceId, addr: Addr) -> Result<RemoteObjId, BlockError> {
+        self.addr_maps()
             .get(&inst_id)
             .ok_or(BlockError::InstanceNotFound)?
-            .resolve(addr)?;
+            .resolve(addr)
+    }
+
+    fn resolve_many(
+        &self,
+        inst_id: &InstanceId,
+        addrs: &[Addr],
+    ) -> Result<Vec<RemoteObjId>, BlockError> {
+        self.addr_maps()
+            .get(&inst_id)
+            .ok_or(BlockError::InstanceNotFound)?
+            .resolve_many(addrs)
+    }
+
+    fn get(&self, inst_id: &InstanceId, addr: Addr) -> Result<&T, BlockError> {
+        let g_addr = self.resolve(inst_id, addr)?;
         self.objects().get(&g_addr).ok_or(BlockError::BlockNotFound)
     }
 
     fn get_mut(&mut self, inst_id: &InstanceId, addr: Addr) -> Result<&mut T, BlockError> {
-        let g_addr = self
-            .addr_maps()
-            .get(&inst_id)
-            .ok_or(BlockError::InstanceNotFound)?
-            .resolve(addr)?;
+        let g_addr = self.resolve(inst_id, addr)?;
         self.objects_mut()
             .get_mut(&g_addr)
             .ok_or(BlockError::BlockNotFound)
     }
 
     fn get_many(&self, inst_id: &InstanceId, addrs: &[Addr]) -> Result<Vec<&T>, BlockError> {
-        let mut objs = Vec::with_capacity(addrs.len());
-        for addr in addrs {
-            let g_addr = self
-                .addr_maps()
-                .get(&inst_id)
-                .ok_or(BlockError::InstanceNotFound)?
-                .resolve(*addr)?;
-            objs.push(
-                self.objects()
-                    .get(&g_addr)
-                    .ok_or(BlockError::BlockNotFound)?,
-            );
-        }
-        Ok(objs)
+        self.resolve_many(inst_id, addrs)?
+            .iter()
+            .map(|&g_addr| self.objects().get(&g_addr).ok_or(BlockError::BlockNotFound))
+            .collect::<Result<Vec<_>, _>>()
     }
 
     fn available_objs(&self) -> usize {
@@ -197,8 +190,7 @@ pub trait RcObjectManager<T: RemoteObj, B: ObjectAllocator<T>> {
 // ------------------------------------------------------------
 
 pub struct KvBlock {
-    id: RemoteObjId,
-    references: Counter,
+    counter: Counter,
 
     // pos ids and vacancy maps
     pub position_ids: Vec<u32>,
@@ -206,7 +198,8 @@ pub struct KvBlock {
     pub filled: bool,
 }
 
-pub trait KvBlockAllocator: ObjectAllocator<KvBlock> {
+// Backend trait for manipulating key-value blocks.
+pub trait KvBlockManipulator: ObjectAllocator<KvBlock> {
     fn copy_tokens(
         &self,
         stream_id: &InstanceId,
@@ -217,30 +210,51 @@ pub trait KvBlockAllocator: ObjectAllocator<KvBlock> {
         size: usize,
     ) -> Result<(), BlockError>;
 
-    fn mask_tokens(&self, ptr: RemoteObjId, mask: &[bool]) -> Result<(), BlockError>;
+    fn mask_tokens(
+        &self,
+        stream_id: &InstanceId,
+        ptr: RemoteObjId,
+        mask: &[bool],
+    ) -> Result<(), BlockError>;
 }
 
-impl RemoteObj for KvBlock {
-    fn new(id: RemoteObjId) -> Self {
+// Backend trait for filling key-value blocks.
+pub trait KvBlockFiller: ObjectAllocator<KvBlock> + ObjectAllocator<TokenEmb> {
+    fn fill(
+        &self,
+        stream_id: &InstanceId,
+        addr: RemoteObjId,
+        ctx_addrs: Vec<RemoteObjId>,
+        mask: Vec<bool>,
+        input_embs: Vec<RemoteObjId>,
+        output_embs: Vec<RemoteObjId>,
+    ) -> Result<(), BlockError>;
+}
+
+// ------------------------------------------------------------
+
+impl KvBlock {
+    pub(crate) fn new() -> Self {
         KvBlock {
-            id,
-            references: Counter::new(0),
+            counter: Counter::new(0),
             position_ids: Vec::new(),
             occupied: Vec::new(),
             filled: false,
         }
     }
+}
 
-    fn kind() -> TensorKind {
-        TensorKind::KvBlock
+impl ReferenceCounted for KvBlock {
+    fn add_ref(&self) {
+        self.counter.inc();
     }
 
-    fn id(&self) -> RemoteObjId {
-        self.id
+    fn release(&self) -> bool {
+        self.counter.dec() <= 0
     }
 
-    fn rc(&self) -> &Counter {
-        &self.references
+    fn ref_count(&self) -> usize {
+        self.counter.get() as usize
     }
 }
 
@@ -253,10 +267,7 @@ pub struct KvBlockManager<B> {
     backend: B,
 }
 
-impl<B> KvBlockManager<B>
-where
-    B: KvBlockAllocator,
-{
+impl<B> KvBlockManager<B> {
     pub fn new(backend: B) -> Self {
         Self {
             kv_blocks: HashMap::new(),
@@ -265,7 +276,37 @@ where
             backend,
         }
     }
+}
 
+impl<B> ObjectManager<KvBlock, B> for KvBlockManager<B>
+where
+    B: ObjectAllocator<KvBlock>,
+{
+    fn objects(&self) -> &HashMap<Addr, KvBlock> {
+        &self.kv_blocks
+    }
+
+    fn objects_mut(&mut self) -> &mut HashMap<Addr, KvBlock> {
+        &mut self.kv_blocks
+    }
+
+    fn addr_maps(&self) -> &HashMap<InstanceId, AddrMap<Addr, RemoteObjId>> {
+        &self.virtual_addr_maps
+    }
+
+    fn addr_maps_mut(&mut self) -> &mut HashMap<InstanceId, AddrMap<Addr, RemoteObjId>> {
+        &mut self.virtual_addr_maps
+    }
+
+    fn backend(&self) -> &B {
+        &self.backend
+    }
+}
+
+impl<B> KvBlockManager<B>
+where
+    B: KvBlockManipulator,
+{
     pub fn copy_tokens(
         &mut self,
         inst_id: &InstanceId,
@@ -275,8 +316,8 @@ where
         dst_token_offset: usize,
         size: usize,
     ) -> Result<(), BlockError> {
-        let src_block_ptr = self.get(inst_id, src_addr)?.id();
-        let dst_block_ptr = self.get(inst_id, dst_addr)?.id();
+        let src_block_ptr = self.get(inst_id, src_addr)?.id;
+        let dst_block_ptr = self.get(inst_id, dst_addr)?.id;
 
         self.backend().copy_tokens(
             inst_id,
@@ -317,64 +358,39 @@ where
             for i in 0..mask.len() {
                 block.occupied[i] = mask[i];
             }
-            block.id()
+            block.id
         };
-        self.backend.mask_tokens(block_id, mask)?;
+        self.backend.mask_tokens(inst_id, block_id, mask)?;
 
         Ok(())
-    }
-}
-
-impl<B> RcObjectManager<KvBlock, B> for KvBlockManager<B>
-where
-    B: ObjectAllocator<KvBlock>,
-{
-    fn objects(&self) -> &HashMap<Addr, KvBlock> {
-        &self.kv_blocks
-    }
-
-    fn objects_mut(&mut self) -> &mut HashMap<Addr, KvBlock> {
-        &mut self.kv_blocks
-    }
-
-    fn addr_maps(&self) -> &HashMap<InstanceId, AddrMap<Addr, RemoteObjId>> {
-        &self.virtual_addr_maps
-    }
-
-    fn addr_maps_mut(&mut self) -> &mut HashMap<InstanceId, AddrMap<Addr, RemoteObjId>> {
-        &mut self.virtual_addr_maps
-    }
-
-    fn backend(&self) -> &B {
-        &self.backend
     }
 }
 
 // ------------------------------------------------------------
 
 pub struct TokenEmb {
-    ptr: RemoteObjId,
-    reference: Counter,
+    counter: Counter,
 }
 
-impl RemoteObj for TokenEmb {
-    fn new(obj_id: RemoteObjId) -> Self {
+impl TokenEmb {
+    fn new() -> Self {
         TokenEmb {
-            ptr: obj_id,
-            reference: Counter::new(0),
+            counter: Counter::new(0),
         }
     }
+}
 
-    fn kind() -> TensorKind {
-        TensorKind::TokenEmb
+impl ReferenceCounted for TokenEmb {
+    fn add_ref(&self) {
+        self.counter.inc();
     }
 
-    fn id(&self) -> RemoteObjId {
-        self.ptr
+    fn release(&self) -> bool {
+        self.counter.dec() <= 0
     }
 
-    fn rc(&self) -> &Counter {
-        &self.reference
+    fn ref_count(&self) -> usize {
+        self.counter.get() as usize
     }
 }
 
@@ -396,7 +412,7 @@ impl<B> TokenEmbManager<B> {
     }
 }
 
-impl<B> RcObjectManager<TokenEmb, B> for TokenEmbManager<B>
+impl<B> ObjectManager<TokenEmb, B> for TokenEmbManager<B>
 where
     B: ObjectAllocator<TokenEmb>,
 {
@@ -419,6 +435,18 @@ where
     fn backend(&self) -> &B {
         &self.storage
     }
+}
+
+// ------------------------------------------------------------
+
+// Trait for backends that can embed images.
+pub trait ImageEmbedder {
+    fn embed(&self, inst_id: &InstanceId, addr: Addr) -> Result<RemoteObjId, BlockError>;
+}
+
+// Trait for backends that can embed videos.
+pub trait VideoEmbedder {
+    fn embed(&self, inst_id: &InstanceId, addr: Addr) -> Result<RemoteObjId, BlockError>;
 }
 
 // ------------------------------------------------------------
@@ -486,114 +514,5 @@ where
             g_addrs.push(global_addr);
         }
         Ok(g_addrs)
-    }
-}
-
-/// A fast, thread-safe counter.
-#[derive(Debug)]
-pub struct Counter {
-    count: AtomicIsize,
-}
-
-impl Counter {
-    /// Creates a new counter starting at the given initial value.
-    pub fn new(initial: isize) -> Self {
-        Self {
-            count: AtomicIsize::new(initial),
-        }
-    }
-
-    /// Increments the counter by 1.
-    pub fn inc(&self) -> isize {
-        // Using relaxed ordering because we only care about the counter's value.
-        self.count.fetch_add(1, Ordering::Relaxed) + 1
-    }
-
-    /// Decrements the counter by 1.
-    pub fn dec(&self) -> isize {
-        self.count.fetch_sub(1, Ordering::Relaxed) - 1
-    }
-
-    /// Returns the current count.
-    pub fn get(&self) -> isize {
-        self.count.load(Ordering::Relaxed)
-    }
-}
-
-/// A very fast bounded ID pool that always returns the smallest available ID.
-/// The pool is created with a maximum capacity.
-#[derive(Debug)]
-pub struct IdPool<T> {
-    /// The next (never‑allocated) ID.
-    next: T,
-    /// The set of freed IDs.
-    free: BTreeSet<T>,
-    /// The maximum number of IDs that can be allocated.
-    max_capacity: T,
-}
-
-impl<T> IdPool<T>
-where
-    T: PrimInt,
-{
-    /// Create a new ID pool with the given maximum capacity.
-    pub fn new(max_capacity: T) -> Self {
-        Self {
-            next: T::zero(),
-            free: BTreeSet::new(),
-            max_capacity,
-        }
-    }
-
-    /// Allocate and return the smallest available ID.
-    ///
-    /// Returns `Some(id)` if an ID is available, or `None` if the pool is exhausted.
-    pub fn acquire(&mut self) -> Option<T> {
-        if let Some(&id) = self.free.iter().next() {
-            // There is a freed ID available. Remove and return it.
-            self.free.remove(&id);
-            Some(id)
-        } else if self.next < self.max_capacity {
-            // No freed IDs available; allocate a fresh one.
-            let addr = self.next;
-            self.next = self.next + T::one();
-            Some(addr)
-        } else {
-            // Pool is exhausted.
-            None
-        }
-    }
-
-    /// Release an ID back into the pool so it can be re-used.
-
-    pub fn release(&mut self, addr: T) -> Result<(), BlockError> {
-        // Only allow releasing IDs that were allocated.
-        if addr >= self.next {
-            return Err(BlockError::VirtualAddressTranslationFailed);
-        }
-
-        // Insert the id into the free set.
-        self.free.insert(addr);
-
-        // Tail optimization: if the largest freed id is exactly next-1,
-        // collapse the free block by decrementing `next`.
-        while let Some(&last) = self.free.iter().next_back() {
-            if last == self.next - T::one() {
-                self.free.remove(&last);
-                self.next = self.next - T::one();
-            } else {
-                break;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Returns the number of IDs that are available for allocation.
-    ///
-    /// This equals the number of IDs that have been freed plus the difference
-    /// between the maximum capacity and the next never‑allocated ID.
-    pub fn available(&self) -> usize {
-        self.free.len() + (self.max_capacity - self.next).to_usize().unwrap()
     }
 }

@@ -1,7 +1,6 @@
-use crate::backend::Backend;
-use crate::remote_obj::{
-    Addr, BlockError, DefaultTensorStorage, InstanceId, KvBlockManager, RemoteObj,
-    RemoteObjId, RcObjectManager, TokenEmbManager, TokenEmbStorage,
+use crate::state::{
+    Addr, BlockError, InstanceId, KvBlock, KvBlockFiller, KvBlockManager, KvBlockManipulator,
+    ObjectManager, RemoteObjId, TokenEmbManager,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -32,15 +31,16 @@ impl Instance {
     }
 }
 
-pub struct ServerState {
+pub struct ServerState<B> {
+    backend: B,
     // resource name -> Resource handle
     resources: HashMap<String, Resource>,
     // instance_id -> Instance
     instances: HashMap<InstanceId, Instance>,
 
     // managers
-    kv_blocks: KvBlockManager<Backend>,
-    token_embs: TokenEmbManager<Backend>,
+    kv_blocks: KvBlockManager<B>,
+    token_embs: TokenEmbManager<B>,
     // command batchers
     //fill_cmd_batcher: FillBlockCmdBatcher,
     //img_cmd_batcher: CreateImageTokensCmdBatcher,
@@ -53,9 +53,13 @@ pub struct ServerState {
 //     -- dealloc(addr)
 //     -- compute( input_addrs, output_addrs, op, etc. )
 
-impl ServerState {
-    pub fn new(backend: Backend) -> Self {
+impl<B> ServerState<B>
+where
+    B: KvBlockFiller + KvBlockManipulator + Clone,
+{
+    pub fn new(backend: B) -> Self {
         Self {
+            backend: backend.clone(),
             resources: HashMap::new(),
             instances: HashMap::new(),
             kv_blocks: KvBlockManager::new(backend.clone()),
@@ -85,7 +89,7 @@ impl ServerState {
     }
 
     pub fn allocate_kv_block(&mut self, inst_id: &InstanceId) -> Result<Addr, BlockError> {
-        self.kv_blocks.alloc(inst_id)
+        self.kv_blocks.alloc(inst_id, KvBlock::new())
     }
 
     pub fn deallocate_kv_block(
@@ -144,42 +148,58 @@ impl ServerState {
     ) -> Result<(), BlockError> {
         // create "resolved" cmd.
 
-        let block_ptr = self.kv_blocks.get(inst_id, addr)?.id();
-        let ctx_block_ptrs = self
-            .kv_blocks
-            .get_many(inst_id, &ctx_addrs)?
-            .iter()
-            .map(|a| a.id())
-            .collect();
+        let block_ptr = self.kv_blocks.resolve(inst_id, addr)?;
+        let ctx_block_ptrs = self.kv_blocks.resolve_many(inst_id, &ctx_addrs)?;
 
-        let input_emb_ptrs = self
-            .token_embs
-            .get_many(inst_id, &input_embs)?
-            .iter()
-            .map(|a| a.id())
-            .collect();
+        let input_emb_ptrs = self.token_embs.resolve_many(inst_id, &input_embs)?;
 
-        let output_emb_ptrs = self
-            .token_embs
-            .get_many(inst_id, &output_embs)?
-            .iter()
-            .map(|a| a.id())
-            .collect();
+        let output_emb_ptrs = self.token_embs.resolve_many(inst_id, &output_embs)?;
 
-        let cmd = _FillBlockCmd {
+        self.kv_blocks.get_mut(inst_id, addr)?.filled = false;
+
+        self.backend.fill(
+            inst_id,
             block_ptr,
             ctx_block_ptrs,
             mask,
             input_emb_ptrs,
             output_emb_ptrs,
-        };
-
-        self.kv_blocks.get_mut(inst_id, addr)?.filled = false;
-        //self.fill_cmd_batcher.add(cmd);
+        )?;
 
         Ok(())
     }
+
+    pub fn copy_kv_block(
+        &mut self,
+        inst_id: &InstanceId,
+        src_addr: Addr,
+        dst_addr: Addr,
+        src_token_offset: usize,
+        dst_token_offset: usize,
+        token_count: usize,
+    ) -> Result<(), BlockError> {
+        self.kv_blocks.copy_tokens(
+            inst_id,
+            src_addr,
+            dst_addr,
+            src_token_offset,
+            dst_token_offset,
+            token_count,
+        )
+    }
+
+    pub fn mask_kv_block(
+        &mut self,
+        inst_id: &InstanceId,
+        addr: Addr,
+        mask: Vec<bool>,
+    ) -> Result<(), BlockError> {
+        self.kv_blocks.mask_tokens(inst_id, addr, &mask)
+    }
 }
+
+// Only for multimodal LLMs
+
 //
 // pub struct FillBlockCmdBatcher {
 //     queue: Vec<_FillBlockCmd>,
