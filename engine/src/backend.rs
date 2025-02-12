@@ -1,15 +1,12 @@
 use crate::state::{
     BlockError, CausalLanguageModel, CausalTransformer, ImageEmbedder, InstanceId, KvBlock,
-    ObjectAllocator, RemoteObjId, TokenDist, TokenEmb,
+    ObjectAllocator, RemoteObjId, StreamId, TokenDist, TokenEmb,
 };
 use crate::utils::IdPool;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot::Sender;
-use uuid::Uuid;
-
-type StreamId = Uuid;
 
 /// Intermediate representation of a command to be executed by the backend.
 /// This must not be exposed to other modules.
@@ -87,12 +84,15 @@ impl Backend {
             block_size,
             namespace: Arc::new(Mutex::new(ObjNamespace::new(max_kv_blocks, max_embs))),
             cmd_buffer: Arc::new(Mutex::new(Vec::new())),
+            pending: Arc::new(Mutex::new(vec![])),
+            staged: Arc::new(Mutex::new(vec![])),
+            submitted: Arc::new(Mutex::new(vec![])),
         }
     }
 
-    pub fn enqueue_cmd(&self, stream_id: &StreamId, cmd: Command) -> Result<(), BlockError> {
+    pub fn enqueue_cmd(&self, stream_id: StreamId, cmd: Command) -> Result<(), BlockError> {
         let mut inner = self.cmd_buffer.lock().map_err(|_| BlockError::LockError)?;
-        inner.push((*stream_id, cmd));
+        inner.push((stream_id, cmd));
         Ok(())
     }
 
@@ -112,14 +112,66 @@ impl Backend {
     }
 
     pub fn schedule(&self, time_elapsed: f64) -> Result<(), BlockError> {
-        // This is where the backend would execute the commands in the queue.
-        // For now, we just clear the queue.
-        let mut inner = self.inner.lock().map_err(|_| BlockError::LockError)?;
+        // first move all the commands from cmd_buffer to pending (buffer items are removed)
+        let mut pending = {
+            let mut cmd_buffer = self.cmd_buffer.lock().map_err(|_| BlockError::LockError)?;
+            let mut pending = self.pending.lock().map_err(|_| BlockError::LockError)?;
 
-        // take all the commands
-        // inner.cmd_queue;
+            pending.append(&mut cmd_buffer);
+            pending
+            // drop the lock on cmd_buffer
+        };
 
-        inner.cmd_queue.clear();
+        // do batching!!
+
+        for (stream_id, cmd) in pending.iter() {
+            // Three categories
+            // Cohesive scheduling. -> Horizontal cohesion + Vertical cohesion
+            // 1. CPU-only
+            // 2. GPU-memory-bound -> prefers batching (cohesion level = 1)
+            // 3. GPU-compute-bound -> requires batching (cohesion level = 2)
+
+            // DepsQueue
+
+            match cmd {
+                Command::AllocateEmb(id) => {
+                    // allocate emb
+                    println!("Allocating emb with id: {}", id);
+                }
+                Command::DeallocateEmb(id) => {
+                    // deallocate emb
+                    println!("Deallocating emb with id: {}", id);
+                }
+                Command::AllocateKvBlock(id) => {
+                    // allocate kv block
+                    println!("Allocating kv block with id: {}", id);
+                }
+                Command::DeallocateKvBlock(id) => {
+                    // deallocate kv block
+                    println!("Deallocating kv block with id: {}", id);
+                }
+                Command::CopyKvBlock(src, dst, src_offset, dst_offset, size) => {
+                    // copy kv block
+                    println!(
+                        "Copying kv block from {} to {} with offsets {} and {} and size {}",
+                        src, dst, src_offset, dst_offset, size
+                    );
+                }
+                Command::MaskKvBlock(id, mask) => {
+                    // mask kv block
+                    println!("Masking kv block with id: {} and mask: {:?}", id, mask);
+                }
+                Command::FillKvBlock(ptr, ctx_ptrs, mask, input_embs, output_embs) => {
+                    // fill kv block
+                    println!(
+                        "Filling kv block with ptr: {}, ctx_ptrs: {:?}, mask: {:?}, input_embs: {:?}, output_embs: {:?}",
+                        ptr, ctx_ptrs, mask, input_embs, output_embs
+                    );
+                }
+            }
+        }
+
+        // drop the lock on pending
         Ok(())
     }
 }
@@ -127,7 +179,7 @@ impl Backend {
 impl ObjectAllocator<TokenEmb> for Backend {
     type RawRepr = Vec<f32>;
 
-    fn alloc(&self, stream_id: &StreamId) -> Result<RemoteObjId, BlockError> {
+    fn alloc(&self, stream_id: StreamId) -> Result<RemoteObjId, BlockError> {
         let new_obj_id = self.acquire_id(1)?;
 
         let cmd = Command::AllocateEmb(new_obj_id);
@@ -136,7 +188,7 @@ impl ObjectAllocator<TokenEmb> for Backend {
         Ok(new_obj_id)
     }
 
-    fn dealloc(&self, stream_id: &StreamId, obj_id: RemoteObjId) -> Result<(), BlockError> {
+    fn dealloc(&self, stream_id: StreamId, obj_id: RemoteObjId) -> Result<(), BlockError> {
         // Release the object id back to the pool.
         self.release_id(1, obj_id)?;
 
@@ -148,7 +200,7 @@ impl ObjectAllocator<TokenEmb> for Backend {
 
     fn raw_repr(
         &self,
-        stream_id: &InstanceId,
+        stream_id: StreamId,
         obj_id: RemoteObjId,
         sender: Sender<Self::RawRepr>,
     ) -> Result<(), BlockError> {
@@ -164,7 +216,7 @@ impl ObjectAllocator<KvBlock> for Backend {
     // The raw representation of a kv block is not really useful in any way. So we just use usize.
     type RawRepr = usize;
 
-    fn alloc(&self, stream_id: &StreamId) -> Result<RemoteObjId, BlockError> {
+    fn alloc(&self, stream_id: StreamId) -> Result<RemoteObjId, BlockError> {
         let new_obj_id = self.acquire_id(0)?;
 
         let cmd = Command::AllocateKvBlock(new_obj_id);
@@ -173,7 +225,7 @@ impl ObjectAllocator<KvBlock> for Backend {
         Ok(new_obj_id)
     }
 
-    fn dealloc(&self, stream_id: &StreamId, obj_id: RemoteObjId) -> Result<(), BlockError> {
+    fn dealloc(&self, stream_id: StreamId, obj_id: RemoteObjId) -> Result<(), BlockError> {
         // Release the object id back to the pool.
         self.release_id(0, obj_id)?;
 
@@ -185,7 +237,7 @@ impl ObjectAllocator<KvBlock> for Backend {
 
     fn raw_repr(
         &self,
-        stream_id: &InstanceId,
+        stream_id: StreamId,
         obj_id: RemoteObjId,
         sender: Sender<Self::RawRepr>,
     ) -> Result<(), BlockError> {
@@ -201,17 +253,17 @@ impl ObjectAllocator<KvBlock> for Backend {
 impl ObjectAllocator<TokenDist> for Backend {
     type RawRepr = Vec<f32>;
 
-    fn alloc(&self, stream_id: &InstanceId) -> Result<RemoteObjId, BlockError> {
+    fn alloc(&self, stream_id: StreamId) -> Result<RemoteObjId, BlockError> {
         todo!()
     }
 
-    fn dealloc(&self, stream_id: &InstanceId, obj_id: RemoteObjId) -> Result<(), BlockError> {
+    fn dealloc(&self, stream_id: StreamId, obj_id: RemoteObjId) -> Result<(), BlockError> {
         todo!()
     }
 
     fn raw_repr(
         &self,
-        stream_id: &InstanceId,
+        stream_id: StreamId,
         obj_id: RemoteObjId,
         sender: Sender<Self::RawRepr>,
     ) -> Result<(), BlockError> {
@@ -226,7 +278,7 @@ impl ObjectAllocator<TokenDist> for Backend {
 impl CausalTransformer for Backend {
     fn fill(
         &self,
-        stream_id: &StreamId,
+        stream_id: StreamId,
         ptr: RemoteObjId,
         ctx_ptrs: Vec<RemoteObjId>,
         mask: Vec<bool>,
@@ -243,7 +295,7 @@ impl CausalTransformer for Backend {
 
     fn copy_tokens(
         &self,
-        stream_id: &StreamId,
+        stream_id: StreamId,
         src_ptr: RemoteObjId,
         dst_ptr: RemoteObjId,
         src_offset: usize,
@@ -258,7 +310,7 @@ impl CausalTransformer for Backend {
 
     fn mask_tokens(
         &self,
-        stream_id: &StreamId,
+        stream_id: StreamId,
         ptr: RemoteObjId,
         mask: &[bool],
     ) -> Result<(), BlockError> {
@@ -271,7 +323,7 @@ impl CausalTransformer for Backend {
 impl CausalLanguageModel for Backend {
     fn next_token_dist(
         &self,
-        inst_id: &InstanceId,
+        inst_id: StreamId,
         emb_ptr: RemoteObjId,
         dist_ptr: RemoteObjId,
     ) -> Result<(), BlockError> {
@@ -280,7 +332,7 @@ impl CausalLanguageModel for Backend {
 
     fn sample_top_k(
         &self,
-        inst_id: &InstanceId,
+        inst_id: StreamId,
         dist_ptr: RemoteObjId,
         k: usize,
         sender: Sender<Vec<usize>>,
@@ -290,7 +342,7 @@ impl CausalLanguageModel for Backend {
 
     fn get_raw_dist(
         &self,
-        inst_id: &InstanceId,
+        inst_id: StreamId,
         dist_ptr: RemoteObjId,
         sender: Sender<Vec<f32>>,
     ) -> Result<(), BlockError> {
@@ -303,7 +355,7 @@ impl CausalLanguageModel for Backend {
 impl ImageEmbedder for Backend {
     fn embed_img(
         &self,
-        stream_id: &StreamId,
+        stream_id: StreamId,
         addrs: Vec<RemoteObjId>,
         url: String,
     ) -> Result<(), BlockError> {
