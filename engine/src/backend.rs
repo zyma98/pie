@@ -3,9 +3,14 @@ use crate::state::{
     RemoteObjId, StreamId, TokenDist, TokenEmb,
 };
 use crate::utils::IdPool;
+use prost::Message;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot::Sender;
+
+pub mod sdi {
+    include!(concat!(env!("OUT_DIR"), "/sdi.rs"));
+}
 
 /// Intermediate representation of a command to be executed by the backend.
 /// This must not be exposed to other modules.
@@ -20,19 +25,15 @@ enum IrCommand {
     DeallocateKvBlock(usize),
     CopyKvBlock(usize, usize, usize, usize, usize),
     MaskKvBlock(usize, Vec<bool>),
-    FillKvBlock(usize, Vec<usize>, Vec<bool>, Vec<usize>, Vec<usize>),
+    FillKvBlock(usize, Vec<usize>, Vec<usize>, Option<Vec<usize>>),
 }
-
 
 // Define actual cmd, interpretable by the backend.
 
 // Allocate(Type, entities:[id])
 // Deallocate(Type, entities:[id])
-// Fill (List[id, 
+// Fill (List[id,
 // LongFill using bitsets.. implement this later.
-
-
-
 
 #[derive(Debug, Clone)]
 pub struct Backend {
@@ -136,19 +137,19 @@ impl Backend {
         let mut pending = self.pending.lock().map_err(|_| BlockError::LockError)?;
 
         // first move all the commands from cmd_buffer to pending (buffer items are removed)
-        let mut queued = {
+        let mut commands_by_stream = {
             let mut cmd_buffer = self.cmd_buffer.lock().map_err(|_| BlockError::LockError)?;
 
-            let mut queued = HashMap::new();
+            let mut stream_commands = HashMap::new();
 
             for (stream_id, command) in cmd_buffer.drain(..) {
-                queued
+                stream_commands
                     .entry(stream_id)
                     .or_insert_with(Vec::new)
                     .push(command);
             }
 
-            queued
+            stream_commands
             // drop the lock on cmd_buffer
         };
 
@@ -156,52 +157,69 @@ impl Backend {
         //
         // cmd_set = HashMap<CmdType, Vec<Cmd>>
         //
+        let mut cmd_alloc_emb = Vec::new();
+        let mut cmd_alloc_kv_block = Vec::new();
+        let mut cmd_dealloc_emb = Vec::new();
+        let mut cmd_dealloc_kv_block = Vec::new();
 
-        for (stream_id, cmd) in queued.iter() {
-            // Three categories
-            // Cohesive scheduling. -> Horizontal cohesion + Vertical cohesion
-            // 1. CPU-only
-            // 2. GPU-memory-bound -> prefers batching (cohesion level = 1)
-            // 3. GPU-compute-bound -> requires batching (cohesion level = 2)
+        for (_stream_id, cmd_list) in commands_by_stream.iter_mut() {
+            let mut processed_count = 0;
 
-            // DepsQueue
+            for cmd in cmd_list.iter() {
+                let mut should_stop = true;
+                match cmd {
+                    IrCommand::AllocateEmb(id) => {
+                        cmd_alloc_emb.push(*id);
+                        // Processed, so keep_on remains false (we can drop this command)
+                    }
+                    IrCommand::DeallocateEmb(id) => {
+                        cmd_dealloc_emb.push(*id);
+                    }
+                    IrCommand::AllocateKvBlock(id) => {
+                        cmd_alloc_kv_block.push(*id);
+                    }
+                    IrCommand::DeallocateKvBlock(id) => {
+                        cmd_dealloc_kv_block.push(*id);
+                    }
+                    IrCommand::CopyKvBlock(src, dst, src_offset, dst_offset, size) => {
 
-            // match cmd {
-            //     IrCommand::AllocateEmb(id) => {
-            //         // allocate emb
-            //         println!("Allocating emb with id: {}", id);
-            //     }
-            //     IrCommand::DeallocateEmb(id) => {
-            //         // deallocate emb
-            //         println!("Deallocating emb with id: {}", id);
-            //     }
-            //     IrCommand::AllocateKvBlock(id) => {
-            //         // allocate kv block
-            //         println!("Allocating kv block with id: {}", id);
-            //     }
-            //     IrCommand::DeallocateKvBlock(id) => {
-            //         // deallocate kv block
-            //         println!("Deallocating kv block with id: {}", id);
-            //     }
-            //     IrCommand::CopyKvBlock(src, dst, src_offset, dst_offset, size) => {
-            //         // copy kv block
-            //         println!(
-            //             "Copying kv block from {} to {} with offsets {} and {} and size {}",
-            //             src, dst, src_offset, dst_offset, size
-            //         );
-            //     }
-            //     IrCommand::MaskKvBlock(id, mask) => {
-            //         // mask kv block
-            //         println!("Masking kv block with id: {} and mask: {:?}", id, mask);
-            //     }
-            //     IrCommand::FillKvBlock(ptr, ctx_ptrs, mask, input_embs, output_embs) => {
-            //         // fill kv block
-            //         println!(
-            //             "Filling kv block with ptr: {}, ctx_ptrs: {:?}, mask: {:?}, input_embs: {:?}, output_embs: {:?}",
-            //             ptr, ctx_ptrs, mask, input_embs, output_embs
-            //         );
-            //     }
-            // }
+                        // println!(
+                        //     "Copying kv block from {} to {} with offsets {} and {} and size {}",
+                        //     src, dst, src_offset, dst_offset, size
+                        // );
+                    }
+                    IrCommand::MaskKvBlock(id, mask) => {
+                        println!("Masking kv block with id: {} and mask: {:?}", id, mask);
+                    }
+                    IrCommand::FillKvBlock(ptr, ctx_ptrs, input_embs, output_embs) => {
+                        println!(
+                            "Filling kv block with ptr: {}, ctx_ptrs: {:?}, input_embs: {:?}, output_embs: {:?}",
+                            ptr, ctx_ptrs,input_embs, output_embs
+                        );
+                        should_stop = false;
+                    }
+                }
+                processed_count += 1;
+                if should_stop {
+                    break;
+                }
+            }
+
+            // Only remove the commands that were processed.
+            cmd_list.drain(0..processed_count);
+        }
+
+        if cmd_alloc_emb.len() > 0 {
+
+            sdi::Allocate {
+                kind: sdi::ObjectKind::Emb.into(),
+                object_ids: Vec::new(),
+            };
+            // sdi::Allocate {
+            //
+            // };
+
+            println!("Allocating embeddings: {:?}", cmd_alloc_emb);
         }
 
         // drop the lock on pending
@@ -314,13 +332,12 @@ impl CausalTransformer for Backend {
         stream_id: StreamId,
         ptr: RemoteObjId,
         ctx_ptrs: Vec<RemoteObjId>,
-        mask: Vec<bool>,
         input_embs: Vec<RemoteObjId>,
-        output_embs: Vec<RemoteObjId>,
+        output_embs: Option<Vec<RemoteObjId>>,
     ) -> Result<(), BlockError> {
         // create "resolved" cmd.
 
-        let cmd = IrCommand::FillKvBlock(ptr, ctx_ptrs, mask, input_embs, output_embs);
+        let cmd = IrCommand::FillKvBlock(ptr, ctx_ptrs, input_embs, output_embs);
 
         self.enqueue_cmd(stream_id, cmd)?;
         Ok(())

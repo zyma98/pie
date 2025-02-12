@@ -234,9 +234,8 @@ pub trait CausalTransformer: ObjectAllocator<KvBlock> + ObjectAllocator<TokenEmb
         stream_id: StreamId,
         addr: RemoteObjId,
         ctx_addrs: Vec<RemoteObjId>,
-        mask: Vec<bool>,
         input_embs: Vec<RemoteObjId>,
-        output_embs: Vec<RemoteObjId>,
+        output_embs: Option<Vec<RemoteObjId>>,
     ) -> Result<(), BlockError>;
 
     fn copy_tokens(
