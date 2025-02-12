@@ -1,17 +1,16 @@
 use crate::state::{
-    BlockError, CausalLanguageModel, CausalTransformer, ImageEmbedder, InstanceId, KvBlock,
-    ObjectAllocator, RemoteObjId, StreamId, TokenDist, TokenEmb,
+    BlockError, CausalLanguageModel, CausalTransformer, ImageEmbedder, KvBlock, ObjectAllocator,
+    RemoteObjId, StreamId, TokenDist, TokenEmb,
 };
 use crate::utils::IdPool;
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot::Sender;
 
 /// Intermediate representation of a command to be executed by the backend.
 /// This must not be exposed to other modules.
 #[derive(Debug)]
-enum Command {
+enum IrCommand {
     // Embs
     AllocateEmb(usize),
     DeallocateEmb(usize),
@@ -24,16 +23,22 @@ enum Command {
     FillKvBlock(usize, Vec<usize>, Vec<bool>, Vec<usize>, Vec<usize>),
 }
 
+
+// Define actual cmd, interpretable by the backend.
+
+
+
+
 #[derive(Debug, Clone)]
 pub struct Backend {
     block_size: usize,
     namespace: Arc<Mutex<ObjNamespace>>,
 
-    cmd_buffer: Arc<Mutex<Vec<(StreamId, Command)>>>,
+    cmd_buffer: Arc<Mutex<Vec<(StreamId, IrCommand)>>>,
 
-    pending: Arc<Mutex<Vec<(StreamId, Command)>>>,
-    staged: Arc<Mutex<Vec<(StreamId, Command)>>>,
-    submitted: Arc<Mutex<Vec<(StreamId, Command)>>>,
+    pending: Arc<Mutex<Pending>>,
+    staged: Arc<Mutex<HashMap<StreamId, IrCommand>>>,
+    submitted: Arc<Mutex<Vec<(StreamId, IrCommand)>>>,
     // queue, cmd_buffer, scheduled, submitted
 }
 
@@ -42,6 +47,17 @@ pub struct Backend {
 struct ObjNamespace {
     kv_block_id_pool: IdPool<RemoteObjId>,
     emb_id_pool: IdPool<RemoteObjId>,
+}
+#[derive(Debug)]
+struct Pending {
+    fill_cmds: Vec<IrCommand>,
+}
+impl Pending {
+    fn new() -> Self {
+        Self {
+            fill_cmds: Vec::new(),
+        }
+    }
 }
 
 impl ObjNamespace {
@@ -84,13 +100,13 @@ impl Backend {
             block_size,
             namespace: Arc::new(Mutex::new(ObjNamespace::new(max_kv_blocks, max_embs))),
             cmd_buffer: Arc::new(Mutex::new(Vec::new())),
-            pending: Arc::new(Mutex::new(vec![])),
-            staged: Arc::new(Mutex::new(vec![])),
+            pending: Arc::new(Mutex::new(Pending::new())),
+            staged: Arc::new(Mutex::new(HashMap::new())),
             submitted: Arc::new(Mutex::new(vec![])),
         }
     }
 
-    pub fn enqueue_cmd(&self, stream_id: StreamId, cmd: Command) -> Result<(), BlockError> {
+    pub fn enqueue_cmd(&self, stream_id: StreamId, cmd: IrCommand) -> Result<(), BlockError> {
         let mut inner = self.cmd_buffer.lock().map_err(|_| BlockError::LockError)?;
         inner.push((stream_id, cmd));
         Ok(())
@@ -112,19 +128,31 @@ impl Backend {
     }
 
     pub fn schedule(&self, time_elapsed: f64) -> Result<(), BlockError> {
-        // first move all the commands from cmd_buffer to pending (buffer items are removed)
-        let mut pending = {
-            let mut cmd_buffer = self.cmd_buffer.lock().map_err(|_| BlockError::LockError)?;
-            let mut pending = self.pending.lock().map_err(|_| BlockError::LockError)?;
+        let mut pending = self.pending.lock().map_err(|_| BlockError::LockError)?;
 
-            pending.append(&mut cmd_buffer);
-            pending
+        // first move all the commands from cmd_buffer to pending (buffer items are removed)
+        let mut queued = {
+            let mut cmd_buffer = self.cmd_buffer.lock().map_err(|_| BlockError::LockError)?;
+
+            let mut queued = HashMap::new();
+
+            for (stream_id, command) in cmd_buffer.drain(..) {
+                queued
+                    .entry(stream_id)
+                    .or_insert_with(Vec::new)
+                    .push(command);
+            }
+
+            queued
             // drop the lock on cmd_buffer
         };
 
         // do batching!!
+        //
+        // cmd_set = HashMap<CmdType, Vec<Cmd>>
+        //
 
-        for (stream_id, cmd) in pending.iter() {
+        for (stream_id, cmd) in queued.iter() {
             // Three categories
             // Cohesive scheduling. -> Horizontal cohesion + Vertical cohesion
             // 1. CPU-only
@@ -134,34 +162,34 @@ impl Backend {
             // DepsQueue
 
             match cmd {
-                Command::AllocateEmb(id) => {
+                IrCommand::AllocateEmb(id) => {
                     // allocate emb
                     println!("Allocating emb with id: {}", id);
                 }
-                Command::DeallocateEmb(id) => {
+                IrCommand::DeallocateEmb(id) => {
                     // deallocate emb
                     println!("Deallocating emb with id: {}", id);
                 }
-                Command::AllocateKvBlock(id) => {
+                IrCommand::AllocateKvBlock(id) => {
                     // allocate kv block
                     println!("Allocating kv block with id: {}", id);
                 }
-                Command::DeallocateKvBlock(id) => {
+                IrCommand::DeallocateKvBlock(id) => {
                     // deallocate kv block
                     println!("Deallocating kv block with id: {}", id);
                 }
-                Command::CopyKvBlock(src, dst, src_offset, dst_offset, size) => {
+                IrCommand::CopyKvBlock(src, dst, src_offset, dst_offset, size) => {
                     // copy kv block
                     println!(
                         "Copying kv block from {} to {} with offsets {} and {} and size {}",
                         src, dst, src_offset, dst_offset, size
                     );
                 }
-                Command::MaskKvBlock(id, mask) => {
+                IrCommand::MaskKvBlock(id, mask) => {
                     // mask kv block
                     println!("Masking kv block with id: {} and mask: {:?}", id, mask);
                 }
-                Command::FillKvBlock(ptr, ctx_ptrs, mask, input_embs, output_embs) => {
+                IrCommand::FillKvBlock(ptr, ctx_ptrs, mask, input_embs, output_embs) => {
                     // fill kv block
                     println!(
                         "Filling kv block with ptr: {}, ctx_ptrs: {:?}, mask: {:?}, input_embs: {:?}, output_embs: {:?}",
@@ -182,7 +210,7 @@ impl ObjectAllocator<TokenEmb> for Backend {
     fn alloc(&self, stream_id: StreamId) -> Result<RemoteObjId, BlockError> {
         let new_obj_id = self.acquire_id(1)?;
 
-        let cmd = Command::AllocateEmb(new_obj_id);
+        let cmd = IrCommand::AllocateEmb(new_obj_id);
         self.enqueue_cmd(stream_id, cmd)?;
 
         Ok(new_obj_id)
@@ -192,7 +220,7 @@ impl ObjectAllocator<TokenEmb> for Backend {
         // Release the object id back to the pool.
         self.release_id(1, obj_id)?;
 
-        let cmd = Command::DeallocateEmb(obj_id);
+        let cmd = IrCommand::DeallocateEmb(obj_id);
         self.enqueue_cmd(stream_id, cmd)?;
 
         Ok(())
@@ -219,7 +247,7 @@ impl ObjectAllocator<KvBlock> for Backend {
     fn alloc(&self, stream_id: StreamId) -> Result<RemoteObjId, BlockError> {
         let new_obj_id = self.acquire_id(0)?;
 
-        let cmd = Command::AllocateKvBlock(new_obj_id);
+        let cmd = IrCommand::AllocateKvBlock(new_obj_id);
         self.enqueue_cmd(stream_id, cmd)?;
 
         Ok(new_obj_id)
@@ -229,7 +257,7 @@ impl ObjectAllocator<KvBlock> for Backend {
         // Release the object id back to the pool.
         self.release_id(0, obj_id)?;
 
-        let cmd = Command::DeallocateKvBlock(obj_id);
+        let cmd = IrCommand::DeallocateKvBlock(obj_id);
         self.enqueue_cmd(stream_id, cmd)?;
 
         Ok(())
@@ -287,7 +315,7 @@ impl CausalTransformer for Backend {
     ) -> Result<(), BlockError> {
         // create "resolved" cmd.
 
-        let cmd = Command::FillKvBlock(ptr, ctx_ptrs, mask, input_embs, output_embs);
+        let cmd = IrCommand::FillKvBlock(ptr, ctx_ptrs, mask, input_embs, output_embs);
 
         self.enqueue_cmd(stream_id, cmd)?;
         Ok(())
@@ -302,7 +330,7 @@ impl CausalTransformer for Backend {
         dst_offset: usize,
         size: usize,
     ) -> Result<(), BlockError> {
-        let cmd = Command::CopyKvBlock(src_ptr, dst_ptr, src_offset, dst_offset, size);
+        let cmd = IrCommand::CopyKvBlock(src_ptr, dst_ptr, src_offset, dst_offset, size);
 
         self.enqueue_cmd(stream_id, cmd)?;
         Ok(())
@@ -314,7 +342,7 @@ impl CausalTransformer for Backend {
         ptr: RemoteObjId,
         mask: &[bool],
     ) -> Result<(), BlockError> {
-        let cmd = Command::MaskKvBlock(ptr, mask.to_vec());
+        let cmd = IrCommand::MaskKvBlock(ptr, mask.to_vec());
         self.enqueue_cmd(stream_id, cmd)?;
         Ok(())
     }
@@ -323,7 +351,7 @@ impl CausalTransformer for Backend {
 impl CausalLanguageModel for Backend {
     fn next_token_dist(
         &self,
-        inst_id: StreamId,
+        stream_id: StreamId,
         emb_ptr: RemoteObjId,
         dist_ptr: RemoteObjId,
     ) -> Result<(), BlockError> {
@@ -332,7 +360,7 @@ impl CausalLanguageModel for Backend {
 
     fn sample_top_k(
         &self,
-        inst_id: StreamId,
+        stream_id: StreamId,
         dist_ptr: RemoteObjId,
         k: usize,
         sender: Sender<Vec<usize>>,
@@ -342,7 +370,7 @@ impl CausalLanguageModel for Backend {
 
     fn get_raw_dist(
         &self,
-        inst_id: StreamId,
+        stream_id: StreamId,
         dist_ptr: RemoteObjId,
         sender: Sender<Vec<f32>>,
     ) -> Result<(), BlockError> {
