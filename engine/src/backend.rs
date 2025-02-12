@@ -26,6 +26,11 @@ enum IrCommand {
 
 // Define actual cmd, interpretable by the backend.
 
+// Allocate(Type, entities:[id])
+// Deallocate(Type, entities:[id])
+// Fill (List[id, 
+// LongFill using bitsets.. implement this later.
+
 
 
 
@@ -161,42 +166,42 @@ impl Backend {
 
             // DepsQueue
 
-            match cmd {
-                IrCommand::AllocateEmb(id) => {
-                    // allocate emb
-                    println!("Allocating emb with id: {}", id);
-                }
-                IrCommand::DeallocateEmb(id) => {
-                    // deallocate emb
-                    println!("Deallocating emb with id: {}", id);
-                }
-                IrCommand::AllocateKvBlock(id) => {
-                    // allocate kv block
-                    println!("Allocating kv block with id: {}", id);
-                }
-                IrCommand::DeallocateKvBlock(id) => {
-                    // deallocate kv block
-                    println!("Deallocating kv block with id: {}", id);
-                }
-                IrCommand::CopyKvBlock(src, dst, src_offset, dst_offset, size) => {
-                    // copy kv block
-                    println!(
-                        "Copying kv block from {} to {} with offsets {} and {} and size {}",
-                        src, dst, src_offset, dst_offset, size
-                    );
-                }
-                IrCommand::MaskKvBlock(id, mask) => {
-                    // mask kv block
-                    println!("Masking kv block with id: {} and mask: {:?}", id, mask);
-                }
-                IrCommand::FillKvBlock(ptr, ctx_ptrs, mask, input_embs, output_embs) => {
-                    // fill kv block
-                    println!(
-                        "Filling kv block with ptr: {}, ctx_ptrs: {:?}, mask: {:?}, input_embs: {:?}, output_embs: {:?}",
-                        ptr, ctx_ptrs, mask, input_embs, output_embs
-                    );
-                }
-            }
+            // match cmd {
+            //     IrCommand::AllocateEmb(id) => {
+            //         // allocate emb
+            //         println!("Allocating emb with id: {}", id);
+            //     }
+            //     IrCommand::DeallocateEmb(id) => {
+            //         // deallocate emb
+            //         println!("Deallocating emb with id: {}", id);
+            //     }
+            //     IrCommand::AllocateKvBlock(id) => {
+            //         // allocate kv block
+            //         println!("Allocating kv block with id: {}", id);
+            //     }
+            //     IrCommand::DeallocateKvBlock(id) => {
+            //         // deallocate kv block
+            //         println!("Deallocating kv block with id: {}", id);
+            //     }
+            //     IrCommand::CopyKvBlock(src, dst, src_offset, dst_offset, size) => {
+            //         // copy kv block
+            //         println!(
+            //             "Copying kv block from {} to {} with offsets {} and {} and size {}",
+            //             src, dst, src_offset, dst_offset, size
+            //         );
+            //     }
+            //     IrCommand::MaskKvBlock(id, mask) => {
+            //         // mask kv block
+            //         println!("Masking kv block with id: {} and mask: {:?}", id, mask);
+            //     }
+            //     IrCommand::FillKvBlock(ptr, ctx_ptrs, mask, input_embs, output_embs) => {
+            //         // fill kv block
+            //         println!(
+            //             "Filling kv block with ptr: {}, ctx_ptrs: {:?}, mask: {:?}, input_embs: {:?}, output_embs: {:?}",
+            //             ptr, ctx_ptrs, mask, input_embs, output_embs
+            //         );
+            //     }
+            // }
         }
 
         // drop the lock on pending
