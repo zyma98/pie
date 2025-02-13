@@ -5,6 +5,7 @@ use crate::state::{
 use crate::utils::IdPool;
 use prost::Message;
 use std::collections::HashMap;
+use std::mem;
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot::Sender;
 
@@ -57,18 +58,60 @@ struct ObjNamespace {
 #[derive(Debug)]
 struct Pending {
     // these cmds are only be fired when it contains "enough" commands to be batched.
-    fill_block: sdi::FillBlock,
-    copy_block: sdi::CopyBlock,
-    embed_image: sdi::EmbedImage,
-    decode: sdi::DecodeRequest,
+    fill_block: BatchStrategy<sdi::FillBlock>,
+    copy_block: BatchStrategy<sdi::CopyBlock>,
+    embed_image: BatchStrategy<sdi::EmbedImage>,
+    decode: BatchStrategy<sdi::DecodeRequest>,
 }
-impl Pending {
-    fn new() -> Self {
+
+/// "K-or-T" Strategy
+// 	For instance: If queue size reaches K, launch immediately; otherwise launch after T ms if K isn’t reached.
+// 	This ensures that the GPU does not stay idle for too long (bounded by T) and that short bursts of arrivals form a large enough batch to get good utilization (bounded by K).
+#[derive(Debug)]
+struct BatchStrategy<T> {
+    cmd: T,
+
+    max_wait_time: f64,
+    max_size: u32,
+
+    current_wait_time: f64,
+    current_size: u32,
+}
+
+impl<T> BatchStrategy<T> {
+    fn new(cmd: T, max_wait_time: f64, max_size: u32) -> Self {
         Self {
-            fill_block: sdi::FillBlock::default(),
-            copy_block: sdi::CopyBlock::default(),
-            embed_image: sdi::EmbedImage::default(),
-            decode: sdi::DecodeRequest::default(),
+            cmd,
+            max_wait_time,
+            max_size,
+            current_wait_time: 0.0,
+            current_size: 0,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.current_wait_time = 0.0;
+        self.current_size = 0;
+    }
+
+    fn inc(&mut self, time_elapsed: f64) {
+        self.current_size += 1;
+        self.current_wait_time += time_elapsed;
+    }
+
+    fn is_ready(&self) -> bool {
+        self.current_size >= self.max_size
+            || (self.current_wait_time >= self.max_wait_time && self.current_size > 0)
+    }
+}
+
+impl Pending {
+    fn new(max_wait_time: f64, max_size: u32) -> Self {
+        Self {
+            fill_block: BatchStrategy::new(sdi::FillBlock::default(), max_wait_time, max_size),
+            copy_block: BatchStrategy::new(sdi::CopyBlock::default(), max_wait_time, max_size),
+            embed_image: BatchStrategy::new(sdi::EmbedImage::default(), max_wait_time, max_size),
+            decode: BatchStrategy::new(sdi::DecodeRequest::default(), max_wait_time, max_size),
         }
     }
 }
@@ -113,7 +156,7 @@ impl Backend {
             block_size,
             namespace: Arc::new(Mutex::new(ObjNamespace::new(max_kv_blocks, max_embs))),
             cmd_buffer: Arc::new(Mutex::new(Vec::new())),
-            pending: Arc::new(Mutex::new(Pending::new())),
+            pending: Arc::new(Mutex::new(Pending::new(10.0, 0))),
             staged: Arc::new(Mutex::new(Vec::new())),
             submitted: Arc::new(Mutex::new(vec![])),
         }
@@ -200,7 +243,7 @@ impl Backend {
                         dealloc_cmd.object_ids.push(*id);
                     }
                     IrCommand::CopyKvBlock(src, dst, src_offset, dst_offset, size) => {
-                        pending.copy_block.items.push(sdi::CopyBlockItem {
+                        pending.copy_block.cmd.items.push(sdi::CopyBlockItem {
                             source_block_id: *src,
                             destination_block_id: *dst,
                             source_start: *src_offset,
@@ -215,17 +258,13 @@ impl Backend {
                         });
                     }
                     IrCommand::FillKvBlock(ptr, ctx_ptrs, input_embs, output_embs) => {
-                        pending.fill_block.items.push(sdi::FillBlockItem {
+                        pending.fill_block.cmd.items.push(sdi::FillBlockItem {
                             block_id: *ptr,
                             context_block_ids: ctx_ptrs.to_vec(),
                             input_embedding_ids: input_embs.to_vec(),
                             output_embedding_ids: output_embs.clone().unwrap_or_default(),
                         });
 
-                        // println!(
-                        //     "Filling kv block with ptr: {}, ctx_ptrs: {:?}, input_embs: {:?}, output_embs: {:?}",
-                        //     ptr, ctx_ptrs,input_embs, output_embs
-                        // );
                         should_stop = false;
                     }
                 }
@@ -255,12 +294,23 @@ impl Backend {
                 payload: Some(sdi::command::Payload::Deallocate(dealloc_cmd)),
             });
         }
-        
+
         if mask_cmd.items.len() > 0 {
             staged.push(sdi::Command {
                 correlation_id: 0,
                 payload: Some(sdi::command::Payload::MaskBlock(mask_cmd)),
             });
+        }
+
+        // fill decision.
+        if pending.fill_block.is_ready() {
+            staged.push(sdi::Command {
+                correlation_id: 0,
+                payload: Some(sdi::command::Payload::FillBlock(mem::take(
+                    &mut pending.fill_block.cmd,
+                ))),
+            });
+            pending.fill_block.clear();
         }
 
         // drop the lock on pending
