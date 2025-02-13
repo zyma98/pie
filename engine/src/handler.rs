@@ -190,9 +190,9 @@ where
         local_stream_id: Option<u32>,
         src_addr: Addr,
         dst_addr: Addr,
-        src_token_offset: usize,
-        dst_token_offset: usize,
-        token_count: usize,
+        src_token_offset: u32,
+        dst_token_offset: u32,
+        token_count: u32,
     ) -> Result<(), BlockError> {
         self.kv_blocks.copy_tokens(
             inst_id,

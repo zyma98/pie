@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot::Sender;
 
-pub mod sdi {
+mod sdi {
     include!(concat!(env!("OUT_DIR"), "/sdi.rs"));
 }
 
@@ -17,15 +17,15 @@ pub mod sdi {
 #[derive(Debug)]
 enum IrCommand {
     // Embs
-    AllocateEmb(usize),
-    DeallocateEmb(usize),
+    AllocateEmb(u32),
+    DeallocateEmb(u32),
 
     // KvBlocks
-    AllocateKvBlock(usize),
-    DeallocateKvBlock(usize),
-    CopyKvBlock(usize, usize, usize, usize, usize),
-    MaskKvBlock(usize, Vec<bool>),
-    FillKvBlock(usize, Vec<usize>, Vec<usize>, Option<Vec<usize>>),
+    AllocateKvBlock(u32),
+    DeallocateKvBlock(u32),
+    CopyKvBlock(u32, u32, u32, u32, u32),
+    MaskKvBlock(u32, Vec<bool>),
+    FillKvBlock(u32, Vec<u32>, Vec<u32>, Option<Vec<u32>>),
 }
 
 // Define actual cmd, interpretable by the backend.
@@ -37,14 +37,14 @@ enum IrCommand {
 
 #[derive(Debug, Clone)]
 pub struct Backend {
-    block_size: usize,
+    block_size: u32,
     namespace: Arc<Mutex<ObjNamespace>>,
 
     cmd_buffer: Arc<Mutex<Vec<(StreamId, IrCommand)>>>,
 
     pending: Arc<Mutex<Pending>>,
-    staged: Arc<Mutex<HashMap<StreamId, IrCommand>>>,
-    submitted: Arc<Mutex<Vec<(StreamId, IrCommand)>>>,
+    staged: Arc<Mutex<Vec<sdi::Command>>>,
+    submitted: Arc<Mutex<Vec<sdi::Command>>>,
     // queue, cmd_buffer, scheduled, submitted
 }
 
@@ -56,18 +56,25 @@ struct ObjNamespace {
 }
 #[derive(Debug)]
 struct Pending {
-    fill_cmds: Vec<IrCommand>,
+    // these cmds are only be fired when it contains "enough" commands to be batched.
+    fill_block: sdi::FillBlock,
+    copy_block: sdi::CopyBlock,
+    embed_image: sdi::EmbedImage,
+    decode: sdi::DecodeRequest,
 }
 impl Pending {
     fn new() -> Self {
         Self {
-            fill_cmds: Vec::new(),
+            fill_block: sdi::FillBlock::default(),
+            copy_block: sdi::CopyBlock::default(),
+            embed_image: sdi::EmbedImage::default(),
+            decode: sdi::DecodeRequest::default(),
         }
     }
 }
 
 impl ObjNamespace {
-    fn new(max_kv_blocks: usize, max_embs: usize) -> Self {
+    fn new(max_kv_blocks: u32, max_embs: u32) -> Self {
         Self {
             kv_block_id_pool: IdPool::new(max_kv_blocks),
             emb_id_pool: IdPool::new(max_embs),
@@ -101,13 +108,13 @@ impl ObjNamespace {
 }
 
 impl Backend {
-    pub fn new(block_size: usize, max_kv_blocks: usize, max_embs: usize) -> Self {
+    pub fn new(block_size: u32, max_kv_blocks: u32, max_embs: u32) -> Self {
         Self {
             block_size,
             namespace: Arc::new(Mutex::new(ObjNamespace::new(max_kv_blocks, max_embs))),
             cmd_buffer: Arc::new(Mutex::new(Vec::new())),
             pending: Arc::new(Mutex::new(Pending::new())),
-            staged: Arc::new(Mutex::new(HashMap::new())),
+            staged: Arc::new(Mutex::new(Vec::new())),
             submitted: Arc::new(Mutex::new(vec![])),
         }
     }
@@ -157,10 +164,17 @@ impl Backend {
         //
         // cmd_set = HashMap<CmdType, Vec<Cmd>>
         //
-        let mut cmd_alloc_emb = Vec::new();
-        let mut cmd_alloc_kv_block = Vec::new();
-        let mut cmd_dealloc_emb = Vec::new();
-        let mut cmd_dealloc_kv_block = Vec::new();
+        let mut alloc_cmd = sdi::Allocate {
+            kind: Vec::new(),
+            object_ids: Vec::new(),
+        };
+
+        let mut dealloc_cmd = sdi::Deallocate {
+            kind: Vec::new(),
+            object_ids: Vec::new(),
+        };
+
+        let mut mask_cmd = sdi::MaskBlock { items: Vec::new() };
 
         for (_stream_id, cmd_list) in commands_by_stream.iter_mut() {
             let mut processed_count = 0;
@@ -169,33 +183,49 @@ impl Backend {
                 let mut should_stop = true;
                 match cmd {
                     IrCommand::AllocateEmb(id) => {
-                        cmd_alloc_emb.push(*id);
+                        alloc_cmd.kind.push(sdi::ObjectKind::Emb.into());
+                        alloc_cmd.object_ids.push(*id);
                         // Processed, so keep_on remains false (we can drop this command)
                     }
                     IrCommand::DeallocateEmb(id) => {
-                        cmd_dealloc_emb.push(*id);
+                        dealloc_cmd.kind.push(sdi::ObjectKind::Emb.into());
+                        dealloc_cmd.object_ids.push(*id);
                     }
                     IrCommand::AllocateKvBlock(id) => {
-                        cmd_alloc_kv_block.push(*id);
+                        alloc_cmd.kind.push(sdi::ObjectKind::KvBlock.into());
+                        alloc_cmd.object_ids.push(*id);
                     }
                     IrCommand::DeallocateKvBlock(id) => {
-                        cmd_dealloc_kv_block.push(*id);
+                        dealloc_cmd.kind.push(sdi::ObjectKind::KvBlock.into());
+                        dealloc_cmd.object_ids.push(*id);
                     }
                     IrCommand::CopyKvBlock(src, dst, src_offset, dst_offset, size) => {
-
-                        // println!(
-                        //     "Copying kv block from {} to {} with offsets {} and {} and size {}",
-                        //     src, dst, src_offset, dst_offset, size
-                        // );
+                        pending.copy_block.items.push(sdi::CopyBlockItem {
+                            source_block_id: *src,
+                            destination_block_id: *dst,
+                            source_start: *src_offset,
+                            destination_start: *dst_offset,
+                            length: *size,
+                        });
                     }
                     IrCommand::MaskKvBlock(id, mask) => {
-                        println!("Masking kv block with id: {} and mask: {:?}", id, mask);
+                        mask_cmd.items.push(sdi::MaskBlockItem {
+                            block_id: *id,
+                            mask: mask.to_vec(),
+                        });
                     }
                     IrCommand::FillKvBlock(ptr, ctx_ptrs, input_embs, output_embs) => {
-                        println!(
-                            "Filling kv block with ptr: {}, ctx_ptrs: {:?}, input_embs: {:?}, output_embs: {:?}",
-                            ptr, ctx_ptrs,input_embs, output_embs
-                        );
+                        pending.fill_block.items.push(sdi::FillBlockItem {
+                            block_id: *ptr,
+                            context_block_ids: ctx_ptrs.to_vec(),
+                            input_embedding_ids: input_embs.to_vec(),
+                            output_embedding_ids: output_embs.clone().unwrap_or_default(),
+                        });
+
+                        // println!(
+                        //     "Filling kv block with ptr: {}, ctx_ptrs: {:?}, input_embs: {:?}, output_embs: {:?}",
+                        //     ptr, ctx_ptrs,input_embs, output_embs
+                        // );
                         should_stop = false;
                     }
                 }
@@ -209,17 +239,28 @@ impl Backend {
             cmd_list.drain(0..processed_count);
         }
 
-        if cmd_alloc_emb.len() > 0 {
+        // add the commands to the staged queue
+        let mut staged = self.staged.lock().map_err(|_| BlockError::LockError)?;
 
-            sdi::Allocate {
-                kind: sdi::ObjectKind::Emb.into(),
-                object_ids: Vec::new(),
-            };
-            // sdi::Allocate {
-            //
-            // };
+        if alloc_cmd.object_ids.len() > 0 {
+            staged.push(sdi::Command {
+                correlation_id: 0,
+                payload: Some(sdi::command::Payload::Allocate(alloc_cmd)),
+            });
+        }
 
-            println!("Allocating embeddings: {:?}", cmd_alloc_emb);
+        if dealloc_cmd.object_ids.len() > 0 {
+            staged.push(sdi::Command {
+                correlation_id: 0,
+                payload: Some(sdi::command::Payload::Deallocate(dealloc_cmd)),
+            });
+        }
+        
+        if mask_cmd.items.len() > 0 {
+            staged.push(sdi::Command {
+                correlation_id: 0,
+                payload: Some(sdi::command::Payload::MaskBlock(mask_cmd)),
+            });
         }
 
         // drop the lock on pending
@@ -265,7 +306,7 @@ impl ObjectAllocator<TokenEmb> for Backend {
 
 impl ObjectAllocator<KvBlock> for Backend {
     // The raw representation of a kv block is not really useful in any way. So we just use usize.
-    type RawRepr = usize;
+    type RawRepr = RemoteObjId;
 
     fn alloc(&self, stream_id: StreamId) -> Result<RemoteObjId, BlockError> {
         let new_obj_id = self.acquire_id(0)?;
@@ -348,9 +389,9 @@ impl CausalTransformer for Backend {
         stream_id: StreamId,
         src_ptr: RemoteObjId,
         dst_ptr: RemoteObjId,
-        src_offset: usize,
-        dst_offset: usize,
-        size: usize,
+        src_offset: u32,
+        dst_offset: u32,
+        size: u32,
     ) -> Result<(), BlockError> {
         let cmd = IrCommand::CopyKvBlock(src_ptr, dst_ptr, src_offset, dst_offset, size);
 
