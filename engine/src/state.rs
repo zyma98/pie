@@ -576,7 +576,7 @@ pub trait CausalLanguageModel: ObjectAllocator<TokenEmb> + ObjectAllocator<Token
         &self,
         stream_id: StreamId,
         dist_ptr: ObjectId,
-        k: usize,
+        k: u32,
     ) -> Result<oneshot::Receiver<Vec<u32>>, BlockError>;
 
     // todo: design a better struct to represent distributions
