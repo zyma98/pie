@@ -3,7 +3,10 @@ use wasmtime::component::{bindgen, ResourceTable};
 use wasmtime::Result;
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiView};
 
+use crate::state::{ObjectId, StreamId};
+use crate::utils::IdPool;
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::oneshot;
 use uuid::Uuid;
 
 bindgen!({
@@ -28,14 +31,108 @@ pub struct InstanceState {
     pub resource_table: ResourceTable,
 
     // For communication between the instance and the host
-    pub inst2server: Sender<InstanceMessage>,
-    pub server2inst: Receiver<InstanceMessage>,
+    pub inst2server: Sender<InstanceMessageOld>,
+    pub server2inst: Receiver<InstanceMessageOld>,
+
+    allocator: IdPool<ObjectId>,
 }
 
-pub struct InstanceMessage {
+pub struct InstanceMessageOld {
     pub instance_id: Uuid,
     pub dest_id: u32,
     pub message: String,
+}
+
+pub enum Command {
+    // Block commands
+    AllocateBlocks {
+        stream: StreamId,
+        blocks: Vec<ObjectId>,
+    },
+
+    DeallocateBlocks {
+        stream: StreamId,
+        blocks: Vec<ObjectId>,
+    },
+
+    FillBlocks {
+        stream: StreamId,
+        blocks: Vec<ObjectId>,
+        context: Vec<ObjectId>,
+        inputs: Vec<ObjectId>,
+        outputs: Vec<Option<ObjectId>>,
+    },
+    
+    ExportBlocks {
+        blocks: Vec<ObjectId>,
+        resource_name:String,
+    },
+
+    ImportBlocks {
+        blocks: Vec<ObjectId>,
+        resource_name:String,
+    },
+    
+    CopyBlock {
+        stream: StreamId,
+        src_block: ObjectId,
+        dst_block: ObjectId,
+        src_token_offset: u32,
+        dst_token_offset: u32,
+        size: u32,
+    },
+
+    MaskBlock {
+        stream: StreamId,
+        block: ObjectId,
+        mask: Vec<bool>,
+    },
+
+    // Embed ctrl
+    AllocateEmb {
+        stream: StreamId,
+        embs: Vec<ObjectId>,
+    },
+
+    DeallocateEmb {
+        stream: StreamId,
+        embs: Vec<ObjectId>,
+    },
+
+    EmbedText {
+        stream: StreamId,
+        embs: Vec<ObjectId>,
+        text: Vec<u32>,
+    },
+
+    EmbedImage {
+        stream: StreamId,
+        embs: Vec<ObjectId>,
+        image: String,
+    },
+
+    // Output emb ctrl
+    AllocateDist {
+        stream: StreamId,
+        dists: Vec<ObjectId>,
+    },
+
+    DeallocateDist {
+        stream: StreamId,
+        dists: Vec<ObjectId>,
+    },
+
+    DecodeTokenDist {
+        stream: StreamId,
+        dists: ObjectId,
+        handle: oneshot::Sender<Vec<u32>>,
+    },
+
+    GetTokenDist {
+        stream: StreamId,
+        dists: ObjectId,
+        handle: oneshot::Sender<Vec<f32>>,
+    },
 }
 
 impl WasiView for InstanceState {
@@ -50,8 +147,8 @@ impl WasiView for InstanceState {
 impl InstanceState {
     pub fn new(
         instance_id: Uuid,
-        inst2server: Sender<InstanceMessage>,
-        server2inst: Receiver<InstanceMessage>,
+        inst2server: Sender<InstanceMessageOld>,
+        server2inst: Receiver<InstanceMessageOld>,
     ) -> Self {
         let mut builder = WasiCtx::builder();
         builder.inherit_stderr().inherit_network().inherit_stdout();
@@ -62,6 +159,7 @@ impl InstanceState {
             resource_table: ResourceTable::new(),
             inst2server,
             server2inst,
+            allocator: IdPool::new(1_000_000),
         }
     }
 }
@@ -95,7 +193,7 @@ impl spi::app::system::Host for InstanceState {
 
     async fn send(&mut self, dest_id: u32, message: String) -> Result<()> {
         self.inst2server
-            .send(InstanceMessage {
+            .send(InstanceMessageOld {
                 instance_id: self.instance_id,
                 dest_id,
                 message,
