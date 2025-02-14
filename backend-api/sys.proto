@@ -134,24 +134,50 @@ message CopyBlock {
 // Decode request/response messages.
 // -----------------------------------------------------------------------------
 
-message DecodeRequestItem {
+message DecodeTokenDistributionItem {
   // The embedding ID to decode.
   uint32 embedding_id = 1;
+  uint32 distribution_id = 2;
 }
 
 // A request to decode a sequence of embeddings into tokens.
-message DecodeRequest {
+message DecodeTokenDistribution {
 
   // The embedding IDs to decode.
-  repeated DecodeRequestItem items = 1;
+  repeated DecodeTokenDistributionItem items = 1;
+}
+
+message SampleTopKRequestItem {
+  // The distribution to sample from.
+  uint32 distribution_id = 1;
+  // The number of samples to draw.
+  uint32 k = 2;
+}
+
+message SampleTopKRequest {
+  // The sampling request items.
+  repeated SampleTopKRequestItem items = 1;
 }
 
 // The response containing decoded tokens.
-message DecodeResponse {
-  // The request identifier to which this response corresponds.
-  uint32 request_id = 1;
+message SampleTopKResponseItem {
   // The decoded token IDs.
-  repeated uint32 token_ids = 2;
+  repeated uint32 token_ids = 1;
+}
+
+message SampleTopKResponse {
+  // The response items.
+  repeated SampleTopKResponseItem items = 1;
+}
+
+message GetTokenDistributionRequest {
+  // The distribution ID to retrieve.
+  uint32 distribution_id = 1;
+}
+
+message GetTokenDistributionResponse {
+  // The distribution.
+  repeated float distribution = 1;
 }
 
 message Command {
@@ -165,7 +191,9 @@ message Command {
     FillBlock fill_block = 6;
     MaskBlock mask_block = 7;
     CopyBlock copy_block = 8;
-    DecodeRequest decode_request = 9;
+    DecodeTokenDistribution decode_token_distribution = 9;
+    SampleTopKRequest sample_top_k_request = 10;
+    GetTokenDistributionRequest get_token_distribution = 11;
   }
 }
 
@@ -174,6 +202,7 @@ message Event {
   uint32 correlation_id = 1;
 
   oneof payload {
-    DecodeResponse decode_response = 2;
+    SampleTopKResponse sample_top_k = 2;
+    GetTokenDistributionResponse get_token_distribution = 3;
   }
 }

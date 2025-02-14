@@ -47,8 +47,7 @@ pub trait ObjectAllocator<T: ReferenceCounted> {
         &self,
         stream_id: StreamId,
         obj_id: RemoteObjId,
-        sender: oneshot::Sender<Self::RawRepr>,
-    ) -> Result<(), BlockError>;
+    ) -> Result<oneshot::Receiver<Self::RawRepr>, BlockError>;
 
     fn available(&self) -> usize;
 }
@@ -578,16 +577,14 @@ pub trait CausalLanguageModel: ObjectAllocator<TokenEmb> + ObjectAllocator<Token
         stream_id: StreamId,
         dist_ptr: RemoteObjId,
         k: usize,
-        sender: oneshot::Sender<Vec<usize>>,
-    ) -> Result<(), BlockError>;
+    ) -> Result<oneshot::Receiver<Vec<u32>>, BlockError>;
 
     // todo: design a better struct to represent distributions
     fn get_raw_dist(
         &self,
         stream_id: StreamId,
         dist_ptr: RemoteObjId,
-        sender: oneshot::Sender<Vec<f32>>,
-    ) -> Result<(), BlockError>;
+    ) -> Result<oneshot::Receiver<Vec<f32>>, BlockError>;
 }
 
 pub trait MaskedLanguageModel: ObjectAllocator<TokenEmb> + ObjectAllocator<TokenDist> {
@@ -634,7 +631,7 @@ pub enum BlockError {
     ResourceNotFound,
     ResourcePermissionDenied,
     LockError,
-    SendError
+    SendError,
 }
 
 // ------------------------------------------------------------

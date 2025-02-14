@@ -3,12 +3,12 @@ use crate::state::{
     RemoteObjId, StreamId, TokenDist, TokenEmb,
 };
 use crate::utils::IdPool;
+use futures::TryFutureExt;
 use prost::Message;
 use std::collections::HashMap;
 use std::mem;
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
-use tokio::sync::oneshot::Sender;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use zeromq::{DealerSocket, Socket, SocketRecv, SocketSend, ZmqError, ZmqMessage};
 
@@ -28,7 +28,19 @@ enum IrCommand {
     FillBlock(sdi::FillBlockItem),
     EmbedImage(sdi::EmbedImageItem),
     EmbedText(sdi::EmbedTextItem),
-    DecodeRequest(sdi::DecodeRequestItem),
+    DecodeTokenDistribution(sdi::DecodeTokenDistributionItem),
+    SampleTopKRequest(sdi::SampleTopKRequestItem),
+}
+
+#[derive(Debug)]
+enum IrEvent {
+    SampleTopK(sdi::SampleTopKResponseItem),
+}
+
+#[derive(Debug)]
+struct EventDispatcher {
+    // maps correlation_id to a list of senders.
+    table: HashMap<u32, Vec<oneshot::Sender<IrEvent>>>,
 }
 
 // Define actual cmd, interpretable by the backend.
@@ -53,6 +65,9 @@ pub struct Backend {
     handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     // zmq handles
     //handle: Arc<JoinHandle<()>>,
+
+    // event dispatcher
+    event_dispatcher: Arc<Mutex<EventDispatcher>>,
 }
 
 impl Backend {
@@ -66,10 +81,24 @@ impl Backend {
             submitted: Arc::new(Mutex::new(vec![])),
             socket_tx: Arc::new(Mutex::new(None)),
             handle: Arc::new(Mutex::new(None)),
+            event_dispatcher: Arc::new(Mutex::new(EventDispatcher {
+                table: HashMap::new(),
+            })),
         }
     }
 
     pub fn enqueue_cmd(&self, stream_id: StreamId, cmd: IrCommand) -> Result<(), BlockError> {
+        let mut inner = self.cmd_buffer.lock().map_err(|_| BlockError::LockError)?;
+        inner.push((stream_id, cmd));
+        Ok(())
+    }
+
+    pub fn enqueue_cmd_with_response(
+        &self,
+        stream_id: StreamId,
+        cmd: IrCommand,
+        sender: Sender<sdi::Event>,
+    ) -> Result<(), BlockError> {
         let mut inner = self.cmd_buffer.lock().map_err(|_| BlockError::LockError)?;
         inner.push((stream_id, cmd));
         Ok(())
@@ -185,10 +214,7 @@ impl Backend {
         Ok(())
     }
 
-    async fn socket_driver(
-        mut socket: DealerSocket,
-        mut rx: mpsc::Receiver<Vec<sdi::Command>>,
-    ) {
+    async fn socket_driver(mut socket: DealerSocket, mut rx: mpsc::Receiver<Vec<sdi::Command>>) {
         loop {
             tokio::select! {
                 // A) Incoming requests from the channel => send to server
@@ -492,8 +518,7 @@ impl ObjectAllocator<TokenEmb> for Backend {
         &self,
         stream_id: StreamId,
         obj_id: RemoteObjId,
-        sender: Sender<Self::RawRepr>,
-    ) -> Result<(), BlockError> {
+    ) -> Result<oneshot::Receiver<Self::RawRepr>, BlockError> {
         todo!()
     }
 
@@ -537,8 +562,7 @@ impl ObjectAllocator<KvBlock> for Backend {
         &self,
         stream_id: StreamId,
         obj_id: RemoteObjId,
-        sender: Sender<Self::RawRepr>,
-    ) -> Result<(), BlockError> {
+    ) -> Result<oneshot::Receiver<Self::RawRepr>, BlockError> {
         sender.send(obj_id).unwrap();
         Ok(())
     }
@@ -563,8 +587,7 @@ impl ObjectAllocator<TokenDist> for Backend {
         &self,
         stream_id: StreamId,
         obj_id: RemoteObjId,
-        sender: Sender<Self::RawRepr>,
-    ) -> Result<(), BlockError> {
+    ) -> Result<oneshot::Receiver<Self::RawRepr>, BlockError> {
         todo!()
     }
 
@@ -646,17 +669,24 @@ impl CausalLanguageModel for Backend {
         stream_id: StreamId,
         dist_ptr: RemoteObjId,
         k: usize,
-        sender: Sender<Vec<usize>>,
-    ) -> Result<(), BlockError> {
-        todo!()
+    ) -> Result<oneshot::Receiver<Vec<u32>>, BlockError> {
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel::<sdi::DecodeResponse>();
+
+        let rx_chain = resp_rx.and_then(|resp| async move {
+            // Process the number (e.g., add a prefix)
+            // Send it using tx2; since tx2.send(...) returns a Result,
+            // we wrap it with future::result to lift it into a future.
+            Ok(resp.token_ids[0])
+        });
+
+        Ok(rx_chain)
     }
 
     fn get_raw_dist(
         &self,
         stream_id: StreamId,
         dist_ptr: RemoteObjId,
-        sender: Sender<Vec<f32>>,
-    ) -> Result<(), BlockError> {
+    ) -> Result<oneshot::Receiver<Vec<f32>>, BlockError> {
         todo!()
     }
 }
