@@ -1,6 +1,6 @@
 use crate::state::{
     get_stream_id, Addr, BlockError, CausalLanguageModel, CausalTransformer, ImageEmbedder,
-    InstanceId, KvBlock, KvBlockManager, ObjectAllocator, ObjectManager, RemoteObjId, TokenEmb,
+    InstanceId, KvBlock, KvBlockManager, ObjectAllocator, ObjectManager, ObjectId, TokenEmb,
     TokenEmbManager, VideoEmbedder,
 };
 use std::collections::{HashMap, HashSet};
@@ -357,11 +357,11 @@ where
 /// Internal struct that won't be exposed outside the module
 #[derive(Debug, Clone)]
 struct _FillBlockCmd {
-    block_ptr: RemoteObjId,
-    ctx_block_ptrs: Vec<RemoteObjId>,
+    block_ptr: ObjectId,
+    ctx_block_ptrs: Vec<ObjectId>,
     mask: Vec<bool>,
-    input_emb_ptrs: Vec<RemoteObjId>,
-    output_emb_ptrs: Vec<RemoteObjId>,
+    input_emb_ptrs: Vec<ObjectId>,
+    output_emb_ptrs: Vec<ObjectId>,
 }
 
 #[derive(Debug, Clone)]

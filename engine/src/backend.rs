@@ -1,6 +1,6 @@
 use crate::state::{
     BlockError, CausalLanguageModel, CausalTransformer, ImageEmbedder, KvBlock, ObjectAllocator,
-    RemoteObjId, StreamId, TokenDist, TokenEmb,
+    ObjectId, StreamId, TokenDist, TokenEmb,
 };
 use crate::utils::IdPool;
 use futures::TryFutureExt;
@@ -21,28 +21,72 @@ mod sdi {
 #[derive(Debug)]
 enum IrCommand {
     // Embs
-    Allocate(sdi::AllocateItem),
-    Deallocate(sdi::AllocateItem),
-    CopyBlock(sdi::CopyBlockItem),
-    MaskBlock(sdi::MaskBlockItem),
-    FillBlock(sdi::FillBlockItem),
-    EmbedImage(sdi::EmbedImageItem),
-    EmbedText(sdi::EmbedTextItem),
-    DecodeTokenDistribution(sdi::DecodeTokenDistributionItem),
-    SampleTopKRequest(sdi::SampleTopKRequestItem),
+    Allocate(sdi::Allocate),
+    Deallocate(sdi::Allocate),
+    CopyBlock(sdi::CopyBlock),
+    MaskBlock(sdi::MaskBlock),
+    FillBlock(sdi::FillBlock),
+    EmbedImage(sdi::EmbedImage),
+    EmbedText(sdi::EmbedText),
+    DecodeTokenDistribution(sdi::DecodeTokenDistribution),
+    SampleTopKRequest(sdi::SampleTopKRequest),
 }
 
 #[derive(Debug)]
 enum IrEvent {
-    SampleTopK(sdi::SampleTopKResponseItem),
+    SampleTopK(sdi::SampleTopKResponse),
+    GetTokenDistribution(sdi::GetTokenDistributionResponse),
 }
 
 #[derive(Debug)]
 struct EventDispatcher {
     // maps correlation_id to a list of senders.
-    table: HashMap<u32, Vec<oneshot::Sender<IrEvent>>>,
+    table: HashMap<u32, Vec<EventHandle>>,
+}
+#[derive(Debug)]
+pub enum EventHandle {
+    None,
+    SampleTopK(oneshot::Sender<sdi::SampleTopKResponse>),
+    GetTokenDistribution(oneshot::Sender<sdi::GetTokenDistributionResponse>),
 }
 
+impl EventDispatcher {
+    fn new() -> Self {
+        Self {
+            table: HashMap::new(),
+        }
+    }
+
+    fn register(&mut self, correlation_id: u32, sender: Vec<EventHandle>) {
+        self.table.insert(correlation_id, sender);
+    }
+
+    fn dispatch(&mut self, correlation_id: u32, event: Vec<IrEvent>) {
+        // zip senders and evnt
+        let senders = self.table.get_mut(&correlation_id).unwrap();
+        assert_eq!(senders.len(), event.len());
+
+        for (sender, evt) in senders.drain(..).zip(event.iter()) {
+            match sender {
+                EventHandle::None => {}
+                EventHandle::SampleTopK(s) => {
+                    if let IrEvent::SampleTopK(resp) = evt {
+                        let _ = s.send(resp.clone());
+                    } else {
+                        eprintln!("Unexpected event type");
+                    }
+                }
+                EventHandle::GetTokenDistribution(s) => {
+                    if let IrEvent::GetTokenDistribution(resp) = evt {
+                        let _ = s.send(resp.clone());
+                    } else {
+                        eprintln!("Unexpected event type");
+                    }
+                }
+            }
+        }
+    }
+}
 // Define actual cmd, interpretable by the backend.
 
 // Allocate(Type, entities:[id])
@@ -53,9 +97,9 @@ struct EventDispatcher {
 #[derive(Debug, Clone)]
 pub struct Backend {
     block_size: u32,
-    namespace: Arc<Mutex<ObjNamespace>>,
+    id_pool: Arc<Mutex<ObjectIdPool>>,
 
-    cmd_buffer: Arc<Mutex<Vec<(StreamId, IrCommand)>>>,
+    cmd_buffer: Arc<Mutex<Vec<(StreamId, IrCommand, Option<oneshot::Sender<IrEvent>>)>>>,
 
     pending: Arc<Mutex<Pending>>,
     staged: Arc<Mutex<Vec<sdi::Command>>>,
@@ -74,7 +118,7 @@ impl Backend {
     pub fn new(block_size: u32, max_kv_blocks: u32, max_embs: u32) -> Self {
         Self {
             block_size,
-            namespace: Arc::new(Mutex::new(ObjNamespace::new(max_kv_blocks, max_embs))),
+            id_pool: Arc::new(Mutex::new(ObjectIdPool::new(max_kv_blocks, max_embs))),
             cmd_buffer: Arc::new(Mutex::new(Vec::new())),
             pending: Arc::new(Mutex::new(Pending::new(10.0, 1, 1))),
             staged: Arc::new(Mutex::new(Vec::new())),
@@ -89,34 +133,37 @@ impl Backend {
 
     pub fn enqueue_cmd(&self, stream_id: StreamId, cmd: IrCommand) -> Result<(), BlockError> {
         let mut inner = self.cmd_buffer.lock().map_err(|_| BlockError::LockError)?;
-        inner.push((stream_id, cmd));
+        inner.push((stream_id, cmd, None));
         Ok(())
     }
 
-    pub fn enqueue_cmd_with_response(
+    pub fn enqueue_cmd_with_resp(
         &self,
         stream_id: StreamId,
         cmd: IrCommand,
-        sender: Sender<sdi::Event>,
-    ) -> Result<(), BlockError> {
+    ) -> Result<oneshot::Receiver<IrEvent>, BlockError> {
         let mut inner = self.cmd_buffer.lock().map_err(|_| BlockError::LockError)?;
-        inner.push((stream_id, cmd));
-        Ok(())
+
+        // create an oneshot channel
+        let (tx, rx) = oneshot::channel();
+
+        inner.push((stream_id, cmd, Some(tx)));
+        Ok(rx)
     }
 
-    fn acquire_id(&self, namespace: usize) -> Result<RemoteObjId, BlockError> {
-        let mut inner = self.namespace.lock().map_err(|_| BlockError::LockError)?;
-        inner.acquire_id(namespace)
+    fn acquire_id(&self, ns: ObjectNamespace) -> Result<ObjectId, BlockError> {
+        let mut inner = self.id_pool.lock().map_err(|_| BlockError::LockError)?;
+        inner.acquire_id(ns)
     }
 
-    fn release_id(&self, namespace: usize, id: RemoteObjId) -> Result<(), BlockError> {
-        let mut inner = self.namespace.lock().map_err(|_| BlockError::LockError)?;
-        inner.release_id(namespace, id)
+    fn release_id(&self, ns: ObjectNamespace, id: ObjectId) -> Result<(), BlockError> {
+        let mut inner = self.id_pool.lock().map_err(|_| BlockError::LockError)?;
+        inner.release_id(ns, id)
     }
 
-    fn remaining_ids(&self, namespace: usize) -> usize {
-        let inner = self.namespace.lock().unwrap();
-        inner.remaining_ids(namespace)
+    fn remaining_ids(&self, ns: ObjectNamespace) -> usize {
+        let inner = self.id_pool.lock().unwrap();
+        inner.remaining_ids(ns)
     }
 
     pub fn schedule(&self, curr_timestamp: f64) -> Result<(), BlockError> {
@@ -128,11 +175,11 @@ impl Backend {
 
             let mut stream_commands = HashMap::new();
 
-            for (stream_id, command) in cmd_buffer.drain(..) {
+            for (stream_id, command, sender) in cmd_buffer.drain(..) {
                 stream_commands
                     .entry(stream_id)
                     .or_insert_with(Vec::new)
-                    .push(command);
+                    .push((command, sender));
             }
 
             stream_commands
@@ -147,7 +194,7 @@ impl Backend {
                 if cmd_list.is_empty() {
                     break;
                 }
-                let cmd = cmd_list.pop().unwrap();
+                let (cmd, sender) = cmd_list.pop().unwrap();
                 let curr_cmd = mem::discriminant(&cmd);
 
                 // Vertical batching: Same kind of consecutive commands are batched together.
@@ -158,7 +205,7 @@ impl Backend {
                     }
                 }
 
-                pending.push(cmd, curr_timestamp);
+                pending.push(cmd, curr_timestamp, sender);
                 prev_cmd = Some(curr_cmd);
             }
         }
@@ -169,11 +216,23 @@ impl Backend {
         let mut staged = self.staged.lock().map_err(|_| BlockError::LockError)?;
 
         // Add the batched commands to the staged queue.
-        for payload in batched_payloads {
+        for (payload, senders) in batched_payloads {
+            let correlation_id = self.acquire_id(ObjectNamespace::Cmd)?;
+
             staged.push(sdi::Command {
-                correlation_id: 0,
+                correlation_id,
                 payload: Some(payload),
             });
+
+            // if at least one sender is present, add it to the event dispatcher.
+            let has_senders = senders.iter().any(|s| s.is_some());
+            if has_senders {
+                let mut dispatcher = self
+                    .event_dispatcher
+                    .lock()
+                    .map_err(|_| BlockError::LockError)?;
+                dispatcher.table.insert(correlation_id, senders);
+            }
         }
 
         // drop the lock on pending
@@ -207,14 +266,22 @@ impl Backend {
         self.socket_tx = Arc::new(Mutex::new(Some(tx)));
 
         // 3) Spawn the single I/O driver task that handles all read/write from the socket
-        let handle = tokio::spawn(Self::socket_driver(socket, rx));
+        let handle = tokio::spawn(Self::socket_driver(
+            socket,
+            rx,
+            self.event_dispatcher.clone(),
+        ));
 
         self.handle = Arc::new(Mutex::new(Some(handle)));
 
         Ok(())
     }
 
-    async fn socket_driver(mut socket: DealerSocket, mut rx: mpsc::Receiver<Vec<sdi::Command>>) {
+    async fn socket_driver(
+        mut socket: DealerSocket,
+        mut rx: mpsc::Receiver<Vec<sdi::Command>>,
+        evt_dispatch: Arc<Mutex<EventDispatcher>>,
+    ) {
         loop {
             tokio::select! {
                 // A) Incoming requests from the channel => send to server
@@ -243,9 +310,27 @@ impl Backend {
                         Ok(msg) => {
                             // Dealer/Router typically has 2 frames: [identity, payload]
                             let payload = msg.get(0).unwrap();
-                            match sdi::Command::decode(payload.as_ref()) {
-                                Ok(resp) => {
-                                    println!("---> Received response: {:?}", resp);
+                            match sdi::Event::decode(payload.as_ref()) {
+                                Ok(evt) => {
+
+                                    // send this evt somewhere elese.
+
+                                    let correlation_id = evt.correlation_id;
+
+                                    let ir_events = match evt.payload.unwrap() {
+                                        sdi::event::Payload::SampleTopK(batch) => {
+                                            batch.items.into_iter().map(|item| IrEvent::SampleTopK(item)
+                                            ).collect()
+                                        },
+                                        sdi::event::Payload::GetTokenDistribution(batch) => {
+                                             batch.items.into_iter().map(|item| IrEvent::GetTokenDistribution(item)
+                                            ).collect()
+                                        }
+                                    };
+
+                                    let mut dispatcher = evt_dispatch.lock().unwrap();
+                                    dispatcher.dispatch(correlation_id, ir_events);
+
                                 }
                                 Err(err) => {
                                     eprintln!("Failed to parse Response from server: {:?}", err);
@@ -266,22 +351,25 @@ impl Backend {
 
 // more sophisticated forms include: MultiNodeBackend, etc.
 #[derive(Debug)]
-struct ObjNamespace {
-    kv_block_id_pool: IdPool<RemoteObjId>,
-    emb_id_pool: IdPool<RemoteObjId>,
+struct ObjectIdPool {
+    kv_block_id_pool: IdPool<ObjectId>,
+    emb_id_pool: IdPool<ObjectId>,
+    dist_id_pool: IdPool<ObjectId>,
+    cmd_id_pool: IdPool<ObjectId>,
 }
 #[derive(Debug)]
 struct Pending {
-    allocate: BatchQueue<sdi::AllocateItem>,
-    deallocate: BatchQueue<sdi::AllocateItem>,
-    copy_block: BatchQueue<sdi::CopyBlockItem>,
-    mask_block: BatchQueue<sdi::MaskBlockItem>,
-    embed_text: BatchQueue<sdi::EmbedTextItem>,
-    embed_image: BatchQueue<sdi::EmbedImageItem>,
+    allocate: BatchQueue<sdi::Allocate>,
+    deallocate: BatchQueue<sdi::Allocate>,
+    copy_block: BatchQueue<sdi::CopyBlock>,
+    mask_block: BatchQueue<sdi::MaskBlock>,
+    embed_text: BatchQueue<sdi::EmbedText>,
+    embed_image: BatchQueue<sdi::EmbedImage>,
 
     // these cmds are only be fired when it contains "enough" commands to be batched.
-    fill_block: BatchQueue<sdi::FillBlockItem>,
-    decode_req: BatchQueue<sdi::DecodeRequestItem>,
+    fill_block: BatchQueue<sdi::FillBlock>,
+    decode_token_distribution: BatchQueue<sdi::DecodeTokenDistribution>,
+    sample_top_k: BatchQueue<sdi::SampleTopKRequest>,
 }
 
 /// "K-or-T" Strategy
@@ -289,7 +377,8 @@ struct Pending {
 // 	This ensures that the GPU does not stay idle for too long (bounded by T) and that short bursts of arrivals form a large enough batch to get good utilization (bounded by K).
 #[derive(Debug)]
 struct BatchQueue<T> {
-    items: Vec<(T, f64)>,
+    // cmd, timestamp, response_sender
+    items: Vec<(T, f64, Option<oneshot::Sender<IrEvent>>)>,
 
     max_wait_time: f64,
     min_size: usize,
@@ -333,16 +422,16 @@ impl<T> BatchQueue<T> {
         }
     }
 
-    fn take(&mut self) -> Vec<T> {
+    fn take(&mut self) -> (Vec<T>, Vec<Option<oneshot::Sender<IrEvent>>>) {
         let drain_count = self.items.len().min(self.max_size);
         self.items
             .drain(..drain_count)
-            .map(|(item, _)| item)
-            .collect()
+            .map(|(item, _, sender)| (item, sender))
+            .unzip()
     }
 
-    fn push(&mut self, item: T, curr_timestamp: f64) {
-        self.items.push((item, curr_timestamp));
+    fn push(&mut self, item: T, curr_timestamp: f64, evt_sender: Option<oneshot::Sender<IrEvent>>) {
+        self.items.push((item, curr_timestamp, evt_sender));
     }
 
     fn is_ready(&self, curr_timestamp: f64) -> bool {
@@ -357,7 +446,10 @@ impl<T> BatchQueue<T> {
         false
     }
 
-    fn batch(&mut self, curr_timestamp: f64) -> Option<Vec<T>> {
+    fn batch(
+        &mut self,
+        curr_timestamp: f64,
+    ) -> Option<(Vec<T>, Vec<Option<oneshot::Sender<IrEvent>>>)> {
         if self.is_ready(curr_timestamp) {
             Some(self.take())
         } else {
@@ -376,110 +468,157 @@ impl Pending {
             embed_text: BatchQueue::eager(),
             embed_image: BatchQueue::k_or_t(max_wait_time, min_size, Some(max_size)),
             fill_block: BatchQueue::k_or_t(max_wait_time, min_size, Some(max_size)),
-            decode_req: BatchQueue::k_or_t(max_wait_time, min_size, Some(max_size)),
+            sample_top_k: BatchQueue::k_or_t(max_wait_time, min_size, Some(max_size)),
+            decode_token_distribution: BatchQueue::eager(),
         }
     }
 
-    fn push(&mut self, cmd: IrCommand, curr_timestamp: f64) {
+    fn push(
+        &mut self,
+        cmd: IrCommand,
+        curr_timestamp: f64,
+        evt_sender: Option<oneshot::Sender<IrEvent>>,
+    ) {
         match cmd {
             IrCommand::Allocate(item) => {
-                self.allocate.push(item, curr_timestamp);
+                self.allocate.push(item, curr_timestamp, evt_sender);
             }
             IrCommand::Deallocate(item) => {
-                self.deallocate.push(item, curr_timestamp);
+                self.deallocate.push(item, curr_timestamp, evt_sender);
             }
             IrCommand::CopyBlock(item) => {
-                self.copy_block.push(item, curr_timestamp);
+                self.copy_block.push(item, curr_timestamp, evt_sender);
             }
             IrCommand::MaskBlock(item) => {
-                self.mask_block.push(item, curr_timestamp);
+                self.mask_block.push(item, curr_timestamp, evt_sender);
             }
             IrCommand::FillBlock(item) => {
-                self.fill_block.push(item, curr_timestamp);
+                self.fill_block.push(item, curr_timestamp, evt_sender);
             }
             IrCommand::EmbedImage(item) => {
-                self.embed_image.push(item, curr_timestamp);
+                self.embed_image.push(item, curr_timestamp, evt_sender);
             }
             IrCommand::EmbedText(item) => {
-                self.embed_text.push(item, curr_timestamp);
+                self.embed_text.push(item, curr_timestamp, evt_sender);
             }
-            IrCommand::DecodeRequest(item) => {
-                self.decode_req.push(item, curr_timestamp);
+            IrCommand::SampleTopKRequest(item) => {
+                self.sample_top_k.push(item, curr_timestamp, evt_sender);
+            }
+            IrCommand::DecodeTokenDistribution(item) => {
+                self.decode_token_distribution
+                    .push(item, curr_timestamp, evt_sender);
             }
         }
     }
 
-    fn batch_all(&mut self, curr_timestamp: f64) -> Vec<sdi::command::Payload> {
+    fn batch_all(
+        &mut self,
+        curr_timestamp: f64,
+    ) -> Vec<(sdi::command::Payload, Vec<Option<oneshot::Sender<IrEvent>>>)> {
         let mut cmds = Vec::new();
 
-        if let Some(items) = self.allocate.batch(curr_timestamp) {
-            cmds.push(sdi::command::Payload::Allocate(sdi::Allocate { items }));
+        if let Some((items, senders)) = self.allocate.batch(curr_timestamp) {
+            cmds.push((
+                sdi::command::Payload::Allocate(sdi::BatchAllocate { items }),
+                senders,
+            ));
         }
 
-        if let Some(items) = self.deallocate.batch(curr_timestamp) {
-            cmds.push(sdi::command::Payload::Deallocate(sdi::Deallocate { items }));
+        if let Some((items, senders)) = self.deallocate.batch(curr_timestamp) {
+            cmds.push((
+                sdi::command::Payload::Deallocate(sdi::BatchDeallocate { items }),
+                senders,
+            ));
         }
 
-        if let Some(items) = self.copy_block.batch(curr_timestamp) {
-            cmds.push(sdi::command::Payload::CopyBlock(sdi::CopyBlock { items }));
+        if let Some((items, senders)) = self.copy_block.batch(curr_timestamp) {
+            cmds.push((
+                sdi::command::Payload::CopyBlock(sdi::BatchCopyBlock { items }),
+                senders,
+            ));
         }
 
-        if let Some(items) = self.mask_block.batch(curr_timestamp) {
-            cmds.push(sdi::command::Payload::MaskBlock(sdi::MaskBlock { items }));
+        if let Some((items, senders)) = self.mask_block.batch(curr_timestamp) {
+            cmds.push((
+                sdi::command::Payload::MaskBlock(sdi::BatchMaskBlock { items }),
+                senders,
+            ));
         }
 
-        if let Some(items) = self.embed_text.batch(curr_timestamp) {
-            cmds.push(sdi::command::Payload::EmbedText(sdi::EmbedText { items }));
+        if let Some((items, senders)) = self.embed_text.batch(curr_timestamp) {
+            cmds.push((
+                sdi::command::Payload::EmbedText(sdi::BatchEmbedText { items }),
+                senders,
+            ));
         }
 
-        if let Some(items) = self.embed_image.batch(curr_timestamp) {
-            cmds.push(sdi::command::Payload::EmbedImage(sdi::EmbedImage { items }));
+        if let Some((items, senders)) = self.embed_image.batch(curr_timestamp) {
+            cmds.push((
+                sdi::command::Payload::EmbedImage(sdi::BatchEmbedImage { items }),
+                senders,
+            ));
         }
 
-        if let Some(items) = self.fill_block.batch(curr_timestamp) {
-            cmds.push(sdi::command::Payload::FillBlock(sdi::FillBlock { items }));
+        if let Some((items, senders)) = self.fill_block.batch(curr_timestamp) {
+            cmds.push((
+                sdi::command::Payload::FillBlock(sdi::BatchFillBlock { items }),
+                senders,
+            ));
         }
 
-        if let Some(items) = self.decode_req.batch(curr_timestamp) {
-            cmds.push(sdi::command::Payload::DecodeRequest(sdi::DecodeRequest {
-                items,
-            }));
+        if let Some((items, senders)) = self.sample_top_k.batch(curr_timestamp) {
+            cmds.push((
+                sdi::command::Payload::SampleTopKRequest(sdi::BatchSampleTopKRequest { items }),
+                senders,
+            ));
         }
 
         cmds
     }
 }
 
-impl ObjNamespace {
+enum ObjectNamespace {
+    KvBlock = 0,
+    Emb = 1,
+    Dist = 2,
+    Cmd = 3,
+}
+
+impl ObjectIdPool {
     fn new(max_kv_blocks: u32, max_embs: u32) -> Self {
         Self {
             kv_block_id_pool: IdPool::new(max_kv_blocks),
             emb_id_pool: IdPool::new(max_embs),
+            dist_id_pool: IdPool::new(max_embs),
+            cmd_id_pool: IdPool::new(max_embs),
         }
     }
 
-    fn acquire_id(&mut self, namespace: usize) -> Result<RemoteObjId, BlockError> {
-        match namespace {
-            0 => self.kv_block_id_pool.acquire(),
-            1 => self.emb_id_pool.acquire(),
-            _ => return Err(BlockError::VirtualAddressTranslationFailed),
+    fn acquire_id(&mut self, ns: ObjectNamespace) -> Result<ObjectId, BlockError> {
+        match ns {
+            ObjectNamespace::KvBlock => self.kv_block_id_pool.acquire(),
+            ObjectNamespace::Emb => self.emb_id_pool.acquire(),
+            ObjectNamespace::Dist => self.dist_id_pool.acquire(),
+            ObjectNamespace::Cmd => self.cmd_id_pool.acquire(),
         }
         .ok_or(BlockError::NoFreeBlocks)
     }
 
-    fn release_id(&mut self, namespace: usize, id: RemoteObjId) -> Result<(), BlockError> {
-        match namespace {
-            0 => self.kv_block_id_pool.release(id),
-            1 => self.emb_id_pool.release(id),
-            _ => Err(BlockError::VirtualAddressTranslationFailed),
+    fn release_id(&mut self, ns: ObjectNamespace, id: ObjectId) -> Result<(), BlockError> {
+        match ns {
+            ObjectNamespace::KvBlock => self.kv_block_id_pool.release(id),
+            ObjectNamespace::Emb => self.emb_id_pool.release(id),
+            ObjectNamespace::Dist => self.dist_id_pool.release(id),
+            ObjectNamespace::Cmd => self.cmd_id_pool.release(id),
         }
     }
 
-    fn remaining_ids(&self, namespace: usize) -> usize {
-        match namespace {
-            0 => self.kv_block_id_pool.available(),
-            1 => self.emb_id_pool.available(),
-            _ => 0,
+    fn remaining_ids(&self, ns: ObjectNamespace) -> usize {
+        match ns {
+            ObjectNamespace::KvBlock => self.kv_block_id_pool.available(),
+            ObjectNamespace::Emb => self.emb_id_pool.available(),
+            ObjectNamespace::Dist => self.dist_id_pool.available(),
+            ObjectNamespace::Cmd => self.cmd_id_pool.available(),
         }
     }
 }
@@ -487,10 +626,10 @@ impl ObjNamespace {
 impl ObjectAllocator<TokenEmb> for Backend {
     type RawRepr = Vec<f32>;
 
-    fn alloc(&self, stream_id: StreamId) -> Result<RemoteObjId, BlockError> {
-        let new_obj_id = self.acquire_id(1)?;
+    fn alloc(&self, stream_id: StreamId) -> Result<ObjectId, BlockError> {
+        let new_obj_id = self.acquire_id(ObjectNamespace::Emb)?;
 
-        let cmd = IrCommand::Allocate(sdi::AllocateItem {
+        let cmd = IrCommand::Allocate(sdi::Allocate {
             kind: sdi::ObjectKind::Emb.into(),
             object_id_offset: new_obj_id,
             count: 1,
@@ -500,11 +639,11 @@ impl ObjectAllocator<TokenEmb> for Backend {
         Ok(new_obj_id)
     }
 
-    fn dealloc(&self, stream_id: StreamId, obj_id: RemoteObjId) -> Result<(), BlockError> {
+    fn dealloc(&self, stream_id: StreamId, obj_id: ObjectId) -> Result<(), BlockError> {
         // Release the object id back to the pool.
-        self.release_id(1, obj_id)?;
+        self.release_id(ObjectNamespace::Emb, obj_id)?;
 
-        let cmd = IrCommand::Deallocate(sdi::AllocateItem {
+        let cmd = IrCommand::Deallocate(sdi::Allocate {
             kind: sdi::ObjectKind::Emb.into(),
             object_id_offset: obj_id,
             count: 1,
@@ -517,24 +656,24 @@ impl ObjectAllocator<TokenEmb> for Backend {
     fn raw_repr(
         &self,
         stream_id: StreamId,
-        obj_id: RemoteObjId,
+        obj_id: ObjectId,
     ) -> Result<oneshot::Receiver<Self::RawRepr>, BlockError> {
         todo!()
     }
 
     fn available(&self) -> usize {
-        self.remaining_ids(1)
+        self.remaining_ids(ObjectNamespace::Emb)
     }
 }
 
 impl ObjectAllocator<KvBlock> for Backend {
     // The raw representation of a kv block is not really useful in any way. So we just use usize.
-    type RawRepr = RemoteObjId;
+    type RawRepr = ObjectId;
 
-    fn alloc(&self, stream_id: StreamId) -> Result<RemoteObjId, BlockError> {
-        let new_obj_id = self.acquire_id(0)?;
+    fn alloc(&self, stream_id: StreamId) -> Result<ObjectId, BlockError> {
+        let new_obj_id = self.acquire_id(ObjectNamespace::KvBlock)?;
 
-        let cmd = IrCommand::Allocate(sdi::AllocateItem {
+        let cmd = IrCommand::Allocate(sdi::Allocate {
             kind: sdi::ObjectKind::KvBlock.into(),
             object_id_offset: new_obj_id,
             count: 1,
@@ -544,11 +683,11 @@ impl ObjectAllocator<KvBlock> for Backend {
         Ok(new_obj_id)
     }
 
-    fn dealloc(&self, stream_id: StreamId, obj_id: RemoteObjId) -> Result<(), BlockError> {
+    fn dealloc(&self, stream_id: StreamId, obj_id: ObjectId) -> Result<(), BlockError> {
         // Release the object id back to the pool.
-        self.release_id(0, obj_id)?;
+        self.release_id(ObjectNamespace::KvBlock, obj_id)?;
 
-        let cmd = IrCommand::Deallocate(sdi::AllocateItem {
+        let cmd = IrCommand::Deallocate(sdi::Allocate {
             kind: sdi::ObjectKind::KvBlock.into(),
             object_id_offset: obj_id,
             count: 1,
@@ -561,32 +700,32 @@ impl ObjectAllocator<KvBlock> for Backend {
     fn raw_repr(
         &self,
         stream_id: StreamId,
-        obj_id: RemoteObjId,
+        obj_id: ObjectId,
     ) -> Result<oneshot::Receiver<Self::RawRepr>, BlockError> {
-        sender.send(obj_id).unwrap();
+        //sender.send(obj_id).unwrap();
         Ok(())
     }
 
     fn available(&self) -> usize {
-        self.remaining_ids(0)
+        self.remaining_ids(ObjectNamespace::KvBlock)
     }
 }
 
 impl ObjectAllocator<TokenDist> for Backend {
     type RawRepr = Vec<f32>;
 
-    fn alloc(&self, stream_id: StreamId) -> Result<RemoteObjId, BlockError> {
+    fn alloc(&self, stream_id: StreamId) -> Result<ObjectId, BlockError> {
         todo!()
     }
 
-    fn dealloc(&self, stream_id: StreamId, obj_id: RemoteObjId) -> Result<(), BlockError> {
+    fn dealloc(&self, stream_id: StreamId, obj_id: ObjectId) -> Result<(), BlockError> {
         todo!()
     }
 
     fn raw_repr(
         &self,
         stream_id: StreamId,
-        obj_id: RemoteObjId,
+        obj_id: ObjectId,
     ) -> Result<oneshot::Receiver<Self::RawRepr>, BlockError> {
         todo!()
     }
@@ -600,14 +739,14 @@ impl CausalTransformer for Backend {
     fn fill(
         &self,
         stream_id: StreamId,
-        ptr: RemoteObjId,
-        ctx_ptrs: Vec<RemoteObjId>,
-        input_embs: Vec<RemoteObjId>,
-        output_embs: Option<Vec<RemoteObjId>>,
+        ptr: ObjectId,
+        ctx_ptrs: Vec<ObjectId>,
+        input_embs: Vec<ObjectId>,
+        output_embs: Option<Vec<ObjectId>>,
     ) -> Result<(), BlockError> {
         // create "resolved" cmd.
 
-        let cmd = IrCommand::FillBlock(sdi::FillBlockItem {
+        let cmd = IrCommand::FillBlock(sdi::FillBlock {
             block_id: ptr,
             context_block_ids: ctx_ptrs,
             input_embedding_ids: input_embs,
@@ -621,13 +760,13 @@ impl CausalTransformer for Backend {
     fn copy_tokens(
         &self,
         stream_id: StreamId,
-        src_ptr: RemoteObjId,
-        dst_ptr: RemoteObjId,
+        src_ptr: ObjectId,
+        dst_ptr: ObjectId,
         src_offset: u32,
         dst_offset: u32,
         size: u32,
     ) -> Result<(), BlockError> {
-        let cmd = IrCommand::CopyBlock(sdi::CopyBlockItem {
+        let cmd = IrCommand::CopyBlock(sdi::CopyBlock {
             source_block_id: src_ptr,
             destination_block_id: dst_ptr,
             source_start: src_offset,
@@ -642,10 +781,10 @@ impl CausalTransformer for Backend {
     fn mask_tokens(
         &self,
         stream_id: StreamId,
-        ptr: RemoteObjId,
+        ptr: ObjectId,
         mask: &[bool],
     ) -> Result<(), BlockError> {
-        let cmd = IrCommand::MaskBlock(sdi::MaskBlockItem {
+        let cmd = IrCommand::MaskBlock(sdi::MaskBlock {
             block_id: ptr,
             mask: mask.to_vec(),
         });
@@ -658,8 +797,8 @@ impl CausalLanguageModel for Backend {
     fn next_token_dist(
         &self,
         stream_id: StreamId,
-        emb_ptr: RemoteObjId,
-        dist_ptr: RemoteObjId,
+        emb_ptr: ObjectId,
+        dist_ptr: ObjectId,
     ) -> Result<(), BlockError> {
         todo!()
     }
@@ -667,10 +806,10 @@ impl CausalLanguageModel for Backend {
     fn sample_top_k(
         &self,
         stream_id: StreamId,
-        dist_ptr: RemoteObjId,
+        dist_ptr: ObjectId,
         k: usize,
     ) -> Result<oneshot::Receiver<Vec<u32>>, BlockError> {
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel::<sdi::DecodeResponse>();
+        let (resp_tx, resp_rx) = oneshot::channel::<sdi::DecodeResponse>();
 
         let rx_chain = resp_rx.and_then(|resp| async move {
             // Process the number (e.g., add a prefix)
@@ -679,13 +818,13 @@ impl CausalLanguageModel for Backend {
             Ok(resp.token_ids[0])
         });
 
-        Ok(rx_chain)
+        todo!()
     }
 
     fn get_raw_dist(
         &self,
         stream_id: StreamId,
-        dist_ptr: RemoteObjId,
+        dist_ptr: ObjectId,
     ) -> Result<oneshot::Receiver<Vec<f32>>, BlockError> {
         todo!()
     }
@@ -697,7 +836,7 @@ impl ImageEmbedder for Backend {
     fn embed_img(
         &self,
         stream_id: StreamId,
-        addrs: Vec<RemoteObjId>,
+        addrs: Vec<ObjectId>,
         url: String,
     ) -> Result<(), BlockError> {
         todo!()
