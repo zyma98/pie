@@ -4,6 +4,7 @@ mod handler;
 mod spi;
 mod state;
 mod utils;
+mod tokenizer;
 //mod state_old;
 
 use crate::spi::{App, InstanceMessageOld, InstanceState};

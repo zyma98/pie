@@ -35,6 +35,8 @@ pub struct InstanceState {
     pub inst2server: Sender<InstanceMessageOld>,
     pub server2inst: Receiver<InstanceMessageOld>,
 
+    pub cmd_buffer: Sender<Msg>,
+
     allocator: IdPool<ObjectId>,
 }
 
@@ -44,20 +46,25 @@ pub struct InstanceMessageOld {
     pub message: String,
 }
 
+pub struct Msg {
+    pub instance_id: Uuid,
+    pub command: Command,
+}
+
 pub enum Command {
     // Block commands
     AllocateBlocks {
-        stream: StreamId,
+        stream: u32,
         blocks: Vec<ObjectId>,
     },
 
     DeallocateBlocks {
-        stream: StreamId,
+        stream: u32,
         blocks: Vec<ObjectId>,
     },
 
     FillBlocks {
-        stream: StreamId,
+        stream: u32,
         blocks: Vec<ObjectId>,
         context: Vec<ObjectId>,
         inputs: Vec<ObjectId>,
@@ -75,7 +82,7 @@ pub enum Command {
     },
 
     CopyBlock {
-        stream: StreamId,
+        stream: u32,
         src_block: ObjectId,
         dst_block: ObjectId,
         src_token_offset: u32,
@@ -84,54 +91,60 @@ pub enum Command {
     },
 
     MaskBlock {
-        stream: StreamId,
+        stream: u32,
         block: ObjectId,
         mask: Vec<bool>,
     },
 
     // Embed ctrl
     AllocateEmb {
-        stream: StreamId,
+        stream: u32,
         embs: Vec<ObjectId>,
     },
 
     DeallocateEmb {
-        stream: StreamId,
+        stream: u32,
         embs: Vec<ObjectId>,
     },
 
     EmbedText {
-        stream: StreamId,
+        stream: u32,
         embs: Vec<ObjectId>,
         text: Vec<u32>,
     },
 
     EmbedImage {
-        stream: StreamId,
+        stream: u32,
         embs: Vec<ObjectId>,
         image: String,
     },
 
     // Output emb ctrl
     AllocateDist {
-        stream: StreamId,
+        stream: u32,
         dists: Vec<ObjectId>,
     },
 
     DeallocateDist {
-        stream: StreamId,
+        stream: u32,
         dists: Vec<ObjectId>,
     },
 
     DecodeTokenDist {
-        stream: StreamId,
-        dists: ObjectId,
+        stream: u32,
+        dists: Vec<ObjectId>,
+    },
+
+    SampleTopK {
+        stream: u32,
+        emb: ObjectId,
+        k: u32,
         handle: oneshot::Sender<Vec<u32>>,
     },
 
     GetTokenDist {
-        stream: StreamId,
-        dists: ObjectId,
+        stream: u32,
+        dist: ObjectId,
         handle: oneshot::Sender<Vec<f32>>,
     },
 }
@@ -150,6 +163,7 @@ impl InstanceState {
         instance_id: Uuid,
         inst2server: Sender<InstanceMessageOld>,
         server2inst: Receiver<InstanceMessageOld>,
+        cmd_buffer: Sender<Msg>,
     ) -> Self {
         let mut builder = WasiCtx::builder();
         builder.inherit_stderr().inherit_network().inherit_stdout();
@@ -160,8 +174,20 @@ impl InstanceState {
             resource_table: ResourceTable::new(),
             inst2server,
             server2inst,
+            cmd_buffer,
             allocator: IdPool::new(1_000_000),
         }
+    }
+
+    async fn submit(&self, command: Command) -> Result<()> {
+        self.cmd_buffer
+            .send(Msg {
+                instance_id: self.instance_id,
+                command,
+            })
+            .await?;
+
+        Ok(())
     }
 }
 
@@ -194,11 +220,40 @@ impl spi::app::system::Host for InstanceState {
 
 impl spi::lm::inference::Host for InstanceState {
     async fn allocate(&mut self, stream: u32, count: u32) -> Result<Vec<u32>, wasmtime::Error> {
-        todo!()
+        let mut ids = Vec::with_capacity(count as usize);
+
+        for _ in 0..count {
+            let id = self
+                .allocator
+                .acquire()
+                .ok_or(wasmtime::Error::msg("Out of capacity"))?;
+            ids.push(id);
+        }
+
+        // also let the server know
+        self.submit(Command::AllocateBlocks {
+            stream,
+            blocks: ids.clone(),
+        })
+        .await?;
+
+        Ok(ids)
     }
 
     async fn deallocate(&mut self, stream: u32, ids: Vec<u32>) -> Result<(), wasmtime::Error> {
-        todo!()
+        for id in ids.iter().copied() {
+            self.allocator
+                .release(id)
+                .or(Err(wasmtime::Error::msg("Invalid ID")))?;
+        }
+
+        self.submit(Command::DeallocateBlocks {
+            stream,
+            blocks: ids,
+        })
+        .await?;
+
+        Ok(())
     }
 
     async fn fill_blocks(
@@ -209,7 +264,15 @@ impl spi::lm::inference::Host for InstanceState {
         inputs: Vec<u32>,
         outputs: Vec<u32>,
     ) -> Result<(), wasmtime::Error> {
-        todo!()
+        self.submit(Command::FillBlocks {
+            stream,
+            blocks,
+            context,
+            inputs,
+            outputs: outputs.into_iter().map(|x| Some(x)).collect(),
+        })
+        .await
+        .or(Err(wasmtime::Error::msg("FillBlocks failed")))
     }
 
     async fn copy_block(
@@ -221,7 +284,16 @@ impl spi::lm::inference::Host for InstanceState {
         dst_offset: u32,
         size: u32,
     ) -> Result<(), wasmtime::Error> {
-        todo!()
+        self.submit(Command::CopyBlock {
+            stream,
+            src_block: src,
+            dst_block: dst,
+            src_token_offset: src_offset,
+            dst_token_offset: dst_offset,
+            size,
+        })
+        .await
+        .or(Err(wasmtime::Error::msg("CopyBlock failed")))
     }
 
     async fn mask_block(
@@ -230,15 +302,31 @@ impl spi::lm::inference::Host for InstanceState {
         block: u32,
         mask: Vec<u32>,
     ) -> Result<(), wasmtime::Error> {
-        todo!()
+        self.submit(Command::MaskBlock {
+            stream,
+            block,
+            mask: mask.into_iter().map(|x| x != 0).collect(),
+        })
+        .await
+        .or(Err(wasmtime::Error::msg("MaskBlock failed")))
     }
 
     async fn export_blocks(&mut self, src: Vec<u32>, name: String) -> Result<(), wasmtime::Error> {
-        todo!()
+        self.submit(Command::ExportBlocks {
+            blocks: src,
+            resource_name: name,
+        })
+        .await
+        .or(Err(wasmtime::Error::msg("ExportBlocks failed")))
     }
 
     async fn import_blocks(&mut self, dst: Vec<u32>, name: String) -> Result<(), wasmtime::Error> {
-        todo!()
+        self.submit(Command::ImportBlocks {
+            blocks: dst,
+            resource_name: name,
+        })
+        .await
+        .or(Err(wasmtime::Error::msg("ImportBlocks failed")))
     }
 
     async fn embed_text(
@@ -247,7 +335,13 @@ impl spi::lm::inference::Host for InstanceState {
         embs: Vec<u32>,
         tokens: Vec<u32>,
     ) -> Result<(), wasmtime::Error> {
-        todo!()
+        self.submit(Command::EmbedText {
+            stream,
+            embs,
+            text: tokens,
+        })
+        .await
+        .or(Err(wasmtime::Error::msg("EmbedText failed")))
     }
 
     async fn embed_image(
@@ -256,7 +350,13 @@ impl spi::lm::inference::Host for InstanceState {
         embs: Vec<u32>,
         url: String,
     ) -> Result<(), wasmtime::Error> {
-        todo!()
+        self.submit(Command::EmbedImage {
+            stream,
+            embs,
+            image: url,
+        })
+        .await
+        .or(Err(wasmtime::Error::msg("EmbedImage failed")))
     }
 
     async fn embed_video(
@@ -274,7 +374,12 @@ impl spi::lm::inference::Host for InstanceState {
         embs: Vec<u32>,
         dist: Vec<u32>,
     ) -> Result<(), wasmtime::Error> {
-        todo!()
+        self.submit(Command::DecodeTokenDist {
+            stream,
+            dists: dist,
+        })
+        .await
+        .or(Err(wasmtime::Error::msg("DecodeTokenDist failed")))
     }
 
     async fn sample_top_k(
@@ -283,7 +388,22 @@ impl spi::lm::inference::Host for InstanceState {
         embs: Vec<u32>,
         k: u32,
     ) -> Result<Vec<u32>, wasmtime::Error> {
-        todo!()
+        let (tx, rx) = oneshot::channel();
+
+        self.submit(Command::SampleTopK {
+            stream,
+            emb: embs[0],
+            k,
+            handle: tx,
+        })
+        .await
+        .or(Err(wasmtime::Error::msg("SampleTopK failed")))?;
+
+        let result = rx
+            .await
+            .or(Err(wasmtime::Error::msg("SampleTopK failed")))?;
+
+        Ok(result)
     }
 
     async fn get_token_dist(
@@ -291,7 +411,21 @@ impl spi::lm::inference::Host for InstanceState {
         stream: u32,
         dist: u32,
     ) -> Result<Vec<f32>, wasmtime::Error> {
-        todo!()
+        let (tx, rx) = oneshot::channel();
+
+        self.submit(Command::GetTokenDist {
+            stream,
+            dist,
+            handle: tx,
+        })
+        .await
+        .or(Err(wasmtime::Error::msg("GetTokenDist failed")))?;
+
+        let result = rx
+            .await
+            .or(Err(wasmtime::Error::msg("GetTokenDist failed")))?;
+
+        Ok(result)
     }
 
     async fn tokenize(&mut self, text: String) -> Result<Vec<u32>, wasmtime::Error> {
