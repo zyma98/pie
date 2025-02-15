@@ -4,14 +4,12 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 pub type Rank = u32;
 
+// The code below is copied from the tiktoken.
+// https://github.com/openai/tiktoken/blob/main/src/lib.rs
+
 fn _byte_pair_merge(ranks: &HashMap<Vec<u8>, Rank>, piece: &[u8]) -> Vec<(usize, Rank)> {
-    // This is a vector of (start, rank).
-    // The rank is of the pair starting at position start.
     let mut parts = Vec::with_capacity(piece.len() + 1);
 
-    // Note that we hash bytes when indexing into `ranks`, not token pairs. As long as we train BPE
-    // the way we currently do, this is equivalent. An easy way to break this would be to decouple
-    // merge priority from token index or to prevent specific token merges.
     let mut min_rank: (Rank, usize) = (Rank::MAX, usize::MAX);
     for i in 0..piece.len() - 1 {
         let rank = *ranks.get(&piece[i..i + 2]).unwrap_or(&Rank::MAX);
@@ -26,8 +24,6 @@ fn _byte_pair_merge(ranks: &HashMap<Vec<u8>, Rank>, piece: &[u8]) -> Vec<(usize,
     let get_rank = {
         |parts: &Vec<(usize, Rank)>, i: usize| {
             if (i + 3) < parts.len() {
-                // Similar to `piece[i..i + 2]` above. The +3 is because we haven't yet deleted
-                // parts[i + 1], see comment in the main loop.
                 *ranks
                     .get(&piece[parts[i].0..parts[i + 3].0])
                     .unwrap_or(&Rank::MAX)
@@ -37,14 +33,9 @@ fn _byte_pair_merge(ranks: &HashMap<Vec<u8>, Rank>, piece: &[u8]) -> Vec<(usize,
         }
     };
 
-    // If you have n parts and m merges, this does O(mn) work.
-    // We could do something with a heap and do O(m log n) work.
-    // n is often very small so considerations like cache-locality outweigh the algorithmic
-    // complexity downsides of the `parts` vector.
     while min_rank.0 != Rank::MAX {
         let i = min_rank.1;
-        // Update parts[i] and parts[i - 1] before removing parts[i + 1], since
-        // `parts.remove(i + 1)` will thrash the cache.
+
         if i > 0 {
             parts[i - 1].1 = get_rank(&parts, i - 1);
         }
@@ -105,7 +96,6 @@ impl std::fmt::Display for DecodeError {
 
 impl std::error::Error for DecodeError {}
 
-#[cfg_attr(feature = "python", pyclass)]
 #[derive(Clone)]
 pub struct BytePairEncoder {
     encoder: HashMap<Vec<u8>, Rank>,
@@ -118,9 +108,21 @@ pub struct BytePairEncoder {
 }
 
 impl BytePairEncoder {
-    /// Decodes tokens into a list of bytes.
-    ///
-    /// The bytes are not gauranteed to be a valid utf-8 string.
+    pub fn decode(&self, tokens: &[Rank]) -> Result<String, DecodeError> {
+        // First, decode raw bytes from the tokens.
+        let decoded_bytes = self.decode_bytes(tokens).map_err(|err| DecodeError {
+            message: err.to_string(),
+        })?;
+
+        // Then, convert the bytes to a UTF-8 string.
+        // Using `from_utf8_lossy` would silently replace invalid sequences with
+        // the Unicode replacement character; here we fail on invalid UTF-8 instead.
+        let decoded_string = String::from_utf8(decoded_bytes).map_err(|err| DecodeError {
+            message: err.to_string(),
+        })?;
+
+        Ok(decoded_string)
+    }
     fn decode_bytes(&self, tokens: &[Rank]) -> Result<Vec<u8>, DecodeKeyError> {
         let mut ret = Vec::with_capacity(tokens.len() * 2);
         for &token in tokens {
@@ -136,21 +138,7 @@ impl BytePairEncoder {
         Ok(ret)
     }
 
-    pub fn encode_ordinary(&self, text: &str) -> Vec<Rank> {
-        // This is the core of the encoding logic; the other functions in here
-        // just make things complicated :-)
-        let mut ret = vec![];
-        for mat in self.regex.find_iter(text) {
-            let piece = mat.unwrap().as_str().as_bytes();
-            match self.encoder.get(piece) {
-                Some(token) => ret.push(*token),
-                None => ret.extend(&byte_pair_encode(piece, &self.encoder)),
-            }
-        }
-        ret
-    }
-
-    pub fn encode(&self, text: &str, allowed_special: &HashSet<&str>) -> (Vec<Rank>, usize) {
+    pub fn encode(&self, text: &str, allowed_special: &HashSet<&str>) -> Vec<Rank> {
         let mut ret = vec![];
 
         let mut start = 0;
@@ -159,7 +147,6 @@ impl BytePairEncoder {
             let mut next_special;
             let mut start_find = start;
             loop {
-                // Find the next allowed special token, if any
                 next_special = self.special_regex.find_from_pos(text, start_find).unwrap();
                 match next_special {
                     Some(m) => {
@@ -173,7 +160,6 @@ impl BytePairEncoder {
             }
             let end = next_special.map_or(text.len(), |m| m.start());
 
-            // Okay, here we go, compare this logic to _encode_ordinary_native
             for mat in self.regex.find_iter(&text[start..end]) {
                 let piece = mat.unwrap().as_str().as_bytes();
                 if let Some(token) = self.encoder.get(piece) {
@@ -199,9 +185,7 @@ impl BytePairEncoder {
             }
         }
 
-        // last_piece_token_len is how many tokens came from the last regex split. This is used
-        // for determining unstable tokens, since you can't merge across (stable) regex splits
-        (ret, last_piece_token_len)
+        ret
     }
 
     fn new(
@@ -253,7 +237,7 @@ impl BytePairEncoder {
 
     pub fn encode_with_special_tokens(&self, text: &str) -> Vec<Rank> {
         let allowed_special = self.special_tokens();
-        self.encode(text, &allowed_special).0
+        self.encode(text, &allowed_special)
     }
 }
 
@@ -334,6 +318,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tokens = bpe_map.encode_with_special_tokens(text);
     println!("Encoded tokens: {:?}", tokens);
 
+    let decoded_text = bpe_map.decode(&tokens)?;
+    
+    println!("Decoded text: {:?}", decoded_text);
+    
     // Now `bpe_map` is a HashMap<Vec<u8>, i32>
     // Do something with it...
     println!("Loaded {} entries", num_base_tokens);
