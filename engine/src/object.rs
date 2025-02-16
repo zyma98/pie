@@ -51,8 +51,44 @@ pub trait Object: Debug + Sized + Send + Sync {
 
 pub type IdRepr = u32;
 
+#[repr(transparent)]
 #[derive(Debug)]
 pub struct Id<T: Object>(IdRepr, PhantomData<T>);
+
+impl<T: Object> Id<T> {
+    pub fn into_repr(self) -> IdRepr {
+        self.0
+    }
+
+    pub fn map_from_repr(reprs: Vec<IdRepr>) -> Vec<Id<T>> {
+        // The safe way to do this is to use Vec::map...
+        // reprs
+        //     .into_iter()
+        //     .map(|repr| Id(repr, PhantomData))
+        //     .collect()
+        // But we can do it in a more efficient way since the Id is repr(transparent).
+        let capacity = reprs.capacity();
+        let len = reprs.len();
+        let ptr = reprs.as_ptr() as *mut Id<T>;
+        std::mem::forget(reprs); // Prevent the original Vec<u32> from dropping
+        unsafe { Vec::from_raw_parts(ptr, len, capacity) }
+    }
+
+    pub fn map_to_repr(ids: Vec<Id<T>>) -> Vec<IdRepr> {
+        // Safe way:
+        // ids.into_iter().map(Id::into_repr).collect()
+
+        let capacity = ids.capacity();
+        let len = ids.len();
+        let ptr = ids.as_ptr() as *mut u32;
+        std::mem::forget(ids);
+        unsafe { Vec::from_raw_parts(ptr, len, capacity) }
+    }
+
+    pub fn ref_as_repr(ids: &[Id<T>]) -> &[u32] {
+        unsafe { slice::from_raw_parts(ids.as_ptr() as *const u32, ids.len()) }
+    }
+}
 
 impl<T: Object> Clone for Id<T> {
     fn clone(&self) -> Self {
@@ -93,6 +129,12 @@ impl<T: Object> From<IdRepr> for Id<T> {
 }
 
 impl<T: Object> Into<IdRepr> for Id<T> {
+    fn into(self) -> IdRepr {
+        self.0
+    }
+}
+
+impl<T: Object> Into<IdRepr> for &Id<T> {
     fn into(self) -> IdRepr {
         self.0
     }
@@ -482,7 +524,6 @@ pub struct IdPool {
     emb_id_pool: utils::IdPool<IdRepr>,
     dist_id_pool: utils::IdPool<IdRepr>,
 }
-
 impl IdPool {
     pub fn new(max_kv_blocks: u32, max_embs: u32) -> Self {
         Self {
@@ -492,56 +533,55 @@ impl IdPool {
         }
     }
 
-    pub fn acquire<T: Object>(&mut self) -> Result<Id<T>, ObjectError> {
-        if let Ok(id) = match T::NAMESPACE {
-            Namespace::KvBlock => self.kv_block_id_pool.acquire(),
-            Namespace::Emb => self.emb_id_pool.acquire(),
-            Namespace::Dist => self.dist_id_pool.acquire(),
-        } {
-            Ok(Id::new(id))
-        } else {
-            Err(ObjectError::NoAvailableSpace)
+    // Helper that returns a mutable reference to the appropriate pool.
+    fn pool_mut<T: Object>(&mut self) -> &mut utils::IdPool<IdRepr> {
+        match T::NAMESPACE {
+            Namespace::KvBlock => &mut self.kv_block_id_pool,
+            Namespace::Emb => &mut self.emb_id_pool,
+            Namespace::Dist => &mut self.dist_id_pool,
         }
+    }
+
+    // Helper that returns an immutable reference.
+    fn pool<T: Object>(&self) -> &utils::IdPool<IdRepr> {
+        match T::NAMESPACE {
+            Namespace::KvBlock => &self.kv_block_id_pool,
+            Namespace::Emb => &self.emb_id_pool,
+            Namespace::Dist => &self.dist_id_pool,
+        }
+    }
+
+    pub fn acquire<T: Object>(&mut self) -> Result<Id<T>, ObjectError> {
+        let id = self
+            .pool_mut::<T>()
+            .acquire()
+            .map_err(|_| ObjectError::NoAvailableSpace)?;
+        Ok(Id::new(id))
     }
 
     pub fn acquire_many<T: Object>(&mut self, count: usize) -> Result<Vec<Id<T>>, ObjectError> {
-        if let Ok(ids) = match T::NAMESPACE {
-            Namespace::KvBlock => self.kv_block_id_pool.acquire_many(count),
-            Namespace::Emb => self.emb_id_pool.acquire_many(count),
-            Namespace::Dist => self.dist_id_pool.acquire_many(count),
-        } {
-            Ok(ids.into_iter().map(Id::new).collect())
-        } else {
-            Err(ObjectError::NoAvailableSpace)
-        }
+        let ids = self
+            .pool_mut::<T>()
+            .acquire_many(count)
+            .map_err(|_| ObjectError::NoAvailableSpace)?;
+        Ok(Id::map_from_repr(ids))
     }
 
-    pub fn release<T: Object>(&mut self, id: Id<T>) -> Result<(), ObjectError> {
-        let id = id.into();
-        match T::NAMESPACE {
-            Namespace::KvBlock => self.kv_block_id_pool.release(id),
-            Namespace::Emb => self.emb_id_pool.release(id),
-            Namespace::Dist => self.dist_id_pool.release(id),
-        }
-        .map_err(|e| ObjectError::AddressPoolError(e.to_string()))
+    pub fn release<T: Object>(&mut self, id: &Id<T>) -> Result<(), ObjectError> {
+        self.pool_mut::<T>()
+            .release(id.into())
+            .map_err(|e| ObjectError::AddressPoolError(e.to_string()))
     }
 
     pub fn release_many<T: Object>(&mut self, ids: &[Id<T>]) -> Result<(), ObjectError> {
-        let ids = ids.iter().map(|id| id.0).collect::<Vec<_>>();
-        match T::NAMESPACE {
-            Namespace::KvBlock => self.kv_block_id_pool.release_many(&ids),
-            Namespace::Emb => self.emb_id_pool.release_many(&ids),
-            Namespace::Dist => self.dist_id_pool.release_many(&ids),
-        }
-        .map_err(|e| ObjectError::AddressPoolError(e.to_string()))
+        let raw_ids = Id::ref_as_repr(ids);
+        self.pool_mut::<T>()
+            .release_many(raw_ids)
+            .map_err(|e| ObjectError::AddressPoolError(e.to_string()))
     }
 
     pub fn available<T: Object>(&self) -> usize {
-        match T::NAMESPACE {
-            Namespace::KvBlock => self.kv_block_id_pool.available(),
-            Namespace::Emb => self.emb_id_pool.available(),
-            Namespace::Dist => self.dist_id_pool.available(),
-        }
+        self.pool::<T>().available()
     }
 }
 
@@ -551,7 +591,6 @@ pub struct IdMap {
     emb_id_map: HashMap<IdRepr, IdRepr>,
     dist_id_map: HashMap<IdRepr, IdRepr>,
 }
-
 impl IdMap {
     pub fn new() -> Self {
         Self {
@@ -561,35 +600,44 @@ impl IdMap {
         }
     }
 
+    // Helper method to get a mutable reference to the appropriate map.
+    fn map_mut<T: Object>(&mut self) -> &mut HashMap<IdRepr, IdRepr> {
+        match T::NAMESPACE {
+            Namespace::KvBlock => &mut self.kv_block_id_map,
+            Namespace::Emb => &mut self.emb_id_map,
+            Namespace::Dist => &mut self.dist_id_map,
+        }
+    }
+
+    // Helper method to get an immutable reference to the appropriate map.
+    fn map<T: Object>(&self) -> &HashMap<IdRepr, IdRepr> {
+        match T::NAMESPACE {
+            Namespace::KvBlock => &self.kv_block_id_map,
+            Namespace::Emb => &self.emb_id_map,
+            Namespace::Dist => &self.dist_id_map,
+        }
+    }
+
     pub fn insert<T: Object>(&mut self, vid: Id<T>, id: Id<T>) {
         let (src, dst) = (vid.into(), id.into());
-        match T::NAMESPACE {
-            Namespace::KvBlock => self.kv_block_id_map.insert(src, dst),
-            Namespace::Emb => self.emb_id_map.insert(src, dst),
-            Namespace::Dist => self.dist_id_map.insert(src, dst),
-        };
+        self.map_mut::<T>().insert(src, dst);
     }
 
     pub fn remove<T: Object>(&mut self, vid: Id<T>) -> Result<Id<T>, ObjectError> {
         let vid = vid.into();
-        let id = match T::NAMESPACE {
-            Namespace::KvBlock => self.kv_block_id_map.remove(&vid),
-            Namespace::Emb => self.emb_id_map.remove(&vid),
-            Namespace::Dist => self.dist_id_map.remove(&vid),
-        }
-        .ok_or(ObjectError::ObjectNotFound)?;
+        let id = self
+            .map_mut::<T>()
+            .remove(&vid)
+            .ok_or(ObjectError::ObjectNotFound)?;
         Ok(Id::<T>::new(id))
     }
 
     pub fn get<T: Object>(&self, vid: Id<T>) -> Result<Id<T>, ObjectError> {
         let vid = vid.into();
-        let id = match T::NAMESPACE {
-            Namespace::KvBlock => self.kv_block_id_map.get(&vid),
-            Namespace::Emb => self.emb_id_map.get(&vid),
-            Namespace::Dist => self.dist_id_map.get(&vid),
-        }
-        .ok_or(ObjectError::ObjectNotFound)?;
-
+        let id = self
+            .map::<T>()
+            .get(&vid)
+            .ok_or(ObjectError::ObjectNotFound)?;
         Ok(Id::<T>::new(*id))
     }
 }

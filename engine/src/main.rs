@@ -1,6 +1,5 @@
 mod controller;
 mod cmd_buffer;
-mod handler;
 mod instance;
 mod backend;
 mod tokenizer;
