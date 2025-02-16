@@ -3,7 +3,7 @@ use wasmtime::component::{bindgen, ResourceTable};
 use wasmtime::Result;
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiView};
 
-use crate::backend::InstanceId;
+use crate::lm::InstanceId;
 use crate::object;
 use crate::object::{KvBlock, TokenDist, TokenEmb};
 use crate::tokenizer::BytePairEncoder;
