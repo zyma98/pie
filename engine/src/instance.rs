@@ -28,6 +28,7 @@ pub type Id = Uuid;
 
 pub struct InstanceState {
     id: Id,
+    owned_resources: Vec<String>,
 
     wasi_ctx: WasiCtx,
     resource_table: ResourceTable,
@@ -49,13 +50,9 @@ pub struct InstanceUtils {
 // implements send
 pub enum Command {
     // Init -------------------------------------
-    CreateInstance {
-        id: Id,
-    },
+    CreateInstance,
 
-    DestroyInstance {
-        id: Id,
-    },
+    DestroyInstance,
 
     // Communication -------------------------------------
     SendToOrigin {

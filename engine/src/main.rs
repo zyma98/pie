@@ -12,6 +12,7 @@ use anyhow::Context;
 use blake3::Hasher;
 use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
+use std::collections::HashMap;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -34,7 +35,10 @@ use wasmtime_wasi::{WasiImpl, WasiView};
 // For MessagePack serialization/deserialization.
 use crate::backend::Backend;
 use crate::controller::Controller;
+use crate::lm::KvBlock;
+use crate::object::VspaceId;
 use crate::tokenizer::{llama3_tokenizer, BytePairEncoder};
+use crate::utils::Stream;
 use rmp_serde::{decode::from_slice, encode::to_vec_named};
 use serde::{Deserialize, Serialize};
 
@@ -167,9 +171,94 @@ enum ServerMessage {
     Error { error: String },
 }
 
+#[derive(Debug)]
+pub struct Resource {
+    owner_id: InstanceId,
+    addrs: Vec<crate::object::Id<KvBlock>>,
+}
+
+impl Resource {
+    pub fn new(owner_id: InstanceId, addrs: Vec<crate::object::Id<KvBlock>>) -> Self {
+        Self { owner_id, addrs }
+    }
+}
+
 // ---------------------------
 // Main
 // ---------------------------
+// Global, synchronous controller loop
+async fn controller_loop(backend: Backend, mut inst2server_rx: Receiver<(InstanceId, Command)>) {
+    let mut controller = Controller::new(backend).await;
+
+    let mut vspaces = HashMap::new();
+    let mut vspace_id_pool = utils::IdPool::new(VspaceId::MAX);
+
+    // ANY CPU-HEAVY WORKS SHOULD BE AVOIDED HERE!!! NO BLOCKING NO ASYNC AWAITS.
+    while let Some((inst_id, cmd)) = inst2server_rx.recv().await {
+        match cmd {
+            Command::CreateInstance => {
+                let vspace_id = vspace_id_pool.acquire().unwrap();
+                vspaces.insert(inst_id, vspace_id);
+                controller.init_space(vspace_id).unwrap();
+            }
+            Command::DestroyInstance => {
+                let vspace_id = vspaces.remove(&inst_id).unwrap();
+                vspace_id_pool.release(vspace_id).unwrap();
+                controller.destroy_space(&vspace_id).unwrap();
+            }
+            Command::SendToOrigin { .. } => {}
+            Command::BroadcastToPeers { .. } => {}
+            Command::Subscribe { .. } => {}
+            Command::AllocateBlocks { .. } => {}
+            Command::DeallocateBlocks { .. } => {}
+            Command::FillBlocks { .. } => {}
+            Command::ExportBlocks { .. } => {}
+            Command::ImportBlocks { .. } => {}
+            Command::CopyBlock { .. } => {}
+            Command::MaskBlock { .. } => {}
+            Command::AllocateEmb { .. } => {}
+            Command::DeallocateEmb { .. } => {}
+            Command::EmbedText { .. } => {}
+            Command::EmbedImage { .. } => {}
+            Command::AllocateDist { .. } => {}
+            Command::DeallocateDist { .. } => {}
+            Command::DecodeTokenDist { .. } => {}
+            Command::SampleTopK { .. } => {}
+            Command::GetTokenDist { .. } => {}
+        }
+
+        let InstanceMessageOld {
+            instance_id,
+            dest_id,
+            message,
+        } = instance_msg;
+
+        // get handle
+        let instance_handle = state_.running_instances.get(&instance_id).unwrap();
+        let client_id = instance_handle.client_id;
+
+        // dest_id = 0: to symphony server.
+        // dest_id = 1: to client.
+        // dest_id = 2: to LLM server.
+        // dest_id > 4: to other instances.
+
+        // Construct a ProgramEvent message for the client
+        if dest_id == 1 {
+            // (Just parse or wrap the `message` into JSON)
+
+            let server_msg = ServerMessage::ProgramEvent {
+                instance_id: instance_id.to_string(),
+                event_data: message,
+            };
+
+            // get client handle
+            let client_handle = state_.clients.get(&client_id).unwrap();
+            client_handle.server2client.send(server_msg).await.unwrap();
+        } else {
+            // Currently do nothing for other channels,
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -216,76 +305,7 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("Failed to bind backend")?;
 
-    tokio::spawn(async move {
-        // Global controller loop
-        let mut controller = Controller::new(backend).await;
-
-        while let Some((inst_id, cmd)) = inst2server_rx.recv().await {
-
-
-            match cmd {
-                Command::CreateInstance { id } => {
-
-                    controller.create_instance(inst_id).await;
-
-                }
-                Command::DestroyInstance { .. } => {}
-                Command::SendToOrigin { .. } => {}
-                Command::BroadcastToPeers { .. } => {}
-                Command::Subscribe { .. } => {}
-                Command::AllocateBlocks { .. } => {}
-                Command::DeallocateBlocks { .. } => {}
-                Command::FillBlocks { .. } => {}
-                Command::ExportBlocks { .. } => {}
-                Command::ImportBlocks { .. } => {}
-                Command::CopyBlock { .. } => {}
-                Command::MaskBlock { .. } => {}
-                Command::AllocateEmb { .. } => {}
-                Command::DeallocateEmb { .. } => {}
-                Command::EmbedText { .. } => {}
-                Command::EmbedImage { .. } => {}
-                Command::AllocateDist { .. } => {}
-                Command::DeallocateDist { .. } => {}
-                Command::DecodeTokenDist { .. } => {}
-                Command::SampleTopK { .. } => {}
-                Command::GetTokenDist { .. } => {}
-            }
-
-
-            let InstanceMessageOld {
-                instance_id,
-                dest_id,
-                message,
-            } = instance_msg;
-
-            // get handle
-            let instance_handle = state_.running_instances.get(&instance_id).unwrap();
-            let client_id = instance_handle.client_id;
-
-            // dest_id = 0: to symphony server.
-            // dest_id = 1: to client.
-            // dest_id = 2: to LLM server.
-            // dest_id > 4: to other instances.
-
-            // Construct a ProgramEvent message for the client
-            if dest_id == 1 {
-                // (Just parse or wrap the `message` into JSON)
-
-                let server_msg = ServerMessage::ProgramEvent {
-                    instance_id: instance_id.to_string(),
-                    event_data: message,
-                };
-
-                // get client handle
-                let client_handle = state_.clients.get(&client_id).unwrap();
-                client_handle.server2client.send(server_msg).await.unwrap();
-            } else {
-                // Currently do nothing for other channels,
-            }
-        }
-
-        // This is the end of the global loop
-    });
+    let controller_handle = tokio::spawn(controller_loop(backend, inst2server_rx));
 
     // Accept incoming connections
     loop {
