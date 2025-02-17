@@ -222,6 +222,9 @@ async fn control_loop(
                 for (_, subs) in subscriptions.iter_mut() {
                     subs.retain(|&x| x != inst_id);
                 }
+
+                // remove all exported blocks
+                exported_blocks.retain(|_, v| v.owner_id != inst_id);
             }
             Command::SendToOrigin { message } => {
                 let inst = state.running_instances.get(&inst_id).unwrap();
@@ -285,8 +288,39 @@ async fn control_loop(
                     .fill(stream, &space, block, context, inputs, outputs)
                     .expect("Failed to fill blocks");
             }
-            Command::ExportBlocks { .. } => {}
-            Command::ImportBlocks { .. } => {}
+            Command::ExportBlocks {
+                blocks,
+                resource_name,
+            } => {
+                let space = vspaces.get(&inst_id).unwrap();
+                let gids = controller
+                    .lookup_all(space, &blocks)
+                    .expect("Failed to lookup blocks");
+
+                exported_blocks.insert(resource_name, ExportedBlocks::new(inst_id, gids));
+            }
+            Command::ImportBlocks {
+                blocks,
+                resource_name,
+            } => {
+                let space = *vspaces.get(&inst_id).unwrap();
+                let exported = exported_blocks
+                    .get(&resource_name)
+                    .expect("Resource not found");
+
+                controller
+                    .assign_all(&space, &blocks, &exported.addrs)
+                    .expect("Failed to assign blocks");
+            }
+            Command::GetAllExportedBlocks { handle } => {
+                // share a "catalogue" of exported blocks
+                let catalogue = exported_blocks
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.addrs.len()))
+                    .collect();
+
+                handle.send(catalogue).unwrap();
+            }
             Command::CopyBlock { .. } => {}
             Command::MaskBlock { .. } => {}
             Command::AllocateEmb { .. } => {}

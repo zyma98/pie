@@ -100,6 +100,10 @@ pub enum Command {
         resource_name: String,
     },
 
+    GetAllExportedBlocks {
+        handle: oneshot::Sender<Vec<(String, usize)>>,
+    },
+
     CopyBlock {
         stream: u32,
         src_block: object::Id<lm::KvBlock>,
