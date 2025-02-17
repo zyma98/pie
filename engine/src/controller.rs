@@ -793,31 +793,58 @@ impl<B> CausalLanguageModel for Controller<B>
 where
     B: ExecuteCommand,
 {
+    fn embed_text(
+        &mut self,
+        stream: Stream,
+        space: &VspaceId,
+        addrs: Vec<ObjectId<TokenEmb>>,
+        text_tokens: Vec<u32>,
+        positions: Vec<u32>,
+    ) -> Result<(), ControllerError> {
+        let addrs = self.lookup_all(space, &addrs)?;
+
+        for (addr, (text_token, pos)) in addrs.iter().zip(text_tokens.iter().zip(positions.iter()))
+        {
+            let cmd = IrCommand::EmbedText(backend::sdi::EmbedText {
+                embedding_id: addr.into(),
+                token_id: *text_token,
+                position_id: *pos,
+            });
+            self.enqueue_cmd(stream, cmd)?;
+        }
+
+        Ok(())
+    }
+
     fn next_token_dist(
         &mut self,
         stream: Stream,
         space: &VspaceId,
-        emb_ptr: ObjectId<TokenEmb>,
-        dist_ptr: ObjectId<TokenDist>,
+        emb_ptr: Vec<ObjectId<TokenEmb>>,
+        dist_ptr: Vec<ObjectId<TokenDist>>,
     ) -> Result<(), ControllerError> {
-        let emb_ptr = self.lookup(space, &emb_ptr)?;
-        let dist_ptr = self.lookup(space, &dist_ptr)?;
+        let emb_ptr = self.lookup_all(space, &emb_ptr)?;
+        let dist_ptr = self.lookup_all(space, &dist_ptr)?;
 
-        let cmd = IrCommand::DecodeTokenDistribution(backend::sdi::DecodeTokenDistribution {
-            embedding_id: emb_ptr.into(),
-            distribution_id: dist_ptr.into(),
-        });
+        for (emb_ptr, dist_ptr) in emb_ptr.iter().zip(dist_ptr.iter()) {
+            let cmd = IrCommand::DecodeTokenDistribution(backend::sdi::DecodeTokenDistribution {
+                embedding_id: emb_ptr.into(),
+                distribution_id: dist_ptr.into(),
+            });
+            self.enqueue_cmd(stream, cmd)?;
+        }
 
-        self.enqueue_cmd(stream, cmd)
+        Ok(())
     }
 
     fn sample_top_k(
         &mut self,
         stream: Stream,
         space: &VspaceId,
-        dist_ptr: ObjectId<TokenDist>,
+        dist_ptr: &ObjectId<TokenDist>,
         k: u32,
-    ) -> Result<oneshot::Receiver<Vec<u32>>, ControllerError> {
+        handle: oneshot::Sender<Vec<u32>>,
+    ) -> Result<(), ControllerError> {
         let dist_ptr = self.lookup(space, &dist_ptr)?;
 
         let cmd = IrCommand::SampleTopKRequest(backend::sdi::SampleTopKRequest {
@@ -825,12 +852,10 @@ where
             k,
         });
         // create a new event handle
-
-        let (tx, rx) = oneshot::channel::<Vec<u32>>();
-        let handle = EventHandle::SampleTopK(tx);
+        let handle = EventHandle::SampleTopK(handle);
 
         self.enqueue_cmd_with_event(stream, cmd, handle)?;
-        Ok(rx)
+        Ok(())
     }
 
     // fn get_raw_dist(

@@ -14,7 +14,7 @@ interface inference {
     allocate-embeds: func(stream-id:u32, count:u32) -> list<u32>;
     deallocate-embeds: func(stream-id:u32, ids: list<u32>);
 
-    embed-text: func(stream-id:u32, embs:list<u32>, tokens:list<u32>);
+    embed-text: func(stream-id:u32, embs:list<u32>, tokens:list<u32>, positions:list<u32>);
     embed-image: func(stream-id:u32, embs:list<u32>, url:string);
     embed-video: func(stream-id:u32, embs:list<u32>, url:string);
 
