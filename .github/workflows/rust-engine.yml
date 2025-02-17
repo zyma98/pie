@@ -1,4 +1,4 @@
-name: Test Build Example-apps/helloworld
+name: Test Build Engine (rust)
 
 on:
   push:
@@ -25,6 +25,6 @@ jobs:
           toolchain: stable
           override: true
 
-      - name: Build Example LIP App
+      - name: Build Engine
         working-directory: ./engine
         run: cargo build --release
