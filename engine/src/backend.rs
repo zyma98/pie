@@ -3,7 +3,7 @@ use std::mem;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use zeromq::{DealerSocket, ZmqError};
+use zeromq::{DealerSocket, Socket, ZmqError, ZmqMessage};
 use crate::controller::{ControllerError, EventHandle, Namespace};
 use prost::Message;
 use crate::backend;
@@ -15,10 +15,10 @@ pub mod sdi {
 
 pub struct Backend {
     
-    cmd_tx: mpsc::Sender<Vec<(sdi::command::Payload, Vec<EventHandle>)>>,
+    cmd_tx: mpsc::Sender<Vec<(sdi::request::Command, Vec<EventHandle>)>>,
     
-    staged: Arc<Mutex<Vec<sdi::Command>>>,
-    submitted: Arc<Mutex<Vec<sdi::Command>>>,
+    staged: Arc<Mutex<Vec<sdi::Request>>>,
+    submitted: Arc<Mutex<Vec<sdi::Request>>>,
     // queue, cmd_buffer, scheduled, submitted
     handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     // zmq handles
@@ -40,7 +40,7 @@ impl Backend {
         
     }
 
-    pub fn submit(&self, cmd: sdi::Command) -> Result<(), ControllerError> {
+    pub fn submit(&self, cmd: sdi::Request) -> Result<(), ControllerError> {
         // Lock and take the staged commands.
         let mut staged = self.staged.lock().map_err(|_| ControllerError::LockError)?;
 
@@ -102,7 +102,7 @@ impl Backend {
         socket.connect(endpoint).await?;
         println!("Connected to server at {endpoint}");
 
-        let (tx, rx) = mpsc::channel::<Vec<crate::controller::sdi::Command>>(100);
+        let (tx, rx) = mpsc::channel::<Vec<(sdi::request::Command, Vec<EventHandle>)>>(1000);
 
         self.socket_tx = Arc::new(Mutex::new(Some(tx)));
 
@@ -120,7 +120,7 @@ impl Backend {
 
     async fn socket_driver(
         mut socket: DealerSocket,
-        mut rx: mpsc::Receiver<Vec<crate::controller::sdi::Command>>,
+        mut rx: mpsc::Receiver<Vec<sdi::Command>>,
         evt_dispatch: Arc<Mutex<EventDispatcher>>,
     ) {
         loop {

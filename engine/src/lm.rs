@@ -22,7 +22,7 @@ pub struct TokenDist;
 // ------------------------------------------------------------
 
 // Backend trait for filling key-value blocks. (GPT-like models)
-pub trait CausalTransformer: object::Allocator<KvBlock> + object::Allocator<TokenEmb> {
+pub trait CausalTransformer: object::IdMapper<KvBlock> + object::IdMapper<TokenEmb> {
     fn fill(
         &mut self,
         stream: Stream,
@@ -54,7 +54,7 @@ pub trait CausalTransformer: object::Allocator<KvBlock> + object::Allocator<Toke
 }
 
 // probably unused in the first version. For BERT-like models.
-pub trait FullTransformer: object::Allocator<TokenEmb> {
+pub trait FullTransformer: object::IdMapper<TokenEmb> {
     fn fill(
         &mut self,
         stream: Stream,
@@ -66,7 +66,7 @@ pub trait FullTransformer: object::Allocator<TokenEmb> {
 }
 
 // could be used for other LLM architectures like SSMs
-pub trait Rnn: object::Allocator<TokenEmb> {
+pub trait Rnn: object::IdMapper<TokenEmb> {
     fn fill(
         &mut self,
         stream: Stream,
@@ -81,7 +81,7 @@ pub trait Rnn: object::Allocator<TokenEmb> {
 // ------------------------------------------------------------
 
 pub trait CausalLanguageModel:
-    object::MappedAllocator<TokenEmb> + object::MappedAllocator<TokenDist>
+    object::IdMapper<TokenEmb> + object::IdMapper<TokenDist>
 {
     fn next_token_dist(
         &mut self,
@@ -102,7 +102,7 @@ pub trait CausalLanguageModel:
     // todo: design a better struct to represent distributions
 }
 
-pub trait MaskedLanguageModel: object::Allocator<TokenEmb> + object::Allocator<TokenDist> {
+pub trait MaskedLanguageModel: object::IdMapper<TokenEmb> + object::IdMapper<TokenDist> {
     fn token_dist(
         &mut self,
         stream: Stream,
@@ -115,7 +115,7 @@ pub trait MaskedLanguageModel: object::Allocator<TokenEmb> + object::Allocator<T
 // ------------------------------------------------------------
 
 // Trait for backends that can embed images.
-pub trait ImageEmbedder: object::Allocator<TokenEmb> {
+pub trait ImageEmbedder: object::IdMapper<TokenEmb> {
     fn embed_img(
         &mut self,
         stream_id: Stream,
@@ -126,7 +126,7 @@ pub trait ImageEmbedder: object::Allocator<TokenEmb> {
 }
 
 // Trait for backends that can embed videos.
-pub trait VideoEmbedder: object::Allocator<TokenEmb> {
+pub trait VideoEmbedder: object::IdMapper<TokenEmb> {
     fn embed_vid(
         &mut self,
         stream_id: Stream,
