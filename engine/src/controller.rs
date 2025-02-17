@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::mem;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::{oneshot, Mutex};
 
 use crate::backend::ExecuteCommand;
@@ -103,7 +104,7 @@ where
 
         Self {
             cmd_buffer: Vec::new(),
-            cmd_batcher: CommandBatcher::new(0.0, 1, 1),
+            cmd_batcher: CommandBatcher::new(Duration::from_secs_f32(0.0), 1, 1),
             cmd_id_pool: utils::IdPool::new(u32::MAX),
             backend,
             obj_id_pool: IdPool::new(10000, 10000),
@@ -152,7 +153,7 @@ where
         Ok(())
     }
 
-    pub async fn submit(&mut self, curr_timestamp: f64) -> Result<(), ControllerError> {
+    pub async fn submit(&mut self, curr_timestamp: Instant) -> Result<(), ControllerError> {
         // first move all the commands from cmd_buffer to pending (buffer items are removed)
         let mut commands_by_stream = HashMap::new();
 
@@ -340,9 +341,9 @@ struct CommandBatcher {
 #[derive(Debug)]
 struct BatchQueue<T> {
     // cmd, timestamp, response_sender
-    items: Vec<(T, f64, EventHandle)>,
+    items: Vec<(T, Instant, EventHandle)>,
 
-    max_wait_time: f64,
+    max_wait_time: Duration,
     min_size: usize,
     max_size: usize,
 }
@@ -351,7 +352,7 @@ impl<T> BatchQueue<T> {
     fn eager() -> Self {
         Self {
             items: Vec::new(),
-            max_wait_time: 0.0,
+            max_wait_time: Duration::from_secs_f32(0.0),
             min_size: 1,
             max_size: usize::MAX,
         }
@@ -360,13 +361,13 @@ impl<T> BatchQueue<T> {
     fn k_only(min_size: usize, max_size: Option<usize>) -> Self {
         Self {
             items: Vec::new(),
-            max_wait_time: f64::MAX,
+            max_wait_time: Duration::MAX,
             min_size,
             max_size: max_size.unwrap_or(min_size),
         }
     }
 
-    fn t_only(max_wait_time: f64) -> Self {
+    fn t_only(max_wait_time: Duration) -> Self {
         Self {
             items: Vec::new(),
             max_wait_time,
@@ -375,7 +376,7 @@ impl<T> BatchQueue<T> {
         }
     }
 
-    fn k_or_t(max_wait_time: f64, min_size: usize, max_size: Option<usize>) -> Self {
+    fn k_or_t(max_wait_time: Duration, min_size: usize, max_size: Option<usize>) -> Self {
         Self {
             items: Vec::new(),
             max_wait_time,
@@ -392,11 +393,11 @@ impl<T> BatchQueue<T> {
             .unzip()
     }
 
-    fn push(&mut self, item: T, curr_timestamp: f64, evt: EventHandle) {
+    fn push(&mut self, item: T, curr_timestamp: Instant, evt: EventHandle) {
         self.items.push((item, curr_timestamp, evt));
     }
 
-    fn is_ready(&self, curr_timestamp: f64) -> bool {
+    fn is_ready(&self, curr_timestamp: Instant) -> bool {
         let num_items = self.items.len();
 
         if num_items > 0 {
@@ -408,7 +409,7 @@ impl<T> BatchQueue<T> {
         false
     }
 
-    fn batch(&mut self, curr_timestamp: f64) -> Option<(Vec<T>, Vec<EventHandle>)> {
+    fn batch(&mut self, curr_timestamp: Instant) -> Option<(Vec<T>, Vec<EventHandle>)> {
         if self.is_ready(curr_timestamp) {
             Some(self.take())
         } else {
@@ -418,7 +419,7 @@ impl<T> BatchQueue<T> {
 }
 
 impl CommandBatcher {
-    fn new(max_wait_time: f64, min_size: usize, max_size: usize) -> Self {
+    fn new(max_wait_time: Duration, min_size: usize, max_size: usize) -> Self {
         Self {
             allocate: BatchQueue::eager(),
             deallocate: BatchQueue::eager(),
@@ -432,7 +433,7 @@ impl CommandBatcher {
         }
     }
 
-    fn push(&mut self, cmd: IrCommand, curr_timestamp: f64, evt: EventHandle) {
+    fn push(&mut self, cmd: IrCommand, curr_timestamp: Instant, evt: EventHandle) {
         match cmd {
             IrCommand::Allocate(item) => {
                 self.allocate.push(item, curr_timestamp, evt);
@@ -468,7 +469,7 @@ impl CommandBatcher {
 
     fn batch_all(
         &mut self,
-        curr_timestamp: f64,
+        curr_timestamp: Instant,
     ) -> Vec<(backend::sdi::request::Command, Vec<EventHandle>)> {
         let mut cmds = Vec::new();
 

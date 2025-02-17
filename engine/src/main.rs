@@ -13,6 +13,7 @@ use blake3::Hasher;
 use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
 use std::collections::HashMap;
+use std::time::Instant;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -444,6 +445,9 @@ async fn control_loop(
                 controller.fetch(stream, &space, &dist, handle).unwrap();
             }
         }
+
+        // let the backend do its work
+        controller.submit(Instant::now()).await.unwrap();
     }
 }
 
