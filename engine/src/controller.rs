@@ -52,7 +52,7 @@ enum IrCommand {
 
 // Hidden
 #[derive(Debug)]
-pub enum IrEvent {
+enum IrEvent {
     SampleTopK(backend::sdi::SampleTopKResponse),
     GetTokenDistribution(backend::sdi::GetTokenDistributionResponse),
 }

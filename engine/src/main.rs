@@ -35,8 +35,8 @@ use wasmtime_wasi::{WasiImpl, WasiView};
 // For MessagePack serialization/deserialization.
 use crate::backend::Backend;
 use crate::controller::Controller;
-use crate::lm::KvBlock;
-use crate::object::VspaceId;
+use crate::lm::{CausalTransformer, KvBlock};
+use crate::object::{Allocator, IdMapper, VspaceId};
 use crate::tokenizer::{llama3_tokenizer, BytePairEncoder};
 use crate::utils::Stream;
 use rmp_serde::{decode::from_slice, encode::to_vec_named};
@@ -100,7 +100,8 @@ struct ClientHandle {
 struct InstanceHandle {
     client_id: ClientId,
     hash: String,
-    server2inst: Sender<InstanceMessageOld>,
+    evt_from_origin: Sender<String>,
+    evt_from_peers: Sender<(String, String)>,
     join_handle: JoinHandle<()>,
 }
 
@@ -172,12 +173,12 @@ enum ServerMessage {
 }
 
 #[derive(Debug)]
-pub struct Resource {
+pub struct ExportedBlocks {
     owner_id: InstanceId,
     addrs: Vec<crate::object::Id<KvBlock>>,
 }
 
-impl Resource {
+impl ExportedBlocks {
     pub fn new(owner_id: InstanceId, addrs: Vec<crate::object::Id<KvBlock>>) -> Self {
         Self { owner_id, addrs }
     }
@@ -187,11 +188,22 @@ impl Resource {
 // Main
 // ---------------------------
 // Global, synchronous controller loop
-async fn controller_loop(backend: Backend, mut inst2server_rx: Receiver<(InstanceId, Command)>) {
+async fn control_loop(
+    backend: Backend,
+    mut inst2server_rx: Receiver<(InstanceId, Command)>,
+    state: Arc<ServerState>,
+) {
     let mut controller = Controller::new(backend).await;
 
-    let mut vspaces = HashMap::new();
+    // Object virtual address space
+    let mut vspaces = HashMap::<InstanceId, VspaceId>::new();
     let mut vspace_id_pool = utils::IdPool::new(VspaceId::MAX);
+
+    // Event subscriptions
+    let mut subscriptions = HashMap::<String, Vec<InstanceId>>::new();
+
+    // inter-instance shared resources
+    let mut exported_blocks = HashMap::<String, ExportedBlocks>::new();
 
     // ANY CPU-HEAVY WORKS SHOULD BE AVOIDED HERE!!! NO BLOCKING NO ASYNC AWAITS.
     while let Some((inst_id, cmd)) = inst2server_rx.recv().await {
@@ -205,13 +217,74 @@ async fn controller_loop(backend: Backend, mut inst2server_rx: Receiver<(Instanc
                 let vspace_id = vspaces.remove(&inst_id).unwrap();
                 vspace_id_pool.release(vspace_id).unwrap();
                 controller.destroy_space(&vspace_id).unwrap();
+
+                // remove all subscriptions
+                for (_, subs) in subscriptions.iter_mut() {
+                    subs.retain(|&x| x != inst_id);
+                }
             }
-            Command::SendToOrigin { .. } => {}
-            Command::BroadcastToPeers { .. } => {}
-            Command::Subscribe { .. } => {}
-            Command::AllocateBlocks { .. } => {}
-            Command::DeallocateBlocks { .. } => {}
-            Command::FillBlocks { .. } => {}
+            Command::SendToOrigin { message } => {
+                let inst = state.running_instances.get(&inst_id).unwrap();
+                let client = state.clients.get(&inst.client_id).unwrap();
+
+                let server_msg = ServerMessage::ProgramEvent {
+                    instance_id: inst_id.to_string(),
+                    event_data: message,
+                };
+
+                client.server2client.send(server_msg).await.unwrap();
+            }
+            Command::BroadcastToPeers { topic, message } => {
+                if let Some(subscribers) = subscriptions.get(&topic) {
+                    for sub in subscribers {
+                        let inst = state.running_instances.get(&sub).unwrap();
+                        inst.evt_from_peers
+                            .send((topic.clone(), message.clone()))
+                            .await
+                            .unwrap();
+                    }
+                }
+            }
+            Command::Subscribe { topic } => {
+                let subs = subscriptions.entry(topic).or_insert_with(Vec::new);
+                subs.push(inst_id);
+            }
+            Command::Unsubscribe { topic } => {
+                if let Some(subs) = subscriptions.get_mut(&topic) {
+                    subs.retain(|&x| x != inst_id);
+                }
+            }
+            Command::AllocateBlocks { stream, blocks } => {
+                let stream = Stream::new(&inst_id, Some(stream));
+                let space = vspaces.get(&inst_id).unwrap();
+
+                let ids = controller
+                    .alloc_all(stream, blocks.len())
+                    .expect("Failed to allocate blocks");
+                controller
+                    .assign_all(space, &blocks, &ids)
+                    .expect("Failed to assign blocks");
+            }
+            Command::DeallocateBlocks { stream, blocks } => {
+                let space = vspaces.get(&inst_id).unwrap();
+                controller
+                    .unassign_all(space, &blocks)
+                    .expect("Failed to unassign blocks");
+            }
+            Command::FillBlock {
+                stream,
+                block,
+                context,
+                inputs,
+                outputs,
+            } => {
+                let stream = Stream::new(&inst_id, Some(stream));
+                let space = *vspaces.get(&inst_id).unwrap();
+
+                controller
+                    .fill(stream, &space, block, context, inputs, outputs)
+                    .expect("Failed to fill blocks");
+            }
             Command::ExportBlocks { .. } => {}
             Command::ImportBlocks { .. } => {}
             Command::CopyBlock { .. } => {}
@@ -305,7 +378,7 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("Failed to bind backend")?;
 
-    let controller_handle = tokio::spawn(controller_loop(backend, inst2server_rx));
+    let controller_handle = tokio::spawn(control_loop(backend, inst2server_rx));
 
     // Accept incoming connections
     loop {
