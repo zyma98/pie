@@ -4,9 +4,9 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use zeromq::{DealerSocket, ZmqError};
-use crate::controller::ControllerError;
+use crate::controller::{ControllerError, EventHandle, Namespace};
 use prost::Message;
-
+use crate::backend;
 
 pub mod sdi {
     include!(concat!(env!("OUT_DIR"), "/sdi.rs"));
@@ -14,10 +14,12 @@ pub mod sdi {
 
 
 pub struct Backend {
+    
+    cmd_tx: mpsc::Sender<Vec<(sdi::command::Payload, Vec<EventHandle>)>>,
+    
     staged: Arc<Mutex<Vec<sdi::Command>>>,
     submitted: Arc<Mutex<Vec<sdi::Command>>>,
     // queue, cmd_buffer, scheduled, submitted
-    socket_tx: Arc<Mutex<Option<mpsc::Sender<Vec<sdi::Command>>>>>,
     handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     // zmq handles
 
@@ -36,9 +38,45 @@ impl Backend {
         
         
         
-        ///
     }
 
+    pub fn submit(&self, cmd: sdi::Command) -> Result<(), ControllerError> {
+        // Lock and take the staged commands.
+        let mut staged = self.staged.lock().map_err(|_| ControllerError::LockError)?;
+
+        // Push the command into the staged commands.
+        staged.push(cmd);
+
+        // add the commands to the staged queue
+        let mut staged = Vec::new();
+
+        // Add the batched commands to the staged queue.
+        for (payload, evt_handles) in batched_payloads {
+            let correlation_id = self.acquire_id(Namespace::Cmd)?;
+
+            staged.push(backend::sdi::Command {
+                correlation_id,
+                payload: Some(payload),
+            });
+
+            // if at least one sender is present, add it to the event dispatcher.
+            let has_event = evt_handles.iter().any(|s| s.is_some());
+            if has_event {
+                let mut dispatcher = self
+                    .event_dispatcher
+                    .lock()
+                    .map_err(|_| ControllerError::LockError)?;
+                dispatcher.table.insert(correlation_id, evt_handles);
+            }
+        }
+        
+        
+        Ok(())
+        
+        
+    }
+    
+    
     pub async fn commit(&self) -> Result<(), ControllerError> {
         // Lock and take the staged commands.
         let mut staged = self.staged.lock().map_err(|_| ControllerError::LockError)?;

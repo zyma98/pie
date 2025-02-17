@@ -1,5 +1,4 @@
 mod controller;
-mod cmd_buffer;
 mod instance;
 mod lm;
 mod tokenizer;
@@ -8,7 +7,7 @@ mod object;
 mod backend;
 //mod state_old;
 
-use crate::instance::{App, InstanceMessageOld, InstanceState, InstanceUtils};
+use crate::instance::{App,InstanceState, InstanceUtils};
 use anyhow::Context;
 use blake3::Hasher;
 use dashmap::DashMap;
