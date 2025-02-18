@@ -6,6 +6,11 @@ def handle_request(request: sdi_pb2.Request):
     # Determine which command was set in the oneof field "command"
     command = request.WhichOneof("command")
 
+    # check locks on inputs & outputs
+
+    # no pending computations on input -> do it RN (except for Fills - cannot do them in parallel) & register "pending" status on inputs & outputs.
+    # ...
+
     if command == "allocate":
         batch_allocate = request.allocate  # This is a BatchAllocate message
         print("Handling BatchAllocate command")
