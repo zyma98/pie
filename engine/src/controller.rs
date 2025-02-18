@@ -124,15 +124,15 @@ where
         Ok(())
     }
 
-    pub fn destroy_space(&mut self, space: &VspaceId) -> Result<(), ObjectError> {
+    pub fn destroy_space(&mut self, stream: Stream, space: &VspaceId) -> Result<(), ObjectError> {
         // first, un-assign all the objects in the space
         let kv_blocks: Vec<ObjectId<KvBlock>> = self.list(space)?;
         let embs: Vec<ObjectId<TokenEmb>> = self.list(space)?;
         let dists: Vec<ObjectId<TokenDist>> = self.list(space)?;
 
-        self.unassign_all(space, &kv_blocks)?;
-        self.unassign_all(space, &embs)?;
-        self.unassign_all(space, &dists)?;
+        self.unassign_all(stream, space, &kv_blocks)?;
+        self.unassign_all(stream, space, &embs)?;
+        self.unassign_all(stream, space, &dists)?;
 
         self.obj_id_spaces.remove(space).unwrap();
         Ok(())
@@ -697,7 +697,12 @@ where
         Ok(())
     }
 
-    fn unassign_all(&mut self, space: &VspaceId, srcs: &[ObjectId<T>]) -> Result<(), ObjectError> {
+    fn unassign_all(
+        &mut self,
+        stream: Stream,
+        space: &VspaceId,
+        srcs: &[ObjectId<T>],
+    ) -> Result<(), ObjectError> {
         let vspace = self
             .obj_id_spaces
             .get_mut(space)
@@ -712,7 +717,7 @@ where
         for tgt in tgts.iter() {
             let free = self.decrement_ref_count(tgt)?;
             if free {
-                self.dealloc(Stream::default(), tgt)?;
+                self.dealloc(stream, tgt)?;
             }
         }
 

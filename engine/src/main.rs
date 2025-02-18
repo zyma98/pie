@@ -210,14 +210,15 @@ async fn control_loop(
     while let Some((inst_id, cmd)) = inst2server_rx.recv().await {
         match cmd {
             Command::CreateInstance => {
-                let vspace_id = vspace_id_pool.acquire().unwrap();
-                vspaces.insert(inst_id, vspace_id);
-                controller.init_space(vspace_id).unwrap();
+                let space = vspace_id_pool.acquire().unwrap();
+                vspaces.insert(inst_id, space);
+                controller.init_space(space).unwrap();
             }
             Command::DestroyInstance => {
-                let vspace_id = vspaces.remove(&inst_id).unwrap();
-                vspace_id_pool.release(vspace_id).unwrap();
-                controller.destroy_space(&vspace_id).unwrap();
+                let stream = Stream::new(&inst_id, None);
+                let space = vspaces.remove(&inst_id).unwrap();
+                vspace_id_pool.release(space).unwrap();
+                controller.destroy_space(stream, &space).unwrap();
 
                 // remove all subscriptions
                 for (_, subs) in subscriptions.iter_mut() {
@@ -259,20 +260,22 @@ async fn control_loop(
                 }
             }
             Command::AllocateBlocks { stream, blocks } => {
-                let stream = Stream::new(&inst_id, Some(stream));
-                let space = vspaces.get(&inst_id).unwrap();
+                let (stream, space) = (
+                    Stream::new(&inst_id, Some(stream)),
+                    vspaces.get(&inst_id).unwrap(),
+                );
 
-                let ids = controller
-                    .alloc_all(stream, blocks.len())
-                    .expect("Failed to allocate blocks");
                 controller
-                    .assign_all(space, &blocks, &ids)
+                    .alloc_and_assign_all(stream, space, &blocks)
                     .expect("Failed to assign blocks");
             }
             Command::DeallocateBlocks { stream, blocks } => {
-                let space = vspaces.get(&inst_id).unwrap();
+                let (stream, space) = (
+                    Stream::new(&inst_id, Some(stream)),
+                    vspaces.get(&inst_id).unwrap(),
+                );
                 controller
-                    .unassign_all(space, &blocks)
+                    .unassign_all(stream, space, &blocks)
                     .expect("Failed to unassign blocks");
             }
             Command::FillBlock {
@@ -282,11 +285,13 @@ async fn control_loop(
                 inputs,
                 outputs,
             } => {
-                let stream = Stream::new(&inst_id, Some(stream));
-                let space = *vspaces.get(&inst_id).unwrap();
+                let (stream, space) = (
+                    Stream::new(&inst_id, Some(stream)),
+                    vspaces.get(&inst_id).unwrap(),
+                );
 
                 controller
-                    .fill(stream, &space, block, context, inputs, outputs)
+                    .fill(stream, space, block, context, inputs, outputs)
                     .expect("Failed to fill blocks");
             }
             Command::ExportBlocks {
@@ -330,8 +335,10 @@ async fn control_loop(
                 dst_token_offset,
                 size,
             } => {
-                let stream = Stream::new(&inst_id, Some(stream));
-                let space = *vspaces.get(&inst_id).unwrap();
+                let (stream, space) = (
+                    Stream::new(&inst_id, Some(stream)),
+                    vspaces.get(&inst_id).unwrap(),
+                );
                 controller
                     .copy_tokens(
                         stream,
@@ -349,27 +356,31 @@ async fn control_loop(
                 block,
                 mask,
             } => {
-                let stream = Stream::new(&inst_id, Some(stream));
-                let space = *vspaces.get(&inst_id).unwrap();
+                let (stream, space) = (
+                    Stream::new(&inst_id, Some(stream)),
+                    vspaces.get(&inst_id).unwrap(),
+                );
                 controller
                     .mask_tokens(stream, &space, block, &mask)
                     .expect("Failed to mask tokens");
             }
             Command::AllocateEmb { stream, embs } => {
-                let stream = Stream::new(&inst_id, Some(stream));
-                let space = *vspaces.get(&inst_id).unwrap();
-                let ids = controller
-                    .alloc_all(stream, embs.len())
-                    .expect("Failed to allocate embeddings");
+                let (stream, space) = (
+                    Stream::new(&inst_id, Some(stream)),
+                    vspaces.get(&inst_id).unwrap(),
+                );
 
                 controller
-                    .assign_all(&space, &embs, &ids)
-                    .expect("Failed to assign embeddings");
+                    .alloc_and_assign_all(stream, space, &embs)
+                    .expect("Failed to assign embs");
             }
             Command::DeallocateEmb { stream, embs } => {
-                let space = *vspaces.get(&inst_id).unwrap();
+                let (stream, space) = (
+                    Stream::new(&inst_id, Some(stream)),
+                    vspaces.get(&inst_id).unwrap(),
+                );
                 controller
-                    .unassign_all(&space, &embs)
+                    .unassign_all(stream, &space, &embs)
                     .expect("Failed to unassign embeddings");
             }
             Command::EmbedText {
@@ -378,9 +389,10 @@ async fn control_loop(
                 text,
                 positions,
             } => {
-                let stream = Stream::new(&inst_id, Some(stream));
-
-                let space = *vspaces.get(&inst_id).unwrap();
+                let (stream, space) = (
+                    Stream::new(&inst_id, Some(stream)),
+                    vspaces.get(&inst_id).unwrap(),
+                );
 
                 controller
                     .embed_text(stream, &space, embs, text, positions)
@@ -396,20 +408,22 @@ async fn control_loop(
                 controller.embed_img(stream, &space, embs, image).unwrap();
             }
             Command::AllocateDist { stream, dists } => {
-                let stream = Stream::new(&inst_id, Some(stream));
-                let space = *vspaces.get(&inst_id).unwrap();
-                let ids = controller
-                    .alloc_all(stream, dists.len())
-                    .expect("Failed to allocate distributions");
+                let (stream, space) = (
+                    Stream::new(&inst_id, Some(stream)),
+                    vspaces.get(&inst_id).unwrap(),
+                );
 
                 controller
-                    .assign_all(&space, &dists, &ids)
-                    .expect("Failed to assign distributions");
+                    .alloc_and_assign_all(stream, space, &dists)
+                    .expect("Failed to assign dists");
             }
             Command::DeallocateDist { stream, dists } => {
-                let space = *vspaces.get(&inst_id).unwrap();
+                let (stream, space) = (
+                    Stream::new(&inst_id, Some(stream)),
+                    vspaces.get(&inst_id).unwrap(),
+                );
                 controller
-                    .unassign_all(&space, &dists)
+                    .unassign_all(stream, space, &dists)
                     .expect("Failed to unassign distributions");
             }
             Command::DecodeTokenDist {
@@ -417,8 +431,10 @@ async fn control_loop(
                 embs,
                 dists,
             } => {
-                let stream = Stream::new(&inst_id, Some(stream));
-                let space = *vspaces.get(&inst_id).unwrap();
+                let (stream, space) = (
+                    Stream::new(&inst_id, Some(stream)),
+                    vspaces.get(&inst_id).unwrap(),
+                );
                 controller
                     .next_token_dist(stream, &space, embs, dists)
                     .unwrap();
@@ -429,8 +445,10 @@ async fn control_loop(
                 k,
                 handle,
             } => {
-                let stream = Stream::new(&inst_id, Some(stream));
-                let space = *vspaces.get(&inst_id).unwrap();
+                let (stream, space) = (
+                    Stream::new(&inst_id, Some(stream)),
+                    vspaces.get(&inst_id).unwrap(),
+                );
                 controller
                     .sample_top_k(stream, &space, &emb, k, handle)
                     .unwrap();
@@ -440,8 +458,10 @@ async fn control_loop(
                 dist,
                 handle,
             } => {
-                let stream = Stream::new(&inst_id, Some(stream));
-                let space = *vspaces.get(&inst_id).unwrap();
+                let (stream, space) = (
+                    Stream::new(&inst_id, Some(stream)),
+                    vspaces.get(&inst_id).unwrap(),
+                );
                 controller.fetch(stream, &space, &dist, handle).unwrap();
             }
         }
