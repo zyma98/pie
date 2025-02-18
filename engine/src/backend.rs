@@ -35,8 +35,8 @@ pub trait ExecuteCommand<A, B>: Send + Sync + 'static {
 
 #[derive(Debug, Clone)]
 pub struct ZmqBackend<A, B> {
-    cmd_tx: mpsc::Sender<A>,
-    evt_tx: Arc<Mutex<Option<mpsc::Sender<B>>>>, // no tokio mutex. Because it will be only mutated once.
+    cmd_tx: Sender<A>,
+    evt_tx: Arc<Mutex<Option<Sender<B>>>>, // no tokio mutex. Because it will be only mutated once.
     handle: Arc<JoinHandle<()>>,
 }
 
@@ -71,7 +71,7 @@ where
     async fn backend_routine(
         mut socket: DealerSocket,
         mut rx: mpsc::Receiver<A>,
-        evt_tx: Arc<Mutex<Option<mpsc::Sender<B>>>>,
+        evt_tx: Arc<Mutex<Option<Sender<B>>>>,
     ) {
         loop {
             tokio::select! {
