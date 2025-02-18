@@ -462,10 +462,10 @@ async fn main() -> anyhow::Result<()> {
     config.async_support(true);
 
     // Load tokenizer
-    let tokenizer = llama3_tokenizer("../tokenizer.model").unwrap();
+    let tokenizer = llama3_tokenizer("../tokenizer.model").expect("Tokenizer load failed");
 
     // create channel
-    let (inst2server_tx, mut inst2server_rx) = channel(1024);
+    let (inst2server_tx, inst2server_rx) = channel(1024);
 
     let mut server_state = ServerState {
         programs_in_disk: DashMap::new(),
