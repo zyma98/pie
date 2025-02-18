@@ -76,10 +76,7 @@ def main():
         client_identity = frames[0]
 
         # Check if an empty frame is present. If so, payload is at index 2.
-        if len(frames) == 3 and frames[1] == b'':
-            payload = frames[2]
-        else:
-            payload = frames[1]
+        payload = frames[1]
 
         # Deserialize the protobuf message
         person = sdi_pb2.Request()
@@ -91,7 +88,7 @@ def main():
 
         # Send reply back to the client.
         # Include the client identity and an empty frame to maintain the envelope.
-        router.send_multipart([client_identity, b'', reply_payload])
+        router.send_multipart([client_identity, reply_payload])
 
     if __name__ == "__main__":
         main()
