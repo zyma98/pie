@@ -1,6 +1,7 @@
 use crate::server::{ClientMessage, ServerMessage};
 use anyhow::Result;
 use blake3;
+use colored::*;
 use futures::{SinkExt, StreamExt};
 use rmp_serde::{decode, encode};
 use serde::{Deserialize, Serialize};
@@ -16,18 +17,18 @@ const CHUNK_SIZE: usize = 64 * 1024;
 /// A client that interacts with the "Symphony" server.
 pub struct Client {
     /// Outgoing sender for Message frames
-    tx: mpsc::UnboundedSender<Message>,
+    tx: UnboundedSender<Message>,
     /// A queue of incoming `ServerMessage`s (decoded from msgpack)
-    incoming: mpsc::UnboundedReceiver<ServerMessage>,
+    incoming: UnboundedReceiver<ServerMessage>,
     /// A task handle for the background reading loop
     read_task: tokio::task::JoinHandle<()>,
 }
 
 impl Client {
-    /// Connect to the given WebSocket URL and return a new `SymphonyClient`.
+    /// Connect to the given WebSocket URL and return a new `Client`.
     pub async fn connect(server_uri: &str) -> Result<Client> {
         let (ws_stream, _response) = connect_async(server_uri).await?;
-        println!("[SymphonyClient] Connected to {server_uri}");
+        println!("[Client] Connected to {server_uri}");
 
         // Split into write and read halves
         let (mut ws_write, mut ws_read) = ws_stream.split();
@@ -46,7 +47,7 @@ impl Client {
         let writer_task = tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
                 if let Err(e) = ws_write.send(msg).await {
-                    eprintln!("[SymphonyClient] WS write error: {:?}", e);
+                    eprintln!("[Client] WS write error: {:?}", e);
                     break;
                 }
             }
@@ -61,34 +62,31 @@ impl Client {
                         match decode::from_slice::<ServerMessage>(&bin) {
                             Ok(server_msg) => {
                                 if incoming_tx.send(server_msg).is_err() {
-                                    eprintln!("[SymphonyClient] Failed to queue incoming message");
+                                    eprintln!("[Client] Failed to queue incoming message");
                                 }
                             }
                             Err(e) => {
-                                eprintln!("[SymphonyClient] Failed to decode msgpack: {:?}", e);
+                                eprintln!("[Client] Failed to decode msgpack: {:?}", e);
                             }
                         }
                     }
                     Message::Text(txt) => {
-                        eprintln!(
-                            "[SymphonyClient] Unexpected text message from server: {:?}",
-                            txt
-                        );
+                        eprintln!("[Client] Unexpected text message from server: {:?}", txt);
                         // You could also generate an "error" message here
                     }
                     Message::Close(_) => {
-                        println!("[SymphonyClient] Server closed the connection");
+                        println!("[Client] Server closed the connection");
                         break;
                     }
                     Message::Ping(_) | Message::Pong(_) => {
                         // ignore pings/pongs, or handle as needed
                     }
                     _ => {
-                        eprintln!("[SymphonyClient] Unexpected message type from server");
+                        eprintln!("[Client] Unexpected message type from server");
                     }
                 }
             }
-            println!("[SymphonyClient] Reader task ended.");
+            println!("[Client] Reader task ended.");
         });
 
         // We'll join the writer_task on drop or when close() is called, but let's keep only the
@@ -114,7 +112,7 @@ impl Client {
         self.read_task.abort();
         let _ = self.read_task.await;
 
-        println!("[SymphonyClient] Connection closed.");
+        println!("[Client] Connection closed.");
         Ok(())
     }
 
@@ -155,7 +153,7 @@ impl Client {
                 other => {
                     // If it's not the query response, we can either keep waiting or
                     // push it back somewhere. For a simple approach, let's just keep waiting.
-                    eprintln!("[SymphonyClient] Unexpected message: {:?}", other);
+                    eprintln!("[Client] Unexpected message: {:?}", other);
                 }
             }
         }
@@ -193,7 +191,7 @@ impl Client {
                         } => {
                             if hash == program_hash && ack_idx == chunk_index {
                                 println!(
-                                    "[SymphonyClient] Received ack for chunk {}/{}",
+                                    "[Client] Received ack for chunk {}/{}",
                                     ack_idx, total_chunks
                                 );
                                 break; // proceed to next chunk
@@ -214,7 +212,7 @@ impl Client {
                                 // Possibly the server also sends UploadComplete right after last chunk
                                 if completed_hash == &program_hash {
                                     println!(
-                                        "[SymphonyClient] Received upload_complete for {}",
+                                        "[Client] Received upload_complete for {}",
                                         completed_hash
                                     );
                                     // It's possible the server didn't wait for the chunk ack?
@@ -227,7 +225,10 @@ impl Client {
                                 }
                             }
                             // keep waiting for an ack that matches chunk_index
-                            eprintln!("[SymphonyClient] Unexpected message while waiting for chunk ack: {:?}", other);
+                            eprintln!(
+                                "[Client] Unexpected message while waiting for chunk ack: {:?}",
+                                other
+                            );
                         }
                     }
                 } else {
@@ -245,7 +246,7 @@ impl Client {
                 match incoming {
                     ServerMessage::UploadComplete { hash } => {
                         if hash == program_hash {
-                            println!("[SymphonyClient] Upload complete for hash={}", hash);
+                            println!("[Client] Upload complete for hash={}", hash);
                             break;
                         } else {
                             eprintln!("UploadComplete mismatch: got hash={}", hash);
@@ -254,7 +255,7 @@ impl Client {
                     }
                     other => {
                         eprintln!(
-                            "[SymphonyClient] Received extra message after final chunk: {:?}",
+                            "[Client] Received extra message after final chunk: {:?}",
                             other
                         );
                         // Could ignore or break as needed
@@ -295,7 +296,10 @@ impl Client {
                 }
                 other => {
                     // Possibly a program_event or something else, let's keep waiting
-                    eprintln!("[SymphonyClient] Unexpected message while waiting for ProgramLaunched: {:?}", other);
+                    eprintln!(
+                        "[Client] Unexpected message while waiting for ProgramLaunched: {:?}",
+                        other
+                    );
                 }
             }
         }
@@ -322,10 +326,7 @@ impl Client {
                     instance_id: term_id,
                 } => {
                     if term_id == instance_id {
-                        println!(
-                            "[SymphonyClient] ProgramTerminated for instance_id={}",
-                            instance_id
-                        );
+                        println!("[Client] ProgramTerminated for instance_id={}", instance_id);
                         return Ok(());
                     } else {
                         eprintln!(
@@ -338,82 +339,13 @@ impl Client {
                     anyhow::bail!("Server error on terminate_program: {}", error);
                 }
                 other => {
-                    eprintln!("[SymphonyClient] Unexpected message while waiting for ProgramTerminated: {:?}", other);
+                    eprintln!(
+                        "[Client] Unexpected message while waiting for ProgramTerminated: {:?}",
+                        other
+                    );
                 }
             }
         }
         Ok(())
     }
-}
-
-/// A small demo function that parallels your Python `demo_sequence`.
-#[tokio::main]
-async fn main() -> Result<()> {
-    // Adjust path as needed:
-    let wasm_path = PathBuf::from("../example-apps/target/wasm32-wasip2/release/helloworld.wasm");
-    let server_uri = "ws://127.0.0.1:9000";
-
-    // 1) Create and connect the client
-    let mut client = Client::connect(server_uri).await?;
-
-    // 2) Read local file and compute BLAKE3
-    let wasm_bytes = fs::read(&wasm_path)?;
-    let file_hash = blake3::hash(&wasm_bytes).to_hex().to_string();
-    println!("[Demo] Program file hash: {}", file_hash);
-
-    // 3) Query existence
-    match client.query_existence(&file_hash).await? {
-        ServerMessage::QueryResponse { hash, exists } => {
-            println!(
-                "[Demo] query_existence response: hash={}, exists={}",
-                hash, exists
-            );
-
-            // 4) If not present, upload
-            if !exists {
-                println!("[Demo] Program not found on server, uploading now...");
-                client.upload_program(&wasm_bytes, &file_hash).await?;
-            } else {
-                println!("[Demo] Program already exists on server, skipping upload.");
-            }
-        }
-        ServerMessage::Error { error } => {
-            eprintln!("[Demo] query_existence got error: {}", error);
-        }
-        _ => {}
-    }
-
-    // 5) Start the program
-    if let Some(instance_id) = client.start_program(&file_hash).await? {
-        println!("[Demo] Program launched with instance_id = {}", instance_id);
-
-        // 6) Send a couple of events
-        client.send_event(
-            &instance_id,
-            "Hello from Rust client - event #1".to_string(),
-        )?;
-        client.send_event(&instance_id, "Another event #2".to_string())?;
-
-        // Wait a bit to let any "program_event" messages come back
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-        // Drain the queue of messages
-        while let Ok(Some(msg)) = tokio::time::timeout(
-            std::time::Duration::from_millis(10),
-            client.wait_for_next_message(),
-        )
-        .await
-        {
-            println!("[Demo] Received async event: {:?}", msg);
-        }
-
-        // 7) Terminate the program
-        client.terminate_program(&instance_id).await?;
-    } else {
-        println!("[Demo] Program launch failed or was not recognized.");
-    }
-
-    // 8) Close the connection
-    client.close().await?;
-    Ok(())
 }
