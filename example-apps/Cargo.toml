@@ -2,7 +2,7 @@
 resolver = "2"
 members = [
     "helloworld"
-]
+, "symphony"]
 
 [workspace.dependencies]
 wit-bindgen = "0.38.0"
