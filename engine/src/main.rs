@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 mod backend;
 mod controller;
 mod driver_l4m;
@@ -9,11 +11,12 @@ mod runtime;
 mod server;
 mod tokenizer;
 mod utils;
+mod client;
 
 use anyhow::Context;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::sync::mpsc::channel;
+use tokio::sync::mpsc::{channel, unbounded_channel};
 
 use crate::controller::Controller;
 use crate::instance::{Command, Id as InstanceId};
@@ -40,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
     let engine = Engine::new(&config)?;
 
     // 3) Build a channel for (instance -> controller) commands
-    let (inst2server_tx, mut inst2server_rx) = channel::<(InstanceId, Command)>(1024);
+    let (inst2server_tx, mut inst2server_rx) = unbounded_channel::<(InstanceId, Command)>();
 
     // 4) Create our “runtime” state.
     //    (This holds everything the controller and server might share: engine,
