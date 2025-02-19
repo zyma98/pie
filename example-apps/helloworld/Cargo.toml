@@ -8,6 +8,6 @@ crate-type = ["cdylib"]
 
 [dependencies]
 tokio = { version = "1", features = ["rt"] }
-symphony = { path = "../symphony" }  # or from git, crates.io, etc.
 wit-bindgen.workspace = true
 anyhow = "1.0.95"
+symphony= { path = "../symphony" }
