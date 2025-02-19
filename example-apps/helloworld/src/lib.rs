@@ -12,7 +12,7 @@ impl Run for HelloWorld {
             version = version
         );
 
-        symphony::system::send_to_origin("Hello world!");
+        symphony::system::send_to_origin("Hello world!!");
         symphony::system::send_to_origin("Have a great day!");
 
         Ok(())
