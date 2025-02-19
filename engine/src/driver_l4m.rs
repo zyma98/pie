@@ -232,9 +232,7 @@ where
         mut rx: tokio::sync::mpsc::Receiver<l4m::Response>,
         dispatcher: Arc<Mutex<EventDispatcher>>,
     ) {
-        loop {
-            let resp = rx.recv().await.unwrap();
-
+        while let Some(resp) = rx.recv().await {
             let correlation_id = resp.correlation_id;
             let payload = resp.payload.unwrap();
 
@@ -1247,7 +1245,7 @@ impl backend::ExecuteCommand<l4m::Request, l4m::Response> for DummyBackend {
         Ok(())
     }
 
-    fn report_to(&self, tx: mpsc::Sender<l4m::Response>) {
-        self.evt_tx.blocking_lock().replace(tx);
+    async fn report_to(&self, tx: mpsc::Sender<l4m::Response>) {
+        self.evt_tx.lock().await.replace(tx);
     }
 }
