@@ -45,15 +45,19 @@ async fn main() -> anyhow::Result<()> {
     // 4) Create our “runtime” state.
     //    (This holds everything the controller and server might share: engine,
     //     references to compiled programs, running instances, etc.)
-    let runtime_state = Arc::new(Runtime::new(engine, inst2server_tx));
+    let runtime = Arc::new(Runtime::new(engine, inst2server_tx));
 
     // 5) Scan the existing cache_dir and load (or just record) programs on disk
-    runtime_state.load_existing_programs(Path::new(PROGRAM_CACHE_DIR))?;
+    runtime.load_existing_programs(Path::new(PROGRAM_CACHE_DIR))?;
 
     // 6) Spawn the controller loop (which manages commands coming from instances)
+    let backend = DummyBackend::new(Duration::ZERO).await;
+    // let backend = ZmqBackend::bind("tcp://127.0.0.1:5555")
+    //     .await
+    //     .context("Failed to bind backend")
+    //     .unwrap();
 
-    let dummy_backend = DummyBackend::new(Duration::ZERO).await;
-    let mut controller = Controller::new(runtime_state.clone(), dummy_backend).await;
+    let mut controller = Controller::new(runtime.clone(), backend).await;
 
     let controller_handle = tokio::spawn(async move {
         while let Some((inst_id, cmd)) = inst2server_rx.recv().await {
@@ -66,7 +70,7 @@ async fn main() -> anyhow::Result<()> {
     // 7) Create the WebSocket server state.
     //    This example keeps *file uploads* & client connections in WebSocketState,
     //    but references the same Arc<RuntimeState> for controlling programs.
-    let ws_state = Arc::new(ServerState::new(runtime_state.clone()));
+    let ws_state = Arc::new(ServerState::new(runtime.clone()));
 
     // 8) Start listening for WebSocket connections
     let listen_addr = "127.0.0.1:9000";
