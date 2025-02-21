@@ -1,6 +1,12 @@
+from __future__ import annotations
+
+import numpy as np
 import torch
 import triton
 import triton.language as tl
+from torch import nn
+
+from driver import ceil_div
 
 
 @triton.jit
@@ -645,6 +651,117 @@ def create_rope_cache(max_seq_len: int, block_dim: int, dtype: torch.dtype, devi
     return torch.cat((cos, sin), dim=-1).to(dtype)
 
 
+### #-------------------------------------------------# ###
+
+
+class TaskBatch:
+    tasks: list[Task]
+    token_ids: torch.Tensor  # (len(tasks), BLOCK_SIZE)
+    position_offsets: torch.Tensor  # (len(tasks), 1)
+    kv_drain_addr_lut: torch.Tensor  # (len(tasks), 1)
+    kv_lut: torch.Tensor  # (N, BLOCKS_PER_BATCH)
+    mask_lut: torch.Tensor  # (N, BLOCKS_PER_BATCH)
+    q_lut: torch.Tensor  # (N, 1)
+    reduce_grp_lut: torch.Tensor  # (len(tasks), N)
+
+    block_size: int
+    blocks_per_batch_item: int
+
+    def __init__(self, tasks: list[Task], block_size: int, blocks_per_batch_item: int):
+
+        self.tasks = tasks
+        self.block_size = block_size
+        self.blocks_per_batch_item = blocks_per_batch_item
+
+        if len(tasks) > 0:
+            self.construct_batch()
+
+    def num_tasks(self):
+        return len(self.tasks)
+
+    def batch_size(self):
+        return self.kv_lut.shape[0]
+
+    def num_blocks_per_batch(self):
+        return self.kv_lut.shape[1]
+
+    def max_grp_size(self):
+        return self.reduce_grp_lut.shape[1]
+
+    def to(self, device: torch.device):
+        self.token_ids = self.token_ids.to(device)
+        self.position_offsets = self.position_offsets.to(device)
+        self.kv_drain_addr_lut = self.kv_drain_addr_lut.to(device)
+        self.kv_lut = self.kv_lut.to(device)
+        self.mask_lut = self.mask_lut.to(device)
+        self.q_lut = self.q_lut.to(device)
+        self.reduce_grp_lut = self.reduce_grp_lut.to(device)
+
+        return self
+
+    def construct_batch(self):
+
+        token_ids = np.zeros((len(self.tasks), self.block_size), dtype=np.int32)
+        position_offsets = np.zeros((len(self.tasks, )), dtype=np.int32)
+        kv_drain_addr_lut = np.zeros((len(self.tasks, )), dtype=np.int32)
+
+        sub_batch_list = [ceil_div(len(task.kv_addrs), self.blocks_per_batch_item) for task in self.tasks]
+
+        batch_size = sum(sub_batch_list)
+        max_grp_size = max(sub_batch_list)
+
+        kv_addr_lut = np.zeros((batch_size, self.blocks_per_batch_item), dtype=np.int32)
+        q_addr_lut = np.zeros((batch_size, 1), dtype=np.int32)
+        mask_lut = np.zeros((batch_size, self.blocks_per_batch_item), dtype=np.int32)
+        reduce_grp_lut = np.zeros((len(self.tasks), max_grp_size), dtype=np.int32)
+
+        offset = 0
+
+        for i, task in enumerate(self.tasks):
+
+            token_ids[i, :len(task.token_ids)] = task.token_ids
+            position_offsets[i] = task.pos_offset
+            kv_drain_addr_lut[i] = task.kv_new_addr
+
+            sub_size = ceil_div(len(task.kv_addrs), self.blocks_per_batch_item)
+            for j in range(sub_size):
+                sub_kv = task.kv_addrs[j * self.blocks_per_batch_item: (j + 1) * self.blocks_per_batch_item]
+                sub_mask = task.mask[j * self.blocks_per_batch_item: (j + 1) * self.blocks_per_batch_item]
+                kv_addr_lut[offset + j, :len(sub_kv)] = sub_kv
+                mask_lut[offset + j, :len(sub_mask)] = sub_mask
+
+                assert len(sub_kv) == len(sub_mask)
+
+            q_addr_lut[offset: offset + sub_size] = i
+            reduce_grp_lut[i, :sub_size] = list(range(offset, offset + sub_size))
+            offset += sub_size
+
+        self.token_ids = torch.tensor(token_ids, dtype=torch.int32)
+        self.position_offsets = torch.tensor(position_offsets, dtype=torch.int32)
+        self.kv_drain_addr_lut = torch.tensor(kv_drain_addr_lut, dtype=torch.int32)
+        self.kv_lut = torch.tensor(kv_addr_lut, dtype=torch.int32)
+        self.mask_lut = torch.tensor(mask_lut, dtype=torch.int32)
+        self.q_lut = torch.tensor(q_addr_lut, dtype=torch.int32)
+        self.reduce_grp_lut = torch.tensor(reduce_grp_lut, dtype=torch.int32)
+
+
+class Task:
+    token_ids: list[int]
+    pos_offset: int
+
+    new_block_id: int
+    block_ids: list[int]
+
+    kv_new_addr: int
+    kv_addrs: list[int]
+    mask: list[int]
+
+    def __init__(self, token_ids: list[int], pos_offset: int, new_block_id: int, block_ids: list[int], mask: list[int]):
+        self.token_ids = token_ids
+        self.pos_offset = pos_offset
+        self.new_block_id = new_block_id
+        self.block_ids = block_ids
+        self.mask = mask
 
 
 @torch.inference_mode()

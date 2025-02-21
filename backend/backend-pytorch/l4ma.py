@@ -7,7 +7,7 @@ import torch
 from torch import nn
 
 import ops
-from engine import Batch
+from driver import Batch
 
 
 class Config:
@@ -89,7 +89,7 @@ class L4maAttention(nn.Module):
 
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
-        ops.copy_kv_block(batch.block_storage_ptr, key_states, value_states, batch.ctx_block_ptrs)
+        ops.copy_kv_block(batch.block_storage_ptr, key_states, value_states, batch.tgt_block_ptrs)
 
         attn_output = ops.qkv_attention(
             query_states,
@@ -99,9 +99,9 @@ class L4maAttention(nn.Module):
             max_grp_size=batch.max_chunk_count(),
             num_blocks_per_batch=batch.chunk_size(),
             q_lut=batch.q_lut,
-            kv_lut=batch.kv_lut,
-            mask_lut=batch.mask_lut,
-            reduce_grp_lut=batch.reduce_grp_lut,
+            kv_lut=batch.ctx_block_ptrs,
+            mask_lut=batch.mask,
+            reduce_grp_lut=batch.cmd_groups,
         )
 
         attn_output = attn_output.transpose(1, 2).contiguous()
