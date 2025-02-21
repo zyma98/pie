@@ -643,3 +643,242 @@ def create_rope_cache(max_seq_len: int, block_dim: int, dtype: torch.dtype, devi
     cos, sin = torch.cos(idx_theta), torch.sin(idx_theta)
 
     return torch.cat((cos, sin), dim=-1).to(dtype)
+
+
+
+
+@torch.inference_mode()
+def test_qkv_attention():
+    device = torch.device('cuda')
+
+    #### CREATE A DUMMY MODEL ####
+
+    # create a dummy model
+    hidden_size = 128
+    num_heads = 8
+    head_dim = hidden_size // num_heads
+    num_key_value_heads = 4
+
+    # create a rope cache
+    rope_cache = create_rope_cache(8192, head_dim, torch.float32, device)
+
+    q_proj = nn.Linear(hidden_size, num_heads * head_dim, bias=False, device=device)
+    k_proj = nn.Linear(hidden_size, num_key_value_heads * head_dim, bias=False, device=device)
+    v_proj = nn.Linear(hidden_size, num_key_value_heads * head_dim, bias=False, device=device)
+
+    ###############################
+
+    #### CREATE A DUMMY KV CACHE ####
+    num_blocks = 128
+    block_size = 32
+
+    # create a dummy kv cache
+    kv_cache_table = torch.randn(num_blocks, num_key_value_heads, block_size * 2, head_dim, device=device)
+
+    ###############################
+
+    #### CREATE A DUMMY TASK BATCH ####
+
+    task1 = Task(
+        token_ids=[1, 2, 3, 4],
+        pos_offset=0,
+        new_block_id=3,
+        block_ids=[0, 1, 2, 3],
+        mask=[1, 1, 1, 2]
+    )
+    task1.kv_addrs = [0, 1, 2, 3]
+    task1.kv_new_addr = 3
+
+    task2 = Task(
+        token_ids=[1, 2, 3, 4],
+        pos_offset=0,
+        new_block_id=7,
+        block_ids=[4, 5, 6, 7],
+        mask=[1, 1, 1, 2]
+    )
+    task2.kv_addrs = [4, 5, 6, 7]
+    task2.kv_new_addr = 7
+
+    batch = TaskBatch([task1, task2, task1, task2, task2], block_size=block_size, blocks_per_batch_item=4)
+    batch.to(device)
+    # upload the model to the GPU
+
+    # simulate the previous state
+    hidden_states = torch.randn(batch.batch_size(), block_size, hidden_size, device=device)
+
+    bsz, q_len, _ = hidden_states.size()
+
+    q = q_proj(hidden_states)
+    k = k_proj(hidden_states)
+    v = v_proj(hidden_states)
+
+    q = q.view(bsz, q_len, num_heads, head_dim).transpose(1, 2)
+    k = k.view(bsz, q_len, num_key_value_heads, head_dim).transpose(1, 2)
+    v = v.view(bsz, q_len, num_key_value_heads, head_dim).transpose(1, 2)
+
+    rope(rope_cache, q, batch.position_offsets)
+    rope(rope_cache, k, batch.position_offsets)
+
+    # attention
+    y1 = qkv_attention_baseline(
+        q,
+        kv_cache_table,
+        batch.batch_size(),
+        batch.num_tasks(),
+        batch.max_grp_size(),
+        batch.num_blocks_per_batch(),
+        batch.q_lut,
+        batch.kv_lut,
+        batch.mask_lut,
+        batch.reduce_grp_lut
+    )
+
+    y2 = qkv_attention(
+        q,
+        kv_cache_table,
+        batch.batch_size(),
+        batch.num_tasks(),
+        batch.max_grp_size(),
+        batch.num_blocks_per_batch(),
+        batch.q_lut,
+        batch.kv_lut,
+        batch.mask_lut,
+        batch.reduce_grp_lut
+    )
+
+    print('y1, y2', torch.abs(y1 - y2).sum())
+
+    print('done')
+
+    ...
+
+
+@torch.inference_mode()
+def test_sliced_attention():
+    device = torch.device('cuda')
+
+    #### CREATE A DUMMY MODEL ####
+
+    # create a dummy model
+    hidden_size = 128
+    num_heads = 4
+    head_dim = hidden_size // num_heads
+    num_key_value_heads = 1
+
+    # create a rope cache
+    rope_cache = create_rope_cache(8192, head_dim, torch.float32, device)
+
+    q_proj = nn.Linear(hidden_size, num_heads * head_dim, bias=False, device=device)
+    k_proj = nn.Linear(hidden_size, num_key_value_heads * head_dim, bias=False, device=device)
+    v_proj = nn.Linear(hidden_size, num_key_value_heads * head_dim, bias=False, device=device)
+
+    ###############################
+
+    #### CREATE A DUMMY KV CACHE ####
+    num_blocks = 128
+    block_size = 32
+
+    # create a dummy kv cache
+    kv_cache_table = torch.randn(num_blocks, num_key_value_heads, block_size * 2, head_dim, device=device)
+    kv_cache_table_cpy = kv_cache_table.clone()
+
+    ###############################
+
+    #### CREATE A DUMMY TASK BATCH ####
+
+    task1 = Task(
+        token_ids=[1, 2, 3, 4],
+        pos_offset=0,
+        new_block_id=1,
+        block_ids=[0, 1],
+        mask=[1, 2]
+    )
+    task1.kv_addrs = [0, 1]
+    task1.kv_new_addr = 1
+
+    # no slicing
+    batch1 = TaskBatch([task1], block_size=block_size, blocks_per_batch_item=2)
+    batch1 = batch1.to(device)
+
+    # with slicing
+    batch2 = TaskBatch([task1], block_size=block_size, blocks_per_batch_item=1)
+    batch2 = batch2.to(device)
+    # upload the model to the GPU
+
+    assert batch1.num_tasks() == batch2.num_tasks()
+
+    # simulate the previous state
+    hidden_states = torch.randn(batch1.num_tasks(), block_size, hidden_size, device=device)
+
+    bsz, q_len, _ = hidden_states.size()
+
+    q = q_proj(hidden_states)
+    k = k_proj(hidden_states)
+    v = v_proj(hidden_states)
+
+    q = q.view(bsz, q_len, num_heads, head_dim).transpose(1, 2)
+    k = k.view(bsz, q_len, num_key_value_heads, head_dim).transpose(1, 2)
+    v = v.view(bsz, q_len, num_key_value_heads, head_dim).transpose(1, 2)
+
+    rope(rope_cache, q, batch1.position_offsets)
+    rope(rope_cache, k, batch1.position_offsets)
+
+    assert torch.allclose(batch1.position_offsets, batch2.position_offsets)
+
+    y1 = qkv_attention(
+        q,
+        kv_cache_table,
+        batch1.batch_size(),
+        batch1.num_tasks(),
+        batch1.max_grp_size(),
+        batch1.num_blocks_per_batch(),
+        batch1.q_lut,
+        batch1.kv_lut,
+        batch1.mask_lut,
+        batch1.reduce_grp_lut
+    )
+
+    y2 = qkv_attention(
+        q,
+        kv_cache_table,
+        batch2.batch_size(),
+        batch2.num_tasks(),
+        batch2.max_grp_size(),
+        batch2.num_blocks_per_batch(),
+        batch2.q_lut,
+        batch2.kv_lut,
+        batch2.mask_lut,
+        batch2.reduce_grp_lut
+    )
+
+    print('y1, y2', torch.abs(y1 - y2).sum())
+    print('done')
+
+
+def test_rope():
+    head_dim = 64
+    batch_size = 100
+    device = 'cuda'
+
+    k = torch.randn((batch_size, 32, 8, head_dim), device=device)
+    position_offsets = torch.tensor(list(range(batch_size)), dtype=torch.int32, device=device)
+    rope_cache = create_rope_cache(8192, head_dim, torch.float32, device)
+
+    k_pos1 = rope_baseline(rope_cache, k, position_offsets)
+    k_pos2 = rope_baseline_no_cache(k, position_offsets)
+
+    k_pos_triton = rope(rope_cache, k, position_offsets)
+
+    # print the difference
+    print('kpos1, kpos2', torch.abs(k_pos1 - k_pos2).sum())
+    assert torch.allclose(k_pos2, k_pos1, atol=1e-3)
+
+    print('kpos1, kpostriton', torch.abs(k_pos1 - k_pos_triton).sum())
+    assert torch.allclose(k_pos1, k_pos_triton, atol=1e-3)
+    # assert torch.allclose(v_pos1, v)
+
+
+if __name__ == '__main__':
+    test_sliced_attention()
+    # test_rope()
+    # test_qkv_attention()
