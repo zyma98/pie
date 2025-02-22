@@ -11,9 +11,6 @@ from llama import LlamaForCausalLM
 BLOCK_SIZE = 64
 
 
-def ceil_div(a, b):
-    return -(-a // b)
-
 
 class ObjectKind(Enum):
     BLOCK = "Block"
