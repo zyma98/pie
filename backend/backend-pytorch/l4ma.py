@@ -93,14 +93,14 @@ class L4maAttention(nn.Module):
         attn_output = ops.qkv_attention(
             query_states,
             batch.block_storage_ptr,
-            batch_size=batch.input_embeds.shape[0],
-            num_grps=batch.num_requests,
+            num_rows=batch.input_embeds.shape[0],
+            num_reqs=batch.num_requests,
             max_grp_size=batch.max_chunk_count(),
-            num_blocks_per_batch=batch.chunk_size(),
+            num_blocks_per_row=batch.chunk_size(),
             q_lut=batch.q_lut,
             kv_lut=batch.ctx_block_ptrs,
-            mask_lut=batch.mask,
-            reduce_grp_lut=batch.cmd_groups,
+            mask=batch.mask,
+            reduce_grp=batch.cmd_groups,
         )
 
         attn_output = attn_output.transpose(1, 2).contiguous()

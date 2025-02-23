@@ -5,6 +5,7 @@ from typing import Union
 import numpy as np
 import torch
 
+from common import ceil_div
 from l4ma import AttentionStorage, VectorStorage
 from llama import LlamaForCausalLM
 
