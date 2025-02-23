@@ -104,15 +104,15 @@ def flip_kernel(x_ptr,  # (I, H, S, D)
 
 
 @triton.jit
-def copy_kv_block_kernel(dst_kv_ptr,  # destination block table float(I1, H, 2S, D)
-                         src_k_ptr,  # source block table float(I2, H, S, D)
-                         src_v_ptr,  # source block table float(I2, H, S, D)
-                         dst_lut,  # int(I2,)
-                         stride_dst_i, stride_dst_h, stride_dst_2s, stride_dst_d,  # strides for destination block table
-                         stride_src_i, stride_src_h, stride_src_s, stride_src_d,  # strides for source block table
-                         BLOCK_SIZE: tl.constexpr,
-                         BLOCK_DIM: tl.constexpr
-                         ):
+def fill_kv_block_storage_kernel(dst_kv_ptr,  # destination block table float(I1, H, 2S, D)
+                                 src_k_ptr,  # source block table float(I2, H, S, D)
+                                 src_v_ptr,  # source block table float(I2, H, S, D)
+                                 dst_lut,  # int(I2,)
+                                 stride_dst_i, stride_dst_h, stride_dst_2s, stride_dst_d,  # strides for destination block table
+                                 stride_src_i, stride_src_h, stride_src_s, stride_src_d,  # strides for source block table
+                                 BLOCK_SIZE: tl.constexpr,
+                                 BLOCK_DIM: tl.constexpr
+                                 ):
     batch_idx = tl.program_id(0)
     head_idx = tl.program_id(1)
     src_idx = batch_idx
@@ -359,7 +359,7 @@ def fill_kv_block_storage(
 
     grid = (dst_lut.shape[0], num_head)
 
-    copy_kv_block_kernel[grid](
+    fill_kv_block_storage_kernel[grid](
         dst_kv,
         src_k,
         src_v,
@@ -370,7 +370,7 @@ def fill_kv_block_storage(
     )
 
 
-def copy_kv_block_baseline(
+def fill_kv_block_storage_baseline(
         dst_kv: torch.Tensor,
         src_k: torch.Tensor,
         src_v: torch.Tensor,
@@ -522,7 +522,9 @@ def qkv_attention_kernel(
         attn = tl.zeros([BLOCK_SIZE, BLOCK_SIZE], dtype=tl.float32)
         attn += tl.dot(q_block, k_block, allow_tf32=True)
 
-        attn += tl.where(mask, 0.0, -1000000.0)
+        # Looks like Triton uses int8 for torch bool types. I added cast to satisfy triton compiler.
+        # Check if this cast is causing any performance issues.
+        attn += tl.where(mask.cast(tl.int1), 0.0, -1000000.0)
 
         attn_max = tl.maximum(attn_max_reduced, tl.max(attn, axis=1))
         alpha = tl.math.exp2(attn_max_reduced - attn_max)
@@ -563,8 +565,8 @@ def qkv_attention(
     max_grp_size = reduce_grp.shape[1]
     num_blocks_per_row = kv_lut.shape[1]
 
-    print(q.shape)
-    print(kv.shape)
+    #print(q.shape)
+    #print(kv.shape)
 
     # print(mask)
 
@@ -742,7 +744,7 @@ def test_qkv_attention():
     #### CREATE A DUMMY MODEL ####
 
     # create a dummy model
-    num_heads = 8
+    num_heads = 9
     head_dim = 32
     hidden_size = head_dim * num_heads
     num_key_value_heads = num_heads // 1
@@ -766,13 +768,13 @@ def test_qkv_attention():
     ###############################
 
     #### CREATE A DUMMY TASK BATCH ####
-    CHUNK_SIZE = 4
+    CHUNK_SIZE = 3
     NUM_REQS = 5
     tasks = []
 
     for _ in range(NUM_REQS):
         # pick random number between 1 and 10
-        num_blocks = random.randint(1, 3)
+        num_blocks = 10 #random.randint(1, 8)
 
         # select `num_total_blocks` amount of random block ids (does not need to be unique)
         ctx_ids = random.choices(range(NUM_TOTAL_BLOCKS), k=num_blocks)
