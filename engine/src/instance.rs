@@ -1,6 +1,6 @@
 use std::sync::Arc;
-use wasmtime::component::{bindgen, ResourceTable};
 use wasmtime::Result;
+use wasmtime::component::{ResourceTable, bindgen};
 use wasmtime_wasi::{IoView, WasiCtx, WasiCtxBuilder, WasiView};
 
 use crate::tokenizer::BytePairEncoder;
@@ -48,6 +48,7 @@ pub struct InstanceUtils {
 }
 
 // implements send
+#[derive(Debug)]
 pub enum Command {
     // Init -------------------------------------
     CreateInstance,
@@ -198,6 +199,9 @@ impl InstanceState {
         let mut builder = WasiCtx::builder();
         builder.inherit_stderr().inherit_network().inherit_stdout();
 
+        // send construct cmd
+        cmd_buffer.send((id, Command::CreateInstance));
+
         InstanceState {
             id,
             wasi_ctx: builder.build(),
@@ -208,6 +212,12 @@ impl InstanceState {
             allocator: driver_l4m::IdPool::new(1000, 1000),
             utils,
         }
+    }
+}
+
+impl Drop for InstanceState {
+    fn drop(&mut self) {
+        self.cmd_buffer.send((self.id, Command::DestroyInstance));
     }
 }
 
@@ -265,8 +275,6 @@ impl spi::app::system::Host for InstanceState {
 }
 
 impl spi::lm::inference::Host for InstanceState {
-
-
     async fn get_block_size(&mut self) -> Result<u32, wasmtime::Error> {
         Ok(self.utils.block_size)
     }

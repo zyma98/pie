@@ -1,5 +1,5 @@
 use std::time::Instant;
-use symphony::Run;
+use symphony::RunSync;
 
 struct SimpleDecoding;
 
@@ -20,8 +20,8 @@ fn llama3_format(prompt: &str, hint: Option<&str>, system: Option<&str>) -> Stri
 const MAIN: u32 = 0;
 const MAX_NUM_OUTPUTS: usize = 1024;
 
-impl Run for SimpleDecoding {
-    async fn run() -> Result<(), String> {
+impl RunSync for SimpleDecoding {
+    fn run() -> Result<(), String> {
         let start = Instant::now();
 
         let prompt = llama3_format("Explain the LLM decoding process ELI5.", None, None);
@@ -119,9 +119,9 @@ impl Run for SimpleDecoding {
             );
 
             // Right now, this is a blocking operation. We will soon provide an async version.
-            let sampled = symphony::inference::sample_top_k(MAIN, &next_dist, 1);
+            //let sampled = symphony::inference::sample_top_k(MAIN, &next_dist, 1);
 
-            let next_token = sampled[0][0];
+            let next_token = 3; //sampled[0][0];
 
             println!("Next token: {:?}", next_token);
 
@@ -134,17 +134,17 @@ impl Run for SimpleDecoding {
 
             symphony::inference::embed_text(
                 MAIN,
-                &input_block_embeds[valid_len..valid_len + 1],
+                &input_block_embeds[valid_len - 1..valid_len],
                 &[next_token],
                 &[(working_block_idx * block_size + valid_len) as u32],
             );
 
             valid_len += 1;
 
-            if valid_len == block_size {
+            if valid_len == block_size + 1 {
                 // move to the next block
                 working_block_idx += 1;
-                valid_len = 0;
+                valid_len = 1;
                 context_blocks.push(symphony::inference::allocate_blocks(MAIN, 1)[0]);
             }
         }
@@ -161,4 +161,4 @@ impl Run for SimpleDecoding {
     }
 }
 
-symphony::main!(SimpleDecoding);
+symphony::main_sync!(SimpleDecoding);
