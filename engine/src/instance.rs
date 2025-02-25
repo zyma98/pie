@@ -546,6 +546,8 @@ impl spi::lm::inference::Host for InstanceState {
         k: u32,
     ) -> Result<Vec<Vec<u32>>, wasmtime::Error> {
         // create a vector of oneshot channels
+        let start = std::time::Instant::now();
+
         let mut receivers = Vec::with_capacity(embs.len());
         for i in 0..embs.len() {
             let (tx, rx) = oneshot::channel();
@@ -569,6 +571,9 @@ impl spi::lm::inference::Host for InstanceState {
                 .or(Err(wasmtime::Error::msg("SampleTopK failed")))?;
             results.push(result);
         }
+
+        let duration = start.elapsed();
+        println!("SampleTopK took: {:?}", duration);
 
         Ok(results)
     }
@@ -604,8 +609,13 @@ impl spi::lm::inference::Host for InstanceState {
     }
 
     async fn detokenize(&mut self, tokens: Vec<u32>) -> Result<String, wasmtime::Error> {
+        
+        println!("Detokenizing: {:?}", tokens);
+        
         let text = self.utils.tokenizer.decode(tokens.as_slice())?;
 
+        println!("Detokenized: {:?}", text);
+        
         Ok(text)
     }
 }
