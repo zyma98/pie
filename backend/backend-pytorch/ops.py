@@ -785,7 +785,7 @@ def test_qkv_attention():
         # create a random mask (num_total_blocks * block_size, block_size) using numpy
         mask = np.random.choice([0, 1], size=(BLOCK_SIZE, num_blocks * BLOCK_SIZE), p=[0.1, 0.9])
 
-        # ensure the first block is always True
+        # ensure the first block is always True (This is to ensure that the softmax is not NaN)
         mask[:, 0] = 1
 
         # create a full true mask
