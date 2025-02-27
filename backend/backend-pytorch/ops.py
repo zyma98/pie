@@ -65,41 +65,6 @@ def rope_kernel(
 
 
 @triton.jit
-def flip_kernel(x_ptr,  # (I, H, S, D)
-                k_stride_i, k_stride_h, k_stride_s, k_stride_d,
-                BLOCK_SIZE: tl.constexpr,
-                BLOCK_DIM: tl.constexpr,
-                ):
-    batch_idx = tl.program_id(0)
-    head_idx = tl.program_id(1)
-
-    # load halves
-    x_half_block_ptr = tl.make_block_ptr(
-        base=x_ptr + batch_idx * k_stride_i + head_idx * k_stride_h,
-        shape=(BLOCK_SIZE, BLOCK_DIM),
-        strides=(k_stride_s, k_stride_d),
-        offsets=(0, 0),
-        block_shape=(BLOCK_SIZE, BLOCK_DIM // 2),
-        order=(0, 1)
-    )
-
-    y_half_block_ptr = tl.make_block_ptr(
-        base=x_ptr + batch_idx * k_stride_i + head_idx * k_stride_h,
-        shape=(BLOCK_SIZE, BLOCK_DIM),
-        strides=(k_stride_s, k_stride_d),
-        offsets=(0, 0),
-        block_shape=(BLOCK_SIZE, BLOCK_DIM // 2),
-        order=(0, 1)
-    )
-
-    x_block_a = tl.load(x_half_block_ptr)
-    x_block_b = tl.load(tl.advance(x_half_block_ptr, (0, BLOCK_DIM // 2)))
-
-    tl.store(y_half_block_ptr, x_block_b)
-    tl.store(tl.advance(y_half_block_ptr, (0, (BLOCK_DIM // 2))), x_block_a)
-
-
-@triton.jit
 def fill_kv_block_storage_kernel(dst_kv_ptr,  # destination block table float(I1, H, 2S, D)
                                  src_k_ptr,  # source block table float(I2, H, S, D)
                                  src_v_ptr,  # source block table float(I2, H, S, D)
@@ -227,28 +192,6 @@ def reduce_y_slices_kernel(
     )
 
     tl.store(y_reduced_block_ptr, y_reduced.to(y_ptr.dtype.element_ty))
-
-
-def flip(x: torch.Tensor):
-    batch_size, num_head, block_size, block_dim = x.shape
-
-    grid = (batch_size, num_head)
-
-    flip_kernel[grid](
-        x,
-        x.stride(0), x.stride(1), x.stride(2), x.stride(3),
-        block_size, block_dim
-    )
-
-    return x
-
-
-def flip_baseline(x: torch.Tensor):
-    _, num_head, block_size, block_dim = x.shape
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2:]
-    x = torch.cat((x2, x1), dim=-1)
-    return x
 
 
 def rope(
