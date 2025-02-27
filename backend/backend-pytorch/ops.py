@@ -418,7 +418,7 @@ def qkv_attention_kernel(
         # The hidden dimension of the model (head_dim)
         HEAD_DIM: tl.constexpr,
         # Number of blocks contained by a chunk
-        NUM_BLOCK_PER_CHUNK: tl.constexpr,
+        NUM_BLK_PER_CHUNK: tl.constexpr,
         # Needed for Grouped-Query Attention (https://arxiv.org/pdf/2305.13245)
         # If NUM_HEAD_GROUPS is 1, then this is a standard multi-head attention.
         NUM_HEAD_GROUPS: tl.constexpr = 1  # 1 means no GQA.
@@ -440,7 +440,7 @@ def qkv_attention_kernel(
 
     mask_block_ptr = tl.make_block_ptr(
         base=mask_ptr + glb_chunk_idx * stride_mask_i,
-        shape=(NUM_TOK_PER_BLK, NUM_TOK_PER_BLK), # TODO: Check this
+        shape=(NUM_TOK_PER_BLK, NUM_TOK_PER_BLK * NUM_BLK_PER_CHUNK),
         strides=(stride_mask_j, stride_mask_k),
         offsets=(0, 0),
         block_shape=(NUM_TOK_PER_BLK, NUM_TOK_PER_BLK),
@@ -468,8 +468,8 @@ def qkv_attention_kernel(
     attn_sum_reduced = tl.zeros([NUM_TOK_PER_BLK], dtype=tl.float32)
     y_block = tl.zeros([NUM_TOK_PER_BLK, HEAD_DIM], dtype=tl.float32)
 
-    for block_idx in range(NUM_BLOCK_PER_CHUNK):
-        kv_idx = tl.load(kv_idxs_ptr + glb_chunk_idx * NUM_BLOCK_PER_CHUNK + block_idx)
+    for block_idx in range(NUM_BLK_PER_CHUNK):
+        kv_idx = tl.load(kv_idxs_ptr + glb_chunk_idx * NUM_BLK_PER_CHUNK + block_idx)
 
         k_block_ptr = tl.make_block_ptr(
             base=kv_table_ptr + kv_idx * stride_kv_i + head_kv_idx * stride_kv_h,
