@@ -1,14 +1,4 @@
 use std::{mem, slice};
-use thiserror::Error;
-
-#[derive(Debug, Error)]
-enum ContextError {
-    #[error("An IO error occurred: {0}")]
-    Io(#[from] std::io::Error),
-
-    #[error("Invalid input: {0}")]
-    InvalidInput(String),
-}
 
 pub mod bindings {
 
@@ -121,7 +111,9 @@ impl Context {
         l4m::deallocate_embeds(self.stream, &embed_ids);
     }
 
-    pub fn generate(&mut self, until: u32, max_output: usize) -> String {
+    pub fn generate_until(&mut self, until: &str, max_output_tokens: usize) -> String {
+        let until_token_ids = l4m::tokenize(until);
+
         let block_size = l4m::get_block_size() as usize;
         // the seed must not be empty
         assert!(!self.leftover_token_ids.is_empty());
@@ -151,9 +143,9 @@ impl Context {
             &working_position_ids,
         );
 
-        let mut generated_tokens = Vec::new();
+        let mut generated_token_ids = Vec::new();
 
-        for _ in 0..max_output {
+        for _ in 0..max_output_tokens {
             l4m::fill_block(
                 self.stream,
                 working_block_id,
@@ -175,7 +167,7 @@ impl Context {
             let next_token_id = top_next_token_ids[0];
             let next_position_id = working_position_ids.last().unwrap() + 1;
 
-            generated_tokens.push(next_token_id);
+            generated_token_ids.push(next_token_id);
 
             // if this was the last block,
             if working_token_ids.len() == block_size {
@@ -194,8 +186,14 @@ impl Context {
             working_token_ids.push(next_token_id);
             working_position_ids.push(next_position_id);
 
-            if next_token_id == until {
-                break;
+            // check if
+
+            if generated_token_ids.len() >= until_token_ids.len() {
+                if generated_token_ids[generated_token_ids.len() - until_token_ids.len()..]
+                    == until_token_ids
+                {
+                    break;
+                }
             }
 
             // embed the next token
@@ -220,7 +218,7 @@ impl Context {
         self.leftover_token_ids.append(&mut working_token_ids);
 
         // decode the generated tokens
-        let result = l4m::detokenize(&generated_tokens);
+        let result = l4m::detokenize(&generated_token_ids);
 
         result
     }
