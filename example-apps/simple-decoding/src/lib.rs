@@ -9,10 +9,9 @@ impl RunSync for SimpleDecoding {
     fn run() -> Result<(), String> {
         let start = Instant::now();
 
-        const DEFAULT_STREAM: u32 = 0;
         let max_num_outputs = 128;
 
-        let mut ctx = symphony::Context::new(DEFAULT_STREAM);
+        let mut ctx = symphony::Context::new();
         ctx.fill("<|begin_of_text|>");
         ctx.fill("<|start_header_id|>system<|end_header_id|>\n\nYou are a helpful, respectful and honest assistant.<|eot_id|>");
         ctx.fill("<|start_header_id|>user<|end_header_id|>\n\nExplain the LLM decoding process ELI5.<|eot_id|>");
