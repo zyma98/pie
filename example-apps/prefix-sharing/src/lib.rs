@@ -24,14 +24,16 @@ impl RunSync for PrefixSharing {
         ctx_sub2.fill("<|start_header_id|>user<|end_header_id|>\n\nExplain the Espresso making process ELI5.<|eot_id|>");
         ctx_sub2.fill("<|start_header_id|>assistant<|end_header_id|>\n\n");
 
-        let output_text1 = ctx_sub1.generate_until("<|eot_id|>", max_num_outputs);
-        let output_text2 = ctx_sub2.generate_until("<|eot_id|>", max_num_outputs);
+        let output_text1 = ctx_sub1.generate("<|eot_id|>", max_num_outputs);
 
         println!(
             "Output: {:?} (elapsed: {:?})",
             output_text1,
             start.elapsed()
         );
+
+        let output_text2 = ctx_sub2.generate("<|eot_id|>", max_num_outputs);
+
         println!(
             "Output: {:?} (elapsed: {:?})",
             output_text2,

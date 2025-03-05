@@ -1,4 +1,7 @@
-use crate::l4m;
+use crate::logits_processor::LogitsProcessor;
+use crate::sampler::Sampler;
+use crate::stop_condition::StopCondition;
+use crate::{l4m, logits_processor, sampler, stop_condition};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::{mem, slice};
 
@@ -7,6 +10,7 @@ static GLOBAL_COUNTER: AtomicU32 = AtomicU32::new(0);
 fn increment_counter() -> u32 {
     GLOBAL_COUNTER.fetch_add(1, Ordering::SeqCst)
 }
+
 pub struct Context<'a> {
     parent: Option<&'a Context<'a>>,
     stream: u32,
@@ -127,8 +131,25 @@ impl<'a> Context<'a> {
         l4m::deallocate_embeds(self.stream, &embed_ids);
     }
 
-    pub fn generate_until(&mut self, until: &str, max_output_tokens: usize) -> String {
-        let until_token_ids = l4m::tokenize(until);
+    pub fn generate_until(&mut self, stop_str: &str, max_tokens: usize) -> String {
+        let mut processor = logits_processor::Pass::new();
+        let mut sampler = sampler::GreedySampler::new();
+
+        let mut stop_condition = stop_condition::any(
+            stop_condition::Until::new(stop_str),
+            stop_condition::MaxTokens::new(max_tokens),
+        );
+
+        self.generate(&mut processor, &mut sampler, &mut stop_condition)
+    }
+
+    pub fn generate<L: LogitsProcessor, S: Sampler, C: StopCondition>(
+        &mut self,
+        processor: &mut L,
+        sampler: &mut S,
+        stop_condition: &mut C,
+    ) -> String {
+        //let until_token_ids = l4m::tokenize(until);
 
         let block_size = l4m::get_block_size() as usize;
         // the seed must not be empty
@@ -162,7 +183,7 @@ impl<'a> Context<'a> {
         let mut generated_token_ids = Vec::new();
         let parent_occupied_block_ids = self.get_parent_occupied_block_ids();
 
-        for _ in 0..max_output_tokens {
+        loop {
             let ctx_block_ids = [
                 parent_occupied_block_ids.as_slice(),
                 self.occupied_block_ids.as_slice(),
@@ -186,8 +207,12 @@ impl<'a> Context<'a> {
 
             let sampled = l4m::sample_top_k(self.stream, slice::from_ref(&next_dist), 1);
 
-            let (top_next_token_ids, _) = &sampled[0];
-            let next_token_id = top_next_token_ids[0];
+            let (next_token_ids, next_token_logits) = &sampled[0];
+
+            let next_token_logits = processor.process(next_token_ids, next_token_logits);
+            let next_token_id = sampler.sample(next_token_ids, &next_token_logits);
+
+            //let next_token_id = next_token_ids[0];
             let next_position_id = working_position_ids.last().unwrap() + 1;
 
             generated_token_ids.push(next_token_id);
@@ -211,13 +236,17 @@ impl<'a> Context<'a> {
 
             // check if
 
-            if generated_token_ids.len() >= until_token_ids.len() {
-                if generated_token_ids[generated_token_ids.len() - until_token_ids.len()..]
-                    == until_token_ids
-                {
-                    break;
-                }
+            if stop_condition.should_stop(&generated_token_ids) {
+                break;
             }
+
+            // if generated_token_ids.len() >= until_token_ids.len() {
+            //     if generated_token_ids[generated_token_ids.len() - until_token_ids.len()..]
+            //         == until_token_ids
+            //     {
+            //         break;
+            //     }
+            // }
 
             // embed the next token
             l4m::embed_text(
