@@ -55,6 +55,16 @@ impl Context {
         self.free_block_ids.extend(new_block_ids);
     }
 
+    pub fn clear(&mut self) {
+        // deallocate all blocks
+        l4m::deallocate_blocks(self.stream, &self.occupied_block_ids);
+        l4m::deallocate_blocks(self.stream, &self.free_block_ids);
+
+        self.occupied_block_ids.clear();
+        self.free_block_ids.clear();
+        self.leftover_token_ids.clear();
+    }
+
     pub fn fill(&mut self, text: &str) {
         let block_size = l4m::get_block_size() as usize;
 
@@ -221,6 +231,12 @@ impl Context {
         let result = l4m::detokenize(&generated_token_ids);
 
         result
+    }
+}
+
+impl Drop for Context {
+    fn drop(&mut self) {
+        self.clear();
     }
 }
 
