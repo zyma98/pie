@@ -11,11 +11,11 @@ fn get_unique_stream() -> u32 {
 }
 
 pub struct Context<'a> {
-    parent: Option<&'a Context<'a>>,
-    stream: u32,
-    occupied_block_ids: Vec<u32>,
-    free_block_ids: Vec<u32>,
-    leftover_token_ids: Vec<u32>,
+    pub parent: Option<&'a Context<'a>>,
+    pub stream: u32,
+    pub occupied_block_ids: Vec<u32>,
+    pub free_block_ids: Vec<u32>,
+    pub leftover_token_ids: Vec<u32>,
 }
 
 impl<'a> Context<'a> {
@@ -235,14 +235,6 @@ impl<'a> Context<'a> {
                 break;
             }
 
-            // if generated_token_ids.len() >= until_token_ids.len() {
-            //     if generated_token_ids[generated_token_ids.len() - until_token_ids.len()..]
-            //         == until_token_ids
-            //     {
-            //         break;
-            //     }
-            // }
-
             // embed the next token
             l4m::embed_text(
                 self.stream,
@@ -280,7 +272,7 @@ impl<'a> Context<'a> {
         }
     }
 
-    fn get_parent_occupied_block_ids(&self) -> Vec<u32> {
+    pub fn get_parent_occupied_block_ids(&self) -> Vec<u32> {
         let mut occupied_block_ids = Vec::new();
         let mut current = self;
         while let Some(parent) = current.parent {
