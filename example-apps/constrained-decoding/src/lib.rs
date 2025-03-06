@@ -37,11 +37,11 @@ string : ESCAPED_STRING
 
 "##;
 
-struct SingleByteTokenizer {
+struct TrieTokenizer {
     tok_trie: TokTrie,
 }
 
-impl SingleByteTokenizer {
+impl TrieTokenizer {
     fn new(
         words: &Vec<Vec<u8>>,
         tok_eos: u32,
@@ -59,7 +59,7 @@ impl SingleByteTokenizer {
             tok_end_of_turn,
         };
         let tok_trie = TokTrie::from(&info, &words);
-        SingleByteTokenizer { tok_trie }
+        TrieTokenizer { tok_trie }
     }
 
     fn to_env(self) -> TokEnv {
@@ -67,7 +67,7 @@ impl SingleByteTokenizer {
     }
 }
 
-impl TokenizerEnv for SingleByteTokenizer {
+impl TokenizerEnv for TrieTokenizer {
     fn tok_trie(&self) -> &TokTrie {
         &self.tok_trie
     }
@@ -115,7 +115,7 @@ impl ConstrainedSampler {
         let unk_token = unk_token.map(|s| symphony::l4m::tokenize(s)[0]);
         let end_of_turn_token = end_of_turn_token.map(|s| symphony::l4m::tokenize(s)[0]);
 
-        let tokenizer = SingleByteTokenizer::new(
+        let tokenizer = TrieTokenizer::new(
             &words,
             eos_token,
             bos_token,
@@ -202,7 +202,9 @@ impl RunSync for ConstrainedDecoding {
         let mut ctx = symphony::Context::new();
         ctx.fill("<|begin_of_text|>");
         ctx.fill("<|start_header_id|>system<|end_header_id|>\n\nYou are a helpful, respectful and honest assistant.<|eot_id|>");
-        ctx.fill("<|start_header_id|>user<|end_header_id|>\n\nExplain the LLM decoding process ELI5.<|eot_id|>");
+        ctx.fill(
+            "<|start_header_id|>user<|end_header_id|>\n\n Generate some random json data<|eot_id|>",
+        );
         ctx.fill("<|start_header_id|>assistant<|end_header_id|>\n\n");
 
         let output_text = ctx.generate(&mut sampler, &mut stop_condition);

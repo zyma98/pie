@@ -202,7 +202,7 @@ impl<'a> Context<'a> {
                 slice::from_ref(&next_dist),
             );
 
-            let sampled = l4m::sample_top_k(self.stream, slice::from_ref(&next_dist), 1);
+            let sampled = l4m::sample_top_k(self.stream, slice::from_ref(&next_dist), 32);
 
             let (next_token_ids, next_token_logits) = &sampled[0];
 
@@ -231,7 +231,6 @@ impl<'a> Context<'a> {
             working_position_ids.push(next_position_id);
 
             // check if
-
             if stop_condition.should_stop(&generated_token_ids) {
                 break;
             }
