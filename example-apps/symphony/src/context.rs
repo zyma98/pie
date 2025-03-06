@@ -1,14 +1,13 @@
-use crate::logits_processor::LogitsProcessor;
 use crate::sampler::Sampler;
 use crate::stop_condition::StopCondition;
-use crate::{l4m, logits_processor, sampler, stop_condition};
+use crate::{l4m, sampler, stop_condition};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::{mem, slice};
 
-static GLOBAL_COUNTER: AtomicU32 = AtomicU32::new(0);
+static STREAM: AtomicU32 = AtomicU32::new(0);
 
-fn increment_counter() -> u32 {
-    GLOBAL_COUNTER.fetch_add(1, Ordering::SeqCst)
+fn get_unique_stream() -> u32 {
+    STREAM.fetch_add(1, Ordering::SeqCst)
 }
 
 pub struct Context<'a> {
@@ -21,7 +20,7 @@ pub struct Context<'a> {
 
 impl<'a> Context<'a> {
     pub fn new() -> Self {
-        let stream = increment_counter();
+        let stream = get_unique_stream();
 
         Self {
             parent: None,
@@ -34,7 +33,7 @@ impl<'a> Context<'a> {
 
     pub fn with_capacity(num_tokens: u32) -> Self {
         // allocate block ids
-        let stream = increment_counter();
+        let stream = get_unique_stream();
 
         let num_needed_blocks = num_tokens.div_ceil(l4m::get_block_size());
         let free_block_ids = l4m::allocate_blocks(stream, num_needed_blocks);
@@ -132,20 +131,18 @@ impl<'a> Context<'a> {
     }
 
     pub fn generate_until(&mut self, stop_str: &str, max_tokens: usize) -> String {
-        let mut processor = logits_processor::Pass::new();
         let mut sampler = sampler::GreedySampler::new();
 
         let mut stop_condition = stop_condition::any(
             stop_condition::Until::new(stop_str),
-            stop_condition::MaxTokens::new(max_tokens),
+            stop_condition::Length::new(max_tokens),
         );
 
-        self.generate(&mut processor, &mut sampler, &mut stop_condition)
+        self.generate(&mut sampler, &mut stop_condition)
     }
 
-    pub fn generate<L: LogitsProcessor, S: Sampler, C: StopCondition>(
+    pub fn generate<S: Sampler, C: StopCondition>(
         &mut self,
-        processor: &mut L,
         sampler: &mut S,
         stop_condition: &mut C,
     ) -> String {
@@ -209,7 +206,6 @@ impl<'a> Context<'a> {
 
             let (next_token_ids, next_token_logits) = &sampled[0];
 
-            let next_token_logits = processor.process(next_token_ids, next_token_logits);
             let next_token_id = sampler.sample(next_token_ids, &next_token_logits);
 
             //let next_token_id = next_token_ids[0];
@@ -278,7 +274,7 @@ impl<'a> Context<'a> {
     pub fn fork(&'a self) -> Self {
         Self {
             parent: Some(&self),
-            stream: increment_counter(),
+            stream: get_unique_stream(),
             occupied_block_ids: Vec::new(),
             free_block_ids: Vec::new(),
             leftover_token_ids: self.leftover_token_ids.clone(),

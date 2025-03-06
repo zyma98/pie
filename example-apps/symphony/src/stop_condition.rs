@@ -1,6 +1,5 @@
 use crate::l4m;
 
-
 pub fn any<SC1, SC2>(sc1: SC1, sc2: SC2) -> impl StopCondition
 where
     SC1: StopCondition + 'static,
@@ -8,7 +7,6 @@ where
 {
     StopConditionList::new(vec![Box::new(sc1), Box::new(sc2)])
 }
-
 
 pub trait StopCondition {
     fn should_stop(&mut self, token_ids: &[u32]) -> bool;
@@ -31,17 +29,17 @@ impl StopCondition for Until {
     }
 }
 
-pub struct MaxTokens {
+pub struct Length {
     max_tokens: usize,
 }
 
-impl MaxTokens {
+impl Length {
     pub fn new(max_tokens: usize) -> Self {
         Self { max_tokens }
     }
 }
 
-impl StopCondition for MaxTokens {
+impl StopCondition for Length {
     fn should_stop(&mut self, token_ids: &[u32]) -> bool {
         token_ids.len() >= self.max_tokens
     }

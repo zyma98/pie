@@ -1,5 +1,4 @@
 mod context;
-pub mod logits_processor;
 pub mod sampler;
 pub mod stop_condition;
 
