@@ -27,7 +27,7 @@ class TextEmbed:
 @dataclass
 class ImageEmbed:
     vec_id: int
-    position_id: (int, int)
+    position_id: tuple[int, int]
 
 
 @dataclass
