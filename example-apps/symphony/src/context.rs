@@ -70,12 +70,17 @@ impl<'a> Context<'a> {
     }
 
     pub fn fill(&mut self, text: &str) {
+        let new_token_ids = l4m::tokenize(&text);
+
+        self.fill_tokens(new_token_ids);
+    }
+
+    pub fn fill_tokens(&mut self, new_token_ids: Vec<u32>) {
         let block_size = l4m::get_block_size() as usize;
 
         // tokenize the text
 
         let token_ids = {
-            let new_token_ids = l4m::tokenize(&text);
             self.pending_token_ids.extend(new_token_ids);
 
             // there should be at least one leftover token for generation.

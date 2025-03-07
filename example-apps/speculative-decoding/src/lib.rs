@@ -2,7 +2,7 @@ use std::time::Instant;
 use symphony::{RunSync, l4m, sampler, stop_condition};
 
 use std::collections::HashMap;
-use std::{mem, slice};
+use std::{mem};
 use symphony::sampler::Sampler;
 use symphony::stop_condition::StopCondition;
 
@@ -159,9 +159,25 @@ impl<const N_PREV: usize, const N_NEXT: usize, const CACHE_SIZE: usize>
             .map_or(false, |lru| lru.is_hit(next_tokens))
     }
 
+    pub fn update(&mut self, tokens: &[u32]) {
+        // Take a window of (N_PREV + N_NEXT) tokens from the start of the sequence, shifting by 1 token each time.
+        // Then update the cache with the previous N_PREV tokens and the next N_NEXT tokens.
+        let window_size = N_PREV + N_NEXT;
+        if tokens.len() < window_size {
+            return;
+        }
+        // Slide over the tokens one at a time
+        for window in tokens.windows(window_size) {
+            // Convert slices into fixed-size arrays
+            let prev_tokens: [u32; N_PREV] = window[..N_PREV].try_into().unwrap();
+            let next_tokens: [u32; N_NEXT] = window[N_PREV..].try_into().unwrap();
+            self.update_entry(prev_tokens, next_tokens);
+        }
+    }
+
     /// Updates the cache for the given `prev_tokens` key with the `next_tokens` sequence.
     /// This moves the entry to the front (most-recent) and enforces the cache size limit.
-    pub fn update(&mut self, prev_tokens: [u32; N_PREV], next_tokens: [u32; N_NEXT]) {
+    pub fn update_entry(&mut self, prev_tokens: [u32; N_PREV], next_tokens: [u32; N_NEXT]) {
         self.table
             .entry(prev_tokens)
             .or_insert_with(LruCache::new)
@@ -174,12 +190,14 @@ impl<const N_PREV: usize, const N_NEXT: usize, const CACHE_SIZE: usize>
     }
 }
 
-struct SpeculativeContext<'a, const N_PREV: usize> {
-    cache_table: CacheTable<N_PREV, 1, 16>,
+struct SpeculativeContext<'a, const N_PREV: usize, const N_NEXT: usize, const CACHE_SIZE: usize> {
+    cache_table: CacheTable<N_PREV, N_NEXT, CACHE_SIZE>,
     context: symphony::Context<'a>,
 }
 
-impl<'a, const N_PREV: usize> SpeculativeContext<'a, N_PREV> {
+impl<'a, const N_PREV: usize, const N_NEXT: usize, const CACHE_SIZE: usize>
+    SpeculativeContext<'a, N_PREV, N_NEXT, CACHE_SIZE>
+{
     pub fn new() -> Self {
         Self {
             cache_table: CacheTable::new(),
@@ -188,7 +206,9 @@ impl<'a, const N_PREV: usize> SpeculativeContext<'a, N_PREV> {
     }
 
     pub fn fill(&mut self, text: &str) {
-        self.context.fill(text);
+        let token_ids = l4m::tokenize(text);
+        self.cache_table.update(&token_ids);
+        self.context.fill_tokens(token_ids);
     }
 
     pub fn speculate(&mut self, ctx: &[u32; N_PREV], max_trie_size: usize) -> (Vec<u32>, Vec<u32>) {
@@ -387,6 +407,13 @@ impl<'a, const N_PREV: usize> SpeculativeContext<'a, N_PREV> {
 
             generated_token_ids.extend(&sampled_next_token_ids);
 
+            // update the cache
+            self.cache_table.update(
+                &generated_token_ids[generated_token_ids
+                    .len()
+                    .saturating_sub(N_PREV + N_NEXT + 1)..],
+            );
+
             // if this was the last block,
             if processed_token_ids.len() + processing_token_ids.len() == block_size {
                 // get the new working block
@@ -449,7 +476,7 @@ impl RunSync for SpeculativeDecoding {
         // TODO: Prepopulate the cache table with some entries
         let max_num_outputs = 128;
 
-        let mut ctx = SpeculativeContext::<1>::new();
+        let mut ctx = SpeculativeContext::<1, 1, 16>::new();
         ctx.fill("<|begin_of_text|>");
         ctx.fill("<|start_header_id|>system<|end_header_id|>\n\nYou are a helpful, respectful and honest assistant.<|eot_id|>");
         ctx.fill("<|start_header_id|>user<|end_header_id|>\n\nExplain the LLM decoding process ELI5.<|eot_id|>");
