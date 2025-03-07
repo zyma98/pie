@@ -275,6 +275,7 @@ impl<'a> Context<'a> {
             occupied_block_ids: Vec::new(),
             free_block_ids: Vec::new(),
             pending_token_ids: self.pending_token_ids.clone(),
+            processed_token_ids: self.processed_token_ids.clone(),
         }
     }
 
