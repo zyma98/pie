@@ -1,4 +1,4 @@
-use crate::l4m;
+use crate::{l4m, l4m_async};
 
 pub fn any<SC1, SC2>(sc1: SC1, sc2: SC2) -> impl StopCondition
 where
@@ -8,7 +8,7 @@ where
     StopConditionList::new(vec![Box::new(sc1), Box::new(sc2)])
 }
 
-pub trait StopCondition {
+pub trait StopCondition: Send + Sync {
     fn should_stop(&mut self, token_ids: &[u32]) -> bool;
 }
 

@@ -11,37 +11,31 @@ impl Run for ParallelGeneration {
 
         let max_num_outputs = 128;
 
+        let mut common = symphony::Context::new();
+        common.fill("<|begin_of_text|>").await;
+        common.fill("<|start_header_id|>system<|end_header_id|>\n\nYou are a helpful, respectful and honest assistant.<|eot_id|>").await;
+
         // tokio spawn
+        let mut ctx1 = common.fork().await;
         let handle1 = symphony::tokio::spawn(async move {
-            let mut ctx = symphony::Context::new();
-            ctx.fill("<|begin_of_text|>");
-            ctx.fill("<|start_header_id|>system<|end_header_id|>\n\nYou are a helpful, respectful and honest assistant.<|eot_id|>");
-            ctx.fill("<|start_header_id|>user<|end_header_id|>\n\nExplain the LLM decoding process ELI5.<|eot_id|>");
-            ctx.fill("<|start_header_id|>assistant<|end_header_id|>\n\n");
+            ctx1.fill("<|start_header_id|>user<|end_header_id|>\n\nExplain the LLM decoding process ELI5.<|eot_id|>").await;
+            ctx1.fill("<|start_header_id|>assistant<|end_header_id|>\n\n")
+                .await;
 
-            let output_text1 = ctx.generate_until("<|eot_id|>", max_num_outputs);
+            let output = ctx1.generate_until("<|eot_id|>", max_num_outputs).await;
 
-            println!(
-                "Output: {:?} (elapsed: {:?})",
-                output_text1,
-                start.elapsed()
-            );
+            println!("Output: {:?} (elapsed: {:?})", output, start.elapsed());
         });
 
+        let mut ctx2 = common.fork().await;
         let handle2 = symphony::tokio::spawn(async move {
-            let mut ctx = symphony::Context::new();
-            ctx.fill("<|begin_of_text|>");
-            ctx.fill("<|start_header_id|>system<|end_header_id|>\n\nYou are a helpful, respectful and honest assistant.<|eot_id|>");
-            ctx.fill("<|start_header_id|>user<|end_header_id|>\n\nExplain the Espresso making process ELI5.<|eot_id|>");
-            ctx.fill("<|start_header_id|>assistant<|end_header_id|>\n\n");
+            ctx2.fill("<|start_header_id|>user<|end_header_id|>\n\nExplain the Espresso making process ELI5.<|eot_id|>").await;
+            ctx2.fill("<|start_header_id|>assistant<|end_header_id|>\n\n")
+                .await;
 
-            let output_text2 = ctx.generate_until("<|eot_id|>", max_num_outputs);
+            let output = ctx2.generate_until("<|eot_id|>", max_num_outputs).await;
 
-            println!(
-                "Output: {:?} (elapsed: {:?})",
-                output_text2,
-                start.elapsed()
-            );
+            println!("Output: {:?} (elapsed: {:?})", output, start.elapsed());
         });
 
         // wait for both tasks to complete
