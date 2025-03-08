@@ -19,7 +19,7 @@ impl Run for ParallelGeneration {
         let mut ctx1 = common.fork().await;
         let handle1 = async move {
             ctx1.fill(
-                "<|start_header_id|>user<|end_header_id|>\n\nWhat is Hello World in 한국어?<|eot_id|>",
+                "<|start_header_id|>user<|end_header_id|>\n\nExplain Pulmonary Embolism<|eot_id|>",
             )
             .await;
             ctx1.fill("<|start_header_id|>assistant<|end_header_id|>\n\n")

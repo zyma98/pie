@@ -67,10 +67,11 @@ async fn main() -> anyhow::Result<()> {
 
     let controller_handle = tokio::spawn(async move {
         loop {
-            match timeout(Duration::from_millis(20), inst2server_rx.recv()).await {
+            match timeout(Duration::from_micros(50), inst2server_rx.recv()).await {
                 // A command arrived within 20ms:
                 Ok(Some((inst_id, cmd))) => {
                     controller.handle_command(inst_id, cmd).await;
+                    controller.submit().await;
                 }
                 // The channel closed:
                 Ok(None) => break,
@@ -107,7 +108,7 @@ async fn main() -> anyhow::Result<()> {
 async fn dummy_client() -> anyhow::Result<()> {
     // Adjust path as needed:
     let wasm_path =
-        PathBuf::from("../example-apps/target/wasm32-wasip2/release/parallel_generation.wasm");
+        PathBuf::from("../example-apps/target/wasm32-wasip2/release/simple_decoding.wasm");
     let server_uri = "ws://127.0.0.1:9000";
 
     // 1) Create and connect the client

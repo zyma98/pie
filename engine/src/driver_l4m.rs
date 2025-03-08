@@ -157,7 +157,7 @@ where
 
         let driver = Self {
             cmd_buffer: Vec::new(),
-            cmd_batcher: CommandBatcher::new(Duration::from_millis(30), 2, 100),
+            cmd_batcher: CommandBatcher::new(Duration::from_millis(5), 8, 100), // CommandBatcher::eager(), //
             cmd_id_pool: utils::IdPool::new(u32::MAX),
             backend: b,
             obj_id_pool: IdPool::new(info.block_size, info.num_embeddings, info.num_distributions),
@@ -400,29 +400,7 @@ impl EventDispatcher {
                         );
                     }
                 }
-                // EventHandle::GetTokenDistribution(s) => {
-                //     if let Event::GetTokenDistribution(mut resp) = event {
-                //         s.send(mem::take(&mut resp.distribution)).map_err(|e| {
-                //             anyhow!("Failed to send GetTokenDistribution event: {:?}", e)
-                //         })?;
-                //     } else {
-                //         bail!(
-                //             "Mismatched event type: expected GetTokenDistribution for correlation_id: {}",
-                //             correlation_id
-                //         );
-                //     }
-                // }
-                // EventHandle::Ping(s) => {
-                //     if let Event::Ping(mut resp) = event {
-                //         s.send(mem::take(&mut resp.message))
-                //             .map_err(|e| anyhow!("Failed to send Ping event: {:?}", e))?;
-                //     } else {
-                //         bail!(
-                //             "Mismatched event type: expected Ping for correlation_id: {}",
-                //             correlation_id
-                //         );
-                //     }
-                // }
+
                 EventHandle::GetInfo(s) => {
                     if let Event::GetInfo(mut resp) = event {
                         let info = Info {
@@ -564,6 +542,19 @@ impl CommandBatcher {
         }
     }
 
+    fn eager() -> Self {
+        Self {
+            allocate: BatchQueue::eager(),
+            deallocate: BatchQueue::eager(),
+            copy_block: BatchQueue::eager(),
+            mask_block: BatchQueue::eager(),
+            embed_text: BatchQueue::eager(),
+            fill_block: BatchQueue::eager(),
+            sample_top_k: BatchQueue::eager(),
+            decode_token_distribution: BatchQueue::eager(),
+        }
+    }
+
     fn push(&mut self, cmd: Command, curr_timestamp: Instant, evt: EventHandle) {
         match cmd {
             Command::Allocate(item) => {
@@ -581,9 +572,7 @@ impl CommandBatcher {
             Command::FillBlock(item) => {
                 self.fill_block.push(item, curr_timestamp, evt);
             }
-            // Command::EmbedImage(item) => {
-            //     self.embed_image.push(item, curr_timestamp, evt);
-            // }
+
             Command::EmbedText(item) => {
                 self.embed_text.push(item, curr_timestamp, evt);
             }

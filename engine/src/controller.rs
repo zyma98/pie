@@ -89,8 +89,6 @@ where
                 .ok_or(ControllerError::InstanceNotFound(inst_id))?;
 
             inst.evt_from_system.send(e.to_string()).await;
-        } else {
-            self.submit();
         }
         Ok(())
     }
