@@ -30,6 +30,7 @@ use crate::client::Client;
 use crate::runtime::Runtime;
 use std::fs;
 use std::time::Duration;
+use tokio::time::timeout;
 
 /// Directory for cached programs
 const PROGRAM_CACHE_DIR: &str = "./program_cache";
@@ -65,8 +66,19 @@ async fn main() -> anyhow::Result<()> {
     let mut controller = Controller::new(runtime.clone(), backend_l4m, backend_ping).await;
 
     let controller_handle = tokio::spawn(async move {
-        while let Some((inst_id, cmd)) = inst2server_rx.recv().await {
-            controller.submit(inst_id, cmd).await;
+        loop {
+            match timeout(Duration::from_millis(20), inst2server_rx.recv()).await {
+                // A command arrived within 20ms:
+                Ok(Some((inst_id, cmd))) => {
+                    controller.handle_command(inst_id, cmd).await;
+                }
+                // The channel closed:
+                Ok(None) => break,
+                // No command received within 20ms; time to call submit:
+                Err(_) => {
+                    controller.submit().await;
+                }
+            }
         }
     });
 

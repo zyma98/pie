@@ -157,7 +157,7 @@ where
 
         let driver = Self {
             cmd_buffer: Vec::new(),
-            cmd_batcher: CommandBatcher::new(Duration::from_secs_f32(0.0), 1, 1),
+            cmd_batcher: CommandBatcher::new(Duration::from_millis(30), 2, 100),
             cmd_id_pool: utils::IdPool::new(u32::MAX),
             backend: b,
             obj_id_pool: IdPool::new(info.block_size, info.num_embeddings, info.num_distributions),
@@ -248,6 +248,7 @@ where
         let batched_payloads = self.cmd_batcher.batch_all(curr_timestamp);
 
         for (cmd, senders) in batched_payloads {
+            //println!("Executing command: {:?}", cmd);
             self.exec_in_backend(cmd, senders).await?;
         }
 
@@ -557,9 +558,9 @@ impl CommandBatcher {
             copy_block: BatchQueue::k_or_t(max_wait_time, min_size, Some(max_size)),
             mask_block: BatchQueue::eager(),
             embed_text: BatchQueue::eager(),
-            fill_block: BatchQueue::k_only(2, None),
-            sample_top_k: BatchQueue::eager(),
-            decode_token_distribution: BatchQueue::eager(),
+            fill_block: BatchQueue::k_or_t(max_wait_time, min_size, Some(max_size)),
+            sample_top_k: BatchQueue::k_or_t(max_wait_time, min_size, Some(max_size)),
+            decode_token_distribution: BatchQueue::k_or_t(max_wait_time, min_size, Some(max_size)),
         }
     }
 
@@ -640,13 +641,6 @@ impl CommandBatcher {
                 senders,
             ));
         }
-
-        // if let Some((items, senders)) = self.embed_image.batch(curr_timestamp) {
-        //     cmds.push((
-        //         l4m::request::Command::EmbedImage(l4m::BatchEmbedImage { items }),
-        //         senders,
-        //     ));
-        // }
 
         if let Some((items, senders)) = self.fill_block.batch(curr_timestamp) {
             cmds.push((
