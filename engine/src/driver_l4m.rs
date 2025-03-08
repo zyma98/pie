@@ -557,8 +557,7 @@ impl CommandBatcher {
             copy_block: BatchQueue::k_or_t(max_wait_time, min_size, Some(max_size)),
             mask_block: BatchQueue::eager(),
             embed_text: BatchQueue::eager(),
-            //embed_image: BatchQueue::k_or_t(max_wait_time, min_size, Some(max_size)),
-            fill_block: BatchQueue::eager(),
+            fill_block: BatchQueue::k_only(2, None),
             sample_top_k: BatchQueue::eager(),
             decode_token_distribution: BatchQueue::eager(),
         }
