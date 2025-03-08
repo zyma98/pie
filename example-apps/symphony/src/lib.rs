@@ -43,8 +43,10 @@ where
             .build()
             .unwrap();
 
+        let local = tokio::task::LocalSet::new();
+        let result = local.block_on(&runtime, T::run());
         // Run the async main function inside the runtime
-        let result = runtime.block_on(T::run());
+        //let result = runtime.block_on(T::run());
 
         if let Err(e) = result {
             return Err(format!("{:?}", e));

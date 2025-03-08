@@ -1,4 +1,4 @@
-pub trait Sampler: Send + Sync {
+pub trait Sampler {
     fn sample(&mut self, token_ids: &[u32], logits: &[f32]) -> u32;
 }
 

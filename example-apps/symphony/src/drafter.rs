@@ -1,4 +1,4 @@
-pub trait Drafter: Send + Sync {
+pub trait Drafter {
     fn update(&mut self, context: &[u32]);
     fn draft(&mut self, max_tokens: usize) -> (Vec<u32>, Vec<u32>);
 }

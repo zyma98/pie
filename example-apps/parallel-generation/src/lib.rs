@@ -17,7 +17,7 @@ impl Run for ParallelGeneration {
 
         // tokio spawn
         let mut ctx1 = common.fork().await;
-        let handle1 = symphony::tokio::spawn(async move {
+        let handle1 = async move {
             ctx1.fill("<|start_header_id|>user<|end_header_id|>\n\nExplain the LLM decoding process ELI5.<|eot_id|>").await;
             ctx1.fill("<|start_header_id|>assistant<|end_header_id|>\n\n")
                 .await;
@@ -25,10 +25,10 @@ impl Run for ParallelGeneration {
             let output = ctx1.generate_until("<|eot_id|>", max_num_outputs).await;
 
             println!("Output: {:?} (elapsed: {:?})", output, start.elapsed());
-        });
+        };
 
         let mut ctx2 = common.fork().await;
-        let handle2 = symphony::tokio::spawn(async move {
+        let handle2 = async move {
             ctx2.fill("<|start_header_id|>user<|end_header_id|>\n\nExplain the Espresso making process ELI5.<|eot_id|>").await;
             ctx2.fill("<|start_header_id|>assistant<|end_header_id|>\n\n")
                 .await;
@@ -36,11 +36,11 @@ impl Run for ParallelGeneration {
             let output = ctx2.generate_until("<|eot_id|>", max_num_outputs).await;
 
             println!("Output: {:?} (elapsed: {:?})", output, start.elapsed());
-        });
+        };
 
         // wait for both tasks to complete
-        handle1.await.unwrap();
-        handle2.await.unwrap();
+        //(handle1, handle2).join().await;
+        futures::future::join(handle1, handle2).await;
 
         Ok(())
     }

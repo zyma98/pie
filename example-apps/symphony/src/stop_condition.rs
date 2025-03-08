@@ -8,7 +8,7 @@ where
     StopConditionList::new(vec![Box::new(sc1), Box::new(sc2)])
 }
 
-pub trait StopCondition: Send + Sync {
+pub trait StopCondition {
     fn should_stop(&mut self, token_ids: &[u32]) -> bool;
 }
 

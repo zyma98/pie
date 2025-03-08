@@ -2,11 +2,12 @@ use crate::drafter::Drafter;
 use crate::sampler::Sampler;
 use crate::stop_condition::StopCondition;
 use crate::{drafter, l4m, l4m_async, sampler, stop_condition};
+use std::cell::RefCell;
 use std::mem;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
+use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::{mpsc, Mutex};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_stream::Stream;
 
@@ -19,29 +20,30 @@ fn get_unique_stream() -> u32 {
 #[derive(Clone, Debug)]
 pub struct Context {
     //pub parent: Option<&'a Context<'a>>,
-    inner: Arc<Mutex<Inner>>,
+    inner: Rc<RefCell<Inner>>, // WASM is single-threaded, so we can use Rc<RefCell<Inner>> instead of Arc<Mutex<Inner>>
 }
 
 impl Context {
     pub fn stream(&self) -> u32 {
-        self.inner.blocking_lock().stream
+        self.inner.borrow().stream
     }
 
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(Mutex::new(Inner::with_capacity(0))),
+            inner: Rc::new(RefCell::new(Inner::with_capacity(0))),
         }
     }
 
     pub fn with_capacity(num_tokens: u32) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(Inner::with_capacity(num_tokens))),
+            inner: Rc::new(RefCell::new(Inner::with_capacity(num_tokens))),
         }
     }
 
     pub async fn fork(&self) -> Self {
+        let inner = self.inner.borrow();
+
         let (parents, inherited_block_ids) = {
-            let inner = self.inner.lock().await;
             let mut parents = inner.parents.clone();
             parents.push(self.clone());
 
@@ -53,27 +55,27 @@ impl Context {
             (parents, inherited_block_ids)
         };
 
-        let inner = Inner {
+        let child_inner = Inner {
             stream: get_unique_stream(),
             parents,
             inherited_block_ids,
             occupied_block_ids: Vec::new(),
             free_block_ids: Vec::new(),
-            pending_token_ids: self.inner.lock().await.pending_token_ids.clone(),
-            processed_token_ids: self.inner.lock().await.processed_token_ids.clone(),
+            pending_token_ids: inner.pending_token_ids.clone(),
+            processed_token_ids: inner.processed_token_ids.clone(),
         };
 
         Self {
-            inner: Arc::new(Mutex::new(inner)),
+            inner: Rc::new(RefCell::new(child_inner)),
         }
     }
 
     pub async fn fill(&mut self, text: &str) {
-        self.inner.lock().await.fill(text).await;
+        self.inner.borrow_mut().fill(text).await;
     }
 
     pub async fn fill_tokens(&mut self, new_token_ids: Vec<u32>) {
-        self.inner.lock().await.fill_tokens(new_token_ids).await;
+        self.inner.borrow_mut().fill_tokens(new_token_ids).await;
     }
 
     pub async fn generate_until(&mut self, stop_str: &str, max_tokens: usize) -> String {
@@ -134,9 +136,8 @@ impl Context {
         stream: Option<UnboundedSender<u32>>,
     ) -> String {
         self.inner
-            .lock()
-            .await
-            .gen(drafter, sampler, stop_condition, stream)
+            .borrow_mut()
+            .generate(drafter, sampler, stop_condition, stream)
             .await
     }
 }
@@ -268,7 +269,7 @@ impl Inner {
         self.processed_token_ids.extend(token_ids);
     }
 
-    pub async fn gen<D: Drafter, S: Sampler, C: StopCondition>(
+    pub async fn generate<D: Drafter, S: Sampler, C: StopCondition>(
         &mut self,
         drafter: &mut D,
         sampler: &mut S,
