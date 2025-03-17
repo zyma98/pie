@@ -1,7 +1,7 @@
-use crate::driver::{AnyCommand, DynCommand};
+use crate::service::{AnyCommand, DynCommand};
 use crate::tokenizer::BytePairEncoder;
 use crate::utils::IdPool;
-use crate::{driver, object};
+use crate::{service, object};
 use dashmap::DashMap;
 use std::any::Any;
 use std::collections::HashMap;

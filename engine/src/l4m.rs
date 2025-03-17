@@ -1,11 +1,11 @@
 use crate::backend::Backend;
 use crate::batching::{Batchable, Batcher, BatchingStrategy, KorTStrategy};
-use crate::driver::{Driver, DriverError};
+use crate::service::{Service, DriverError};
 use crate::instance::Id as InstanceId;
 use crate::object::{
     IdRepr, ObjectError, ObjectManager, ObjectType, VspaceId, group_consecutive_ids,
 };
-use crate::runtime::Reporter;
+use crate::runtime::ExceptionDispatcher;
 use crate::tokenizer::BytePairEncoder;
 use crate::utils::{Counter, IdPool};
 use crate::{backend, object, tokenizer, utils};
@@ -293,7 +293,7 @@ impl ObjectType for ManagedTypes {
 
 #[derive(Debug)]
 pub struct L4m {
-    reporter: Reporter,
+    reporter: ExceptionDispatcher,
     scheduler: Sender<(Stream, Command)>,
     scheduler_loop_handle: task::JoinHandle<()>,
     event_loop_handle: task::JoinHandle<()>,
@@ -304,7 +304,7 @@ pub struct L4m {
     tokenizer: Arc<BytePairEncoder>,
 }
 
-impl Driver for L4m {
+impl Service for L4m {
     type Command = Command;
 
     fn create(&mut self, inst: InstanceId) {}
@@ -352,13 +352,13 @@ impl Driver for L4m {
         }
     }
 
-    fn reporter(&self) -> Option<&Reporter> {
+    fn reporter(&self) -> Option<&ExceptionDispatcher> {
         Some(&self.reporter)
     }
 }
 
 impl L4m {
-    pub async fn new<B>(backend: B, reporter: Reporter) -> Result<Self, DriverError>
+    pub async fn new<B>(backend: B, reporter: ExceptionDispatcher) -> Result<Self, DriverError>
     where
         B: Backend + 'static,
     {

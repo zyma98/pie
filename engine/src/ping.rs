@@ -2,7 +2,7 @@
 
 use crate::backend;
 use crate::backend::Backend;
-use crate::driver::{Driver, DriverError};
+use crate::service::{Service, DriverError};
 use crate::instance::Id as InstanceId;
 use crate::utils::IdPool;
 use dashmap::DashMap;
@@ -87,7 +87,7 @@ where
     }
 }
 
-impl<B> Driver for Ping<B>
+impl<B> Service for Ping<B>
 where
     B: Backend,
 {

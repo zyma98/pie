@@ -1,17 +1,17 @@
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::mpsc::{Sender, UnboundedSender};
+use tokio::sync::mpsc::{Sender, UnboundedReceiver, UnboundedSender};
 use uuid::Uuid;
 use wasmtime::{Config, Engine, Store, component::Component, component::Linker};
 use wasmtime_wasi;
 
 use crate::instance::{Id as InstanceId, InstanceState};
-use crate::server::ServerMessage;
-use crate::{bindings, instance_old, tokenizer};
+use crate::{bindings, service, tokenizer};
 
+use crate::service::{Service, ServiceError};
 use thiserror::Error;
-use crate::driver::AnyCommand;
+use tokio::sync::oneshot;
 
 #[derive(Debug, Error)]
 pub enum RuntimeError {
@@ -40,37 +40,105 @@ pub enum RuntimeError {
     Other(String),
 }
 
+#[derive(Debug)]
+pub enum Command {
+    ProgramExists {
+        hash: String,
+        event: oneshot::Sender<bool>,
+    },
+
+    UploadProgram {
+        hash: String,
+        raw: Vec<u8>,
+        event: oneshot::Sender<Result<String, RuntimeError>>,
+    },
+
+    LaunchInstance {
+        hash: String,
+        event: oneshot::Sender<Result<InstanceId, RuntimeError>>,
+    },
+
+    TerminateInstance {
+        instance_id: InstanceId,
+    },
+}
+
+impl Command {
+    pub fn dispatch(self) -> Result<(), ServiceError> {
+        service::dispatch(service::SERVICE_RUNTIME, self)
+    }
+}
+
 /// Holds the “global” or “runtime” data that the controller needs to manage
 /// instances, compiled programs, etc.
 pub struct Runtime {
     /// The Wasmtime engine (global)
-    pub engine: Engine,
+    engine: Engine,
 
     /// Pre-compiled WASM components, keyed by BLAKE3 hex string
-    pub programs_in_memory: DashMap<String, Component>,
+    programs_in_memory: DashMap<String, Component>,
 
     /// Paths to compiled modules on disk
-    pub programs_in_disk: DashMap<String, std::path::PathBuf>,
+    programs_in_disk: DashMap<String, std::path::PathBuf>,
 
     /// Running instances
-    pub running_instances: DashMap<InstanceId, InstanceHandle>,
-
-    /// The channel for (Instance -> controller) messages
-    pub inst2server: UnboundedSender<(InstanceId, AnyCommand)>,
+    running_instances: DashMap<InstanceId, InstanceHandle>,
 }
 
 pub struct InstanceHandle {
     pub hash: String,
-    pub to_origin: Sender<ServerMessage>,
+    //pub to_origin: Sender<ServerMessage>,
     // pub evt_from_system: Sender<String>,
     // pub evt_from_origin: Sender<String>,
     // pub evt_from_peers: Sender<(String, String)>,
     pub join_handle: tokio::task::JoinHandle<()>,
 }
 
+impl Service for Runtime {
+    type Command = Command;
+
+    async fn handle(&mut self, cmd: Self::Command) {
+        match cmd {
+            Command::ProgramExists { hash, event } => {
+                let exists = self.programs_in_memory.contains_key(&hash)
+                    || self.programs_in_disk.contains_key(&hash);
+                event.send(exists).unwrap();
+            }
+
+            Command::UploadProgram { raw, event } => {
+                let hash = blake3::hash(&raw).to_hex().to_string();
+                if self.programs_in_memory.contains_key(&hash) {
+                    event.send(Ok(hash)).unwrap();
+                } else {
+                    let path = std::path::Path::new("cache").join(&hash);
+                    std::fs::write(&path, &raw).unwrap();
+                    self.programs_in_disk.insert(hash.clone(), path);
+                    event.send(Ok(hash)).unwrap();
+                }
+            }
+
+            Command::StartInstance { hash, event } => {
+                let (to_origin, from_origin) = tokio::sync::mpsc::channel(1000);
+                let instance_id = self.start_program(&hash, to_origin).await.unwrap();
+                event.send(Ok(instance_id)).unwrap();
+            }
+
+            Command::TerminateInstance { instance_id, event } => {
+                let success = self.terminate_program(instance_id, "terminated by user".to_string());
+                event.send(success).unwrap();
+            }
+        }
+
+        todo!()
+    }
+}
+
 impl Runtime {
     /// Create a new `Runtime`
-    pub fn new(inst2server: UnboundedSender<(InstanceId, AnyCommand)>) -> Self {
+    pub fn new(
+        command_dispatcher: CommandDispatcher,
+        report_rx: UnboundedReceiver<Report>,
+    ) -> Self {
         // Configure Wasmtime engine
         let mut config = Config::default();
         config.async_support(true);
@@ -81,7 +149,7 @@ impl Runtime {
             programs_in_memory: DashMap::new(),
             programs_in_disk: DashMap::new(),
             running_instances: DashMap::new(),
-            inst2server,
+            command_dispatcher,
         }
     }
 
@@ -255,11 +323,11 @@ enum Report {
 }
 
 #[derive(Clone, Debug)]
-pub struct Reporter {
+pub struct ExceptionDispatcher {
     tx: UnboundedSender<Report>,
 }
 
-impl Reporter {
+impl ExceptionDispatcher {
     pub fn new(tx: UnboundedSender<Report>) -> Self {
         Self { tx }
     }
