@@ -3,6 +3,7 @@ use crate::service::{Service, ServiceError};
 use crate::utils::IdPool;
 use dashmap::DashMap;
 use std::sync::Arc;
+use async_trait::async_trait;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 
@@ -83,7 +84,7 @@ impl Messaging {
         }
     }
 }
-
+#[async_trait]
 impl Service for Messaging {
     type Command = Command;
 

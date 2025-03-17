@@ -8,6 +8,7 @@ use futures::{SinkExt, StreamExt};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use async_trait::async_trait;
 use thiserror::Error;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, mpsc, oneshot};
@@ -156,14 +157,14 @@ impl Server {
             instance_chans: DashMap::new(),
         });
 
-        let listener_loop = task::spawn(Self::listener_loop(addr, state.clone()));
+        let listener_loop = task::spawn(Self::listener_loop(addr.to_string(), state.clone()));
         Server {
             state,
             listener_loop,
         }
     }
 
-    async fn listener_loop(addr: &str, state: Arc<ServerState>) {
+    async fn listener_loop(addr: String, state: Arc<ServerState>) {
         let listener = TcpListener::bind(addr).await.unwrap();
 
         while let Ok((stream, addr)) = listener.accept().await {
@@ -178,6 +179,7 @@ impl Server {
     }
 }
 
+#[async_trait]
 impl Service for Server {
     type Command = Command;
 
@@ -222,7 +224,7 @@ struct Connection {
     id: ConnectionId,
 
     //sender: mpsc::Sender<ConnectionCommand>,
-    handler_loop: task::JoinHandle<()>,
+    handler_loop: task::JoinHandle<anyhow::Result<()>>,
 }
 
 impl Connection {
@@ -235,9 +237,11 @@ impl Connection {
         }
     }
 
-    async fn temp() {}
-
-    async fn handler_loop(stream: TcpStream, id: ConnectionId, state: Arc<ServerState>) {
+    async fn handler_loop(
+        stream: TcpStream,
+        id: ConnectionId,
+        state: Arc<ServerState>,
+    ) -> anyhow::Result<()> {
         let (writer_tx, mut writer_rx) = mpsc::channel(1000);
 
         let ws_stream = accept_async(stream).await?;
@@ -271,7 +275,7 @@ impl Connection {
                             if let Some(_) = state.instance_chans.remove(&instance_id) {
                                 owned_instance_ids.retain(|id| id != &instance_id);
 
-                                let cmd = ConnectionCommand::Send(ServerMessage::ProgramTerminated { instance_id:instance_id.to_string(), reason: "User request".to_string() })
+                                let cmd = ConnectionCommand::Send(ServerMessage::ProgramTerminated { instance_id:instance_id.to_string(), reason: "User request".to_string() });
 
                                 writer_tx.send(cmd).await?;
                             }
@@ -315,7 +319,7 @@ impl Connection {
                                             limit: CHUNK_SIZE_BYTES,
                                         }
                                         .to_string(),
-                                    }))?;
+                                    })).await?;
                                 } else {
                                     // First chunk
                                     if chunk_index == 0 {
@@ -335,7 +339,7 @@ impl Connection {
                                                     found: file_hash,
                                                 }
                                                 .to_string(),
-                                            }))?;
+                                            })).await?;
                                         } else {
                                             let (evt_tx, evt_rx) = oneshot::channel();
                                             runtime::Command::UploadProgram {
@@ -396,7 +400,7 @@ impl Connection {
                         }
                     } else if msg.is_text() {
                         // Return an error message for text frames
-                        writer_tx.send(ServerError::TextFrameNotSupported.into()).await.unwrap();
+                        //writer_tx.send(ServerError::TextFrameNotSupported.into()).await.unwrap();
                     } else if msg.is_close() {
                         break;
                     }
@@ -417,5 +421,7 @@ impl Connection {
 
         // remove the connection from the state
         state.connections.remove(&id);
+
+        Ok(())
     }
 }

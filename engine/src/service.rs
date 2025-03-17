@@ -4,7 +4,7 @@ use crate::runtime::Runtime;
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::Debug;
-
+use async_trait::async_trait;
 use crate::messaging::Messaging;
 use crate::server::Server;
 use thiserror::Error;
@@ -18,14 +18,21 @@ pub static SERVICE_MESSAGING: usize = 2;
 
 static SERVICE_DISPATCHER: OnceCell<ServiceDispatcher> = OnceCell::new();
 
-pub fn dispatch<C>(service_idx: usize, cmd: C) -> Result<(), ServiceError>
+pub fn dispatch<C>(service_id: usize, cmd: C) -> Result<(), ServiceError>
 where
     C: Any + Send + Sync + Debug + 'static,
 {
     SERVICE_DISPATCHER
         .get()
         .expect("Service not initialized")
-        .dispatch(service_idx, cmd)
+        .dispatch(service_id, cmd)
+}
+
+pub fn get_service_id(name: &str) -> Option<usize> {
+    SERVICE_DISPATCHER
+        .get()
+        .expect("Service not found")
+        .get_service_id(name)
 }
 
 #[derive(Debug, Error)]
@@ -36,7 +43,7 @@ pub enum ServiceError {
     #[error("Invalid driver index: {0}")]
     InvalidDriverIndex(usize),
 }
-
+#[async_trait]
 pub trait Service {
     type Command: Send + Sync + 'static;
 
@@ -75,7 +82,7 @@ impl ServiceInstaller {
 
     pub fn add<T>(mut self, name: &str, mut driver: T) -> Self
     where
-        T: Service + 'static,
+        T: Service + 'static + Send,
     {
         let (tx, mut rx) = unbounded_channel();
 
@@ -84,7 +91,7 @@ impl ServiceInstaller {
 
         task::spawn(async move {
             while let Some(cmd) = rx.recv().await {
-                driver.handle(cmd.downcast().unwrap()).await
+                driver.handle(*cmd.downcast().unwrap()).await
             }
         });
 
@@ -109,35 +116,34 @@ pub struct ServiceDispatcher {
 }
 
 impl ServiceDispatcher {
-    pub fn get_service_idx(&self, name: &str) -> Option<usize> {
+    pub fn get_service_id(&self, name: &str) -> Option<usize> {
         self.maps.get(name).map(|idx| *idx)
     }
 
-    pub fn dispatch<C>(&self, service_idx: usize, cmd: C) -> Result<(), ServiceError>
+    pub fn dispatch<C>(&self, service_id: usize, cmd: C) -> Result<(), ServiceError>
     where
         C: Any + Send + Sync + Debug + 'static,
     {
         let cmd = Box::new(cmd);
 
         self.channels
-            .get(service_idx)
-            .ok_or(ServiceError::InvalidDriverIndex(service_idx))?
+            .get(service_id)
+            .ok_or(ServiceError::InvalidDriverIndex(service_id))?
             .send(cmd)
             .unwrap();
 
         Ok(())
     }
 
-    pub fn dispatch_with<C>(&self, driver_name: &str, cmd: C) -> Result<(), ServiceError>
+    pub fn dispatch_with<C>(&self, name: &str, cmd: C) -> Result<(), ServiceError>
     where
         C: Any + Send + Sync + Debug + 'static,
     {
-        let driver_idx = self
-            .maps
-            .get(driver_name)
-            .ok_or(ServiceError::DriverNotFound(driver_name.to_string()))?;
+        let service_id = self
+            .get_service_id(name)
+            .ok_or(ServiceError::DriverNotFound(name.to_string()))?;
 
-        self.dispatch(*driver_idx, cmd)?;
+        self.dispatch(service_id, cmd)?;
 
         Ok(())
     }
