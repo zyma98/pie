@@ -1,20 +1,14 @@
-pub mod runtime;
 use once_cell::sync::OnceCell;
 
-use crate::instance::Id as InstanceId;
-use crate::object;
-use crate::object::ObjectError;
-use crate::runtime::ExceptionDispatcher;
-use std::any::{Any, TypeId};
-use std::collections::{HashMap, VecDeque};
+use crate::runtime::Runtime;
+use std::any::Any;
+use std::collections::HashMap;
 use std::fmt::Debug;
-use std::hash::Hash;
-use std::marker::PhantomData;
-use std::mem;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+
+use crate::messaging::Messaging;
+use crate::server::Server;
 use thiserror::Error;
-use tokio::sync::mpsc::{Receiver, Sender, UnboundedSender, channel, unbounded_channel};
+use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::task;
 
 // Common driver routines
@@ -65,18 +59,18 @@ pub struct ServiceInstaller {
 }
 
 impl ServiceInstaller {
-    pub fn new() -> Self {
+    pub fn new(listen_addr: &str) -> Self {
         let builder = Self {
             maps: HashMap::new(),
             channels: Vec::new(),
         };
-        builder.add_builtin_services()
+        builder.add_builtin_services(listen_addr)
     }
 
-    fn add_builtin_services(mut self) -> Self {
-        self.add("runtime", runtime::RuntimeHelper::new("0.1.0"))
-            .add("server", object::Server::new())
-            .add("messaging", object::Messaging::new())
+    fn add_builtin_services(mut self, listen_addr: &str) -> Self {
+        self.add("runtime", Runtime::new())
+            .add("server", Server::new(listen_addr))
+            .add("messaging", Messaging::new())
     }
 
     pub fn add<T>(mut self, name: &str, mut driver: T) -> Self

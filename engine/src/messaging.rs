@@ -1,6 +1,5 @@
-use crate::instance::Id as InstanceId;
 use crate::service;
-use crate::service::{DriverError, Service, ServiceError};
+use crate::service::{Service, ServiceError};
 use crate::utils::IdPool;
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -88,7 +87,7 @@ impl Messaging {
 impl Service for Messaging {
     type Command = Command;
 
-    async fn handle(&mut self, inst: InstanceId, cmd: Self::Command) {
+    async fn handle(&mut self, cmd: Self::Command) {
         match cmd {
             Command::Broadcast { topic, message } => {
                 // Broadcast the message.
@@ -100,10 +99,7 @@ impl Service for Messaging {
                 sub_id,
             } => {
                 // Acquire a new subscription id.
-                let id = self
-                    .subscription_id_pool
-                    .acquire()
-                    .map_err(|e| DriverError::LockError)?;
+                let id = self.subscription_id_pool.acquire().unwrap();
 
                 // Insert the new subscriber into the map.
                 self.subscriptions
