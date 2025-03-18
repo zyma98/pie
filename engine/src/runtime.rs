@@ -71,7 +71,7 @@ pub enum Command {
     },
 
     LaunchInstance {
-        hash: String,
+        program_hash: String,
         event: oneshot::Sender<Result<InstanceId, RuntimeError>>,
     },
 
@@ -152,7 +152,7 @@ impl Service for Runtime {
                 }
             }
 
-            Command::LaunchInstance { hash, event } => {
+            Command::LaunchInstance { program_hash: hash, event } => {
                 let instance_id = self.start_program(&hash).await.unwrap();
                 event.send(Ok(instance_id)).unwrap();
             }
@@ -168,7 +168,7 @@ impl Service for Runtime {
                 instance_id,
                 message,
             } => server::Command::Send {
-                inst: instance_id.clone(),
+                inst_id: instance_id.clone(),
                 message: message.clone(),
             }
             .dispatch()
@@ -278,8 +278,8 @@ impl Runtime {
     pub async fn terminate_program(&self, instance_id: InstanceId, reason: String) {
         if let Some((_, handle)) = self.running_instances.remove(&instance_id) {
             handle.join_handle.abort();
-            server::Command::Detach {
-                inst: instance_id.clone(),
+            server::Command::DetachInstance {
+                inst_id: instance_id.clone(),
                 reason,
             }
             .dispatch()
@@ -339,16 +339,16 @@ impl Runtime {
 
         if let Err(err) = result {
             //println!("Instance {instance_id} failed: {err}");
-            server::Command::Detach {
-                inst: instance_id.clone(),
+            server::Command::DetachInstance {
+                inst_id: instance_id.clone(),
                 reason: format!("{err}"),
             }
             .dispatch()
             .ok();
         } else {
             //println!("Instance {instance_id} finished normally");
-            server::Command::Detach {
-                inst: instance_id.clone(),
+            server::Command::DetachInstance {
+                inst_id: instance_id.clone(),
                 reason: format!("instance norally finished"),
             }
             .dispatch()

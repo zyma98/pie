@@ -15,6 +15,7 @@ mod runtime;
 mod server;
 mod tokenizer;
 mod utils;
+
 //
 use anyhow::Context;
 use std::path::{Path, PathBuf};
@@ -36,16 +37,20 @@ async fn main() -> anyhow::Result<()> {
     // 1) Ensure the cache directory exists
     fs::create_dir_all(PROGRAM_CACHE_DIR).context("Failed to create program cache directory")?;
 
-    let l4m_backend = backend::SimulatedBackend::new(l4m::Simulator::new()).await;
-    let ping_backend = backend::SimulatedBackend::new(ping::Simulator::new()).await;
+    //let l4m_backend = backend::SimulatedBackend::new(l4m::Simulator::new()).await;
+    //let ping_backend = backend::SimulatedBackend::new(ping::Simulator::new()).await;
+
+    let backend = backend::ZmqBackend::bind("tcp://gimlab.org:8888").await?;
+
+    //return Ok(());
 
     let runtime = Runtime::new();
     runtime.load_existing_programs(Path::new(PROGRAM_CACHE_DIR))?;
 
     let server = Server::new("127.0.0.1:9000");
     let messaging = Messaging::new();
-    let l4m = L4m::new(l4m_backend).await;
-    let ping = Ping::new(ping_backend);
+    let l4m = L4m::new(backend.clone()).await;
+    let ping = Ping::new(backend).await;
 
     l4m::set_available_models(["llama3"]);
 
@@ -70,7 +75,7 @@ async fn main() -> anyhow::Result<()> {
 async fn dummy_client() -> anyhow::Result<()> {
     // Adjust path as needed:
     let wasm_path =
-        PathBuf::from("../example-apps/target/wasm32-wasip2/release/parallel_generation.wasm");
+        PathBuf::from("../example-apps/target/wasm32-wasip2/release/simple_decoding.wasm");
     let server_uri = "ws://127.0.0.1:9000";
 
     // 1) Create and connect the client
@@ -83,7 +88,7 @@ async fn dummy_client() -> anyhow::Result<()> {
 
     // 3) Query existence
     match client.query_existence(&file_hash).await? {
-        ServerMessage::QueryResponse { hash, exists } => {
+        ServerMessage::Response { hash, exists } => {
             println!(
                 "[User] query_existence response: hash={}, exists={}",
                 hash, exists
@@ -97,7 +102,7 @@ async fn dummy_client() -> anyhow::Result<()> {
                 println!("[User] Program already exists on server, skipping upload.");
             }
         }
-        ServerMessage::Error { error } => {
+        ServerMessage::ServerEvent { message: error } => {
             eprintln!("[User] query_existence got error: {}", error);
         }
         _ => {}
@@ -119,7 +124,7 @@ async fn dummy_client() -> anyhow::Result<()> {
 
         // Drain the queue of messages
         while let Ok(Some(msg)) =
-            tokio::time::timeout(Duration::from_millis(100), client.wait_for_next_message()).await
+            tokio::time::timeout(Duration::from_millis(1500), client.wait_for_next_message()).await
         {
             println!("[User] Received async event: {:?}", msg);
         }
