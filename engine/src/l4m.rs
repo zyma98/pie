@@ -326,7 +326,7 @@ pub struct L4m {
     tokenizer: Arc<BytePairEncoder>,
 }
 
-#[async_trait]
+//#[async_trait]
 impl Service for L4m {
     type Command = Command;
 

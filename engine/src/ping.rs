@@ -84,7 +84,7 @@ where
     }
 }
 
-#[async_trait]
+//#[async_trait]
 impl<B> Service for Ping<B>
 where
     B: Backend,

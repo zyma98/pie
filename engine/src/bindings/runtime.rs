@@ -4,7 +4,7 @@ use crate::runtime::Command;
 use tokio::sync::oneshot;
 
 impl bindings::wit::symphony::app::runtime::Host for InstanceState {
-    async fn get_runtime_version(&mut self) -> anyhow::Result<String, wasmtime::Error> {
+    async fn get_version(&mut self) -> anyhow::Result<String, wasmtime::Error> {
         let (tx, rx) = oneshot::channel();
 
         Command::GetVersion { event: tx }.dispatch()?;

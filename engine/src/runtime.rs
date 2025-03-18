@@ -116,7 +116,7 @@ pub struct InstanceHandle {
     // pub evt_from_peers: Sender<(String, String)>,
     pub join_handle: tokio::task::JoinHandle<()>,
 }
-#[async_trait]
+//#[async_trait]
 impl Service for Runtime {
     type Command = Command;
 
@@ -264,7 +264,7 @@ impl Runtime {
     pub async fn terminate_program(&self, instance_id: InstanceId, reason: String) {
         if let Some((_, handle)) = self.running_instances.remove(&instance_id) {
             handle.join_handle.abort();
-            server::Command::Terminate {
+            server::Command::Detach {
                 inst: instance_id.clone(),
                 reason,
             }
@@ -324,14 +324,14 @@ impl Runtime {
         .await;
 
         if let Err(err) = result {
-            server::Command::Terminate {
+            server::Command::Detach {
                 inst: instance_id.clone(),
                 reason: format!("{err}"),
             }
             .dispatch()
             .ok();
         } else {
-            server::Command::Terminate {
+            server::Command::Detach {
                 inst: instance_id.clone(),
                 reason: format!("instance norally finished"),
             }

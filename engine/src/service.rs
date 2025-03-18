@@ -1,12 +1,12 @@
 use once_cell::sync::OnceCell;
 
+use crate::messaging::Messaging;
 use crate::runtime::Runtime;
+use crate::server::Server;
+use async_trait::async_trait;
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::Debug;
-use async_trait::async_trait;
-use crate::messaging::Messaging;
-use crate::server::Server;
 use thiserror::Error;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::task;
@@ -43,15 +43,15 @@ pub enum ServiceError {
     #[error("Invalid driver index: {0}")]
     InvalidDriverIndex(usize),
 }
-#[async_trait]
-pub trait Service {
+//#[async_trait]
+pub trait Service: Send {
     type Command: Send + Sync + 'static;
 
     // fn create(&mut self, inst: InstanceId) {}
     //
     // fn destroy(&mut self, inst: InstanceId) {}
 
-    async fn handle(&mut self, cmd: Self::Command);
+    fn handle(&mut self, cmd: Self::Command) -> impl Future<Output = ()> + Send;
 
     // fn reporter(&self) -> Option<&ExceptionDispatcher> {
     //     None

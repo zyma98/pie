@@ -1,6 +1,6 @@
+use crate::bindings;
 use crate::instance::InstanceState;
 use crate::messaging::Command;
-use crate::{bindings, service};
 use async_trait::async_trait;
 use std::mem;
 use tokio::sync::{mpsc, oneshot};
@@ -34,11 +34,16 @@ impl Pollable for Subscription {
 }
 
 impl bindings::wit::symphony::app::messaging::Host for InstanceState {
-    async fn broadcast(
-        &mut self,
-        topic: String,
-        message: String,
-    ) -> anyhow::Result<(), wasmtime::Error> {
+    async fn send(&mut self, message: String) -> Result<(), wasmtime::Error> {
+        self.broadcast(self.id().to_string(), message).await?;
+        Ok(())
+    }
+
+    async fn receive(&mut self) -> Result<Resource<Subscription>, wasmtime::Error> {
+        self.subscribe(self.id().to_string()).await
+    }
+
+    async fn broadcast(&mut self, topic: String, message: String) -> Result<(), wasmtime::Error> {
         Command::Broadcast { topic, message }.dispatch()?;
         Ok(())
     }
@@ -46,7 +51,7 @@ impl bindings::wit::symphony::app::messaging::Host for InstanceState {
     async fn subscribe(
         &mut self,
         topic: String,
-    ) -> anyhow::Result<Resource<Subscription>, wasmtime::Error> {
+    ) -> Result<Resource<Subscription>, wasmtime::Error> {
         let (tx, rx) = mpsc::channel(64);
         let (sub_tx, sub_rx) = oneshot::channel();
 

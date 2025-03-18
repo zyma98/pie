@@ -5,10 +5,9 @@ use crate::utils::IdPool;
 use crate::{messaging, runtime, service};
 use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
-use prost::Message;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
-use async_trait::async_trait;
 use thiserror::Error;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, mpsc, oneshot};
@@ -127,9 +126,18 @@ type ConnectionId = u32;
 
 #[derive(Debug)]
 pub enum Command {
-    Send { inst: InstanceId, message: String },
-
-    Terminate { inst: InstanceId, reason: String },
+    Send {
+        inst: InstanceId,
+        message: String,
+    },
+    Receive {
+        inst: InstanceId,
+        channel: mpsc::Sender<String>,
+    },
+    Detach {
+        inst: InstanceId,
+        reason: String,
+    },
 }
 
 impl Command {
@@ -179,7 +187,7 @@ impl Server {
     }
 }
 
-#[async_trait]
+//#[async_trait]
 impl Service for Server {
     type Command = Command;
 
@@ -197,7 +205,19 @@ impl Service for Server {
                 }
             }
 
-            Command::Terminate { inst, reason } => {
+            Command::Receive { inst, channel } => {
+                if let Some(sender) = self.state.instance_chans.get(&inst) {
+                    sender
+                        .send(ConnectionCommand::Receive {
+                            inst_id: inst,
+                            channel,
+                        })
+                        .await
+                        .ok();
+                }
+            }
+
+            Command::Detach { inst, reason } => {
                 if let Some(sender) = self.state.instance_chans.get(&inst) {
                     sender
                         .send(ConnectionCommand::DetachInstance {
@@ -214,6 +234,10 @@ impl Service for Server {
 
 enum ConnectionCommand {
     Send(ServerMessage),
+    Receive {
+        inst_id: InstanceId,
+        channel: mpsc::Sender<String>,
+    },
     DetachInstance {
         instance_id: InstanceId,
         reason: String,
@@ -249,6 +273,7 @@ impl Connection {
         let mut upload_buffer = Vec::new();
 
         let mut owned_instance_ids = Vec::new();
+        let mut msg_handlers = HashMap::<InstanceId, (Vec<String>, Option<_>)>::new();
 
         loop {
             tokio::select! {
@@ -270,6 +295,21 @@ impl Connection {
                                 }
                             }
                         }
+                        ConnectionCommand::Receive { inst_id, channel } => {
+
+                            let (msg_queue, msg_chan) = msg_handlers.get_mut(&inst_id).unwrap();
+                            if msg_chan.is_some() {
+                                runtime::trap(inst_id, "cannot have multiple receivers");
+                            }
+
+                            else {
+                                for msg in msg_queue.drain(..) {
+                                    channel.send(msg).await.ok();
+                                }
+                                *msg_chan = Some(channel);
+                            }
+                        }
+
                         ConnectionCommand::DetachInstance { instance_id, reason } => {
                             // remove from owned_instances_ids
                             if let Some(_) = state.instance_chans.remove(&instance_id) {
@@ -370,6 +410,8 @@ impl Connection {
                                     //register
                                     state.instance_chans.insert(instance_id.clone(), writer_tx.clone());
                                     owned_instance_ids.push(instance_id.clone());
+                                    msg_handlers.insert(instance_id.clone(), (Vec::new(), None));
+
                                     writer_tx.send(ConnectionCommand::Send(ServerMessage::ProgramLaunched { hash, instance_id:instance_id.to_string() })).await?;
                                 } else {
                                     writer_tx.send(ConnectionCommand::Send(ServerMessage::Error {
@@ -381,11 +423,21 @@ impl Connection {
                             ClientMessage::SendEvent {
                                 instance_id,
                                 event_data,
-                            } => messaging::Command::Broadcast {
-                                topic: instance_id.clone(),
-                                message: event_data.clone(),
-                            }
-                            .dispatch()?,
+                            } =>  {
+
+                                let inst_id = Uuid::parse_str(&instance_id)
+                                    .map_err(|_| ServerError::InvalidInstanceId(instance_id.clone()))?;
+
+                                let  (msg_queue, msg_chan) = msg_handlers.get_mut(&inst_id).unwrap();
+
+                                if let Some(chan) = msg_chan {
+                                    chan.send(event_data).await.ok();
+                                } else {
+                                    msg_queue.push(event_data);
+                                }
+
+
+                            },
                             ClientMessage::TerminateProgram { instance_id } => {
 
                                 let inst_id = Uuid::parse_str(&instance_id)
