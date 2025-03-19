@@ -3,6 +3,7 @@ use crate::service::{Service, ServiceError};
 use crate::utils::IdPool;
 use dashmap::DashMap;
 use std::collections::VecDeque;
+use std::mem;
 use std::sync::{Arc, OnceLock};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
@@ -101,7 +102,7 @@ impl PubSub {
         while let Some((topic, message)) = rx.recv().await {
             //println!("subscriptions: {:?}", subscriptions.len());
 
-            if let Some(mut subscribers) = subscribers_by_topic.get_mut(&topic) {
+            let remove_topic = if let Some(mut subscribers) = subscribers_by_topic.get_mut(&topic) {
                 println!("Received message: {:?}, {:?}", topic, message);
 
                 // Retain only the subscribers that can receive the message.
@@ -120,9 +121,13 @@ impl PubSub {
                 });
 
                 // Remove the topic if no subscribers remain.
-                if subscribers.is_empty() {
-                    subscribers_by_topic.remove(&topic);
-                }
+                subscribers.is_empty()
+            } else {
+                false
+            };
+
+            if remove_topic {
+                subscribers_by_topic.remove(&topic);
             }
         }
     }
@@ -182,9 +187,6 @@ pub struct PushPull {
     tx: UnboundedSender<(String, String)>,
     event_loop_handle: tokio::task::JoinHandle<()>,
     queue_by_topic: Arc<DashMap<String, PushPullQueue>>,
-
-
-
 }
 
 impl PushPull {
@@ -221,6 +223,9 @@ impl PushPull {
                 }
             };
 
+            // drop queue ref
+            drop(queue);
+
             if remove_queue {
                 queue_by_topic.remove(&topic);
             }
@@ -234,15 +239,9 @@ impl Service for PushPull {
     async fn handle(&mut self, cmd: Self::Command) {
         match cmd {
             PushPullCommand::Push { topic, message } => {
-
-                println!("Received push: {:?}, {:?}", topic, message);
-
                 self.tx.send((topic, message)).unwrap();
             }
             PushPullCommand::Pull { topic, message } => {
-
-                println!("Received pull: {:?}, {:?}", topic, message);
-
                 let mut queue = self
                     .queue_by_topic
                     .entry(topic.clone())
@@ -252,19 +251,16 @@ impl Service for PushPull {
                     PushPullQueue::Messages(q) => {
                         let sent_msg = q.pop_front().unwrap();
                         message.send(sent_msg.clone()).unwrap();
-                        println!("Sent message: {:?}", sent_msg);
-                        if q.is_empty() {
-                            println!("Queue is empty");
-                            false
-                        } else {
-                            false
-                        }
+                        q.is_empty()
                     }
                     PushPullQueue::PendingPulls(q) => {
                         q.push_back(message);
                         false
                     }
                 };
+
+                // To avoid DashMap deadlock.
+                drop(queue);
 
                 if remove_queue {
                     self.queue_by_topic.remove(&topic);
