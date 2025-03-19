@@ -1,17 +1,14 @@
 use crate::instance::InstanceState;
 use crate::messaging::{PubSubCommand, PushPullCommand, dispatch_i2i, dispatch_u2i};
-use crate::{bindings, server, service};
+use crate::{bindings, server};
 use std::mem;
-use std::sync::OnceLock;
 use tokio::sync::{mpsc, oneshot};
-use uuid::Uuid;
 use wasmtime::component::Resource;
 use wasmtime_wasi::{DynPollable, IoView, Pollable, async_trait, subscribe};
 //
 
 #[derive(Debug)]
 pub struct ReceiveResult {
-    uid: String,
     receiver: Vec<oneshot::Receiver<String>>,
     result: Vec<String>,
     done: bool,
@@ -35,9 +32,7 @@ impl Pollable for ReceiveResult {
         }
 
         for rx in &mut self.receiver {
-            println!("Waiting for message... {:?}", self.uid);
             let result = rx.await.unwrap();
-            println!("Received message: {}", result);
             self.result.push(result);
         }
         self.done = true;
@@ -79,10 +74,8 @@ impl bindings::wit::symphony::app::messaging::Host for InstanceState {
         });
 
         // generate some random string
-        let rd = Uuid::new_v4().to_string();
 
         let res = ReceiveResult {
-            uid: rd,
             receiver: vec![rx],
             result: Vec::new(),
             done: false,
