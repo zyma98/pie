@@ -152,7 +152,10 @@ impl Service for Runtime {
                 }
             }
 
-            Command::LaunchInstance { program_hash: hash, event } => {
+            Command::LaunchInstance {
+                program_hash: hash,
+                event,
+            } => {
                 let instance_id = self.start_program(&hash).await.unwrap();
                 event.send(Ok(instance_id)).unwrap();
             }
@@ -322,15 +325,15 @@ impl Runtime {
 
             match run_func.call_async(&mut store, ()).await {
                 Ok((Ok(()),)) => {
-                    println!("Instance {instance_id} finished normally");
+                    //println!("Instance {instance_id} finished normally");
                     Ok(())
                 }
                 Ok((Err(runtime_err),)) => {
-                    eprintln!("Instance {instance_id} returned an error");
+                    //eprintln!("Instance {instance_id} returned an error");
                     Err(RuntimeError::Other(runtime_err))
                 }
                 Err(call_err) => {
-                    eprintln!("Instance {instance_id} call error: {call_err}");
+                    //eprintln!("Instance {instance_id} call error: {call_err}");
                     Err(RuntimeError::Other(format!("Call error: {call_err}")))
                 }
             }
@@ -338,7 +341,7 @@ impl Runtime {
         .await;
 
         if let Err(err) = result {
-            //println!("Instance {instance_id} failed: {err}");
+            println!("Instance {instance_id} failed: {err}");
             server::Command::DetachInstance {
                 inst_id: instance_id.clone(),
                 reason: format!("{err}"),
@@ -346,10 +349,9 @@ impl Runtime {
             .dispatch()
             .ok();
         } else {
-            //println!("Instance {instance_id} finished normally");
             server::Command::DetachInstance {
                 inst_id: instance_id.clone(),
-                reason: format!("instance norally finished"),
+                reason: format!("instance normally finished"),
             }
             .dispatch()
             .ok();

@@ -5,15 +5,13 @@ use rmp_serde::{decode, encode};
 use std::sync::Arc;
 
 use crate::instance::Id as InstanceId;
-use crate::server::{ClientMessage, QUERY_PROGRAM_EXISTS, ServerMessage};
+use crate::server::{CHUNK_SIZE_BYTES, ClientMessage, QUERY_PROGRAM_EXISTS, ServerMessage};
 use crate::utils::IdPool;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use uuid::Uuid;
-
-const CHUNK_SIZE: usize = 64 * 1024;
 
 type CorrId = u32;
 
@@ -25,7 +23,7 @@ pub struct Client {
     /// A queue of incoming `ServerMessage`s (decoded from msgpack)
     // event table
     pending_requests: Arc<DashMap<CorrId, oneshot::Sender<(bool, String)>>>,
-    inst_event_tx: Arc<DashMap<InstanceId, mpsc::Sender<String>>>,
+    inst_event_tx: Arc<DashMap<InstanceId, mpsc::Sender<(String, String)>>>,
     server_event_rx: mpsc::Receiver<String>,
 
     /// A task handle for the background reading loop
@@ -33,24 +31,36 @@ pub struct Client {
     writer_handle: task::JoinHandle<()>,
 }
 
+#[derive(Debug)]
 pub struct Instance {
     id: InstanceId,
     tx: UnboundedSender<Message>,
-    event_rx: mpsc::Receiver<String>,
+    event_rx: mpsc::Receiver<(String, String)>,
+}
+
+pub fn hash_program(blob: &[u8]) -> String {
+    blake3::hash(blob).to_hex().to_string()
 }
 
 impl Instance {
-    pub async fn send(&self, message: String) -> Result<()> {
+    pub fn id(&self) -> InstanceId {
+        self.id
+    }
+
+    pub async fn send<T>(&self, message: T) -> Result<()>
+    where
+        T: ToString,
+    {
         let msg = ClientMessage::SignalInstance {
             instance_id: self.id.to_string(),
-            message,
+            message: message.to_string(),
         };
         self.tx
             .send(Message::Binary(encode::to_vec_named(&msg)?.into()))?;
         Ok(())
     }
 
-    pub async fn receive(&mut self) -> Result<String> {
+    pub async fn recv(&mut self) -> Result<(String, String)> {
         self.event_rx
             .recv()
             .await
@@ -78,7 +88,7 @@ impl Client {
 
         let pending_requests: Arc<DashMap<CorrId, oneshot::Sender<(bool, String)>>> =
             Arc::new(DashMap::new());
-        let inst_event_tx: Arc<DashMap<InstanceId, mpsc::Sender<String>>> =
+        let inst_event_tx: Arc<DashMap<InstanceId, mpsc::Sender<(String, String)>>> =
             Arc::new(DashMap::new());
         let (server_event_tx, server_event_rx) = mpsc::channel(64);
 
@@ -133,11 +143,12 @@ impl Client {
                     }
                     ServerMessage::InstanceEvent {
                         instance_id,
+                        event,
                         message,
                     } => {
                         let inst_id = Uuid::parse_str(&instance_id).unwrap();
                         if let Some(mut sender) = inst_event_tx_.get(&inst_id) {
-                            let _ = sender.send(message);
+                            let _ = sender.send((event, message)).await.ok();
                         }
                     }
                     ServerMessage::ServerEvent { message } => {
@@ -145,7 +156,6 @@ impl Client {
                     }
                 }
             }
-            println!("[Client] Reader task ended.");
         });
 
         // We'll join the writer_task on drop or when close() is called, but let's keep only the
@@ -174,7 +184,6 @@ impl Client {
         self.reader_handle.abort();
         let _ = self.reader_handle.await;
 
-        println!("[Client] Connection closed.");
         Ok(())
     }
 
@@ -212,28 +221,30 @@ impl Client {
         }
     }
 
-    pub async fn program_exists(&mut self, program_hash: String) -> Result<bool> {
-        self.query(QUERY_PROGRAM_EXISTS, program_hash)
+    pub async fn program_exists(&mut self, program_hash: &str) -> Result<bool> {
+        self.query(QUERY_PROGRAM_EXISTS, program_hash.to_string())
             .await
             .map(|r| r == "true")
     }
 
     /// Upload a WASM file in chunked form.
     /// Prints out the server ack messages as they arrive.
-    pub async fn upload_program(&mut self, wasm_bytes: &[u8], program_hash: &str) -> Result<()> {
+    pub async fn upload_program(&mut self, blob: &[u8]) -> Result<()> {
+        let program_hash = hash_program(blob);
+
         let (tx, rx) = oneshot::channel();
         let corr_id = self.corr_id_pool.acquire()?;
 
         self.pending_requests.insert(corr_id, tx);
 
-        let total_size = wasm_bytes.len();
-        let total_chunks = (total_size + CHUNK_SIZE - 1) / CHUNK_SIZE;
+        let total_size = blob.len();
+        let total_chunks = (total_size + CHUNK_SIZE_BYTES - 1) / CHUNK_SIZE_BYTES;
 
         let mut chunk_index = 0;
         while chunk_index < total_chunks {
-            let start = chunk_index * CHUNK_SIZE;
-            let end = (start + CHUNK_SIZE).min(total_size);
-            let chunk_data = &wasm_bytes[start..end];
+            let start = chunk_index * CHUNK_SIZE_BYTES;
+            let end = (start + CHUNK_SIZE_BYTES).min(total_size);
+            let chunk_data = &blob[start..end];
 
             let msg = ClientMessage::UploadProgram {
                 corr_id,

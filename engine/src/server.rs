@@ -20,7 +20,7 @@ use tungstenite::Message;
 use tungstenite::protocol::Message as WsMessage;
 use uuid::Uuid;
 
-const CHUNK_SIZE_BYTES: usize = 256 * 1024; // 256 KiB
+pub const CHUNK_SIZE_BYTES: usize = 256 * 1024; // 256 KiB
 static SERVICE_ID_SERVER: OnceLock<usize> = OnceLock::new();
 
 /// Define the various errors that can happen while handling messages.
@@ -114,6 +114,7 @@ pub enum ServerMessage {
     #[serde(rename = "instance_event")]
     InstanceEvent {
         instance_id: String,
+        event: String,
         message: String,
     },
 
@@ -201,18 +202,6 @@ impl Service for Server {
             chan.send(ClientCommand::Internal(cmd)).await.ok();
         }
     }
-}
-
-enum ConnectionCommand {
-    Send(ServerMessage),
-    Receive {
-        inst_id: InstanceId,
-        channel: mpsc::Sender<String>,
-    },
-    DetachInstance {
-        instance_id: InstanceId,
-        reason: String,
-    },
 }
 
 struct InFlightUpload {
@@ -343,7 +332,8 @@ impl Client {
                 },
                 ClientCommand::Internal(cmd) => match cmd {
                     Command::Send { inst_id, message } => {
-                        self.send_inst_event(inst_id, message).await
+                        self.send_inst_event(inst_id, "message".to_string(), message)
+                            .await
                     }
                     Command::DetachInstance { inst_id, reason } => {
                         self.handle_detach_instance(inst_id, reason).await;
@@ -375,9 +365,10 @@ impl Client {
         self.send(msg).await;
     }
 
-    async fn send_inst_event(&mut self, inst_id: InstanceId, message: String) {
+    async fn send_inst_event(&mut self, inst_id: InstanceId, event: String, message: String) {
         self.send(ServerMessage::InstanceEvent {
             instance_id: inst_id.to_string(),
+            event,
             message,
         })
         .await;
@@ -387,7 +378,9 @@ impl Client {
         self.inst_owned.retain(|&id| id != inst_id);
 
         if let Some(_) = self.state.instance_chans.remove(&inst_id) {
-            self.send_inst_event(inst_id, reason).await;
+
+            self.send_inst_event(inst_id, "terminated".to_string(), reason)
+                .await;
         }
     }
     async fn handle_query(&mut self, corr_id: u32, subject: String, record: String) {
