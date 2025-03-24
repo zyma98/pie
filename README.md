@@ -8,10 +8,10 @@ rustup target add wasm32-wasip2
 ```
 
 **2. Compile the Example LIP App**  
-The Rust example app (`simple-decoding`) is in `./example-apps/simple-decoding`. 
-- From the root of the repository, run:
+There are example applications located in `example-apps/`. They are written in Rust which will be compiled to WebAssembly using the `wasm32-wasip2` target.
+- To build example applications, from the root of the repository, run:
 ```bash
-cd example-apps/simple-decoding
+cd example-apps
 cargo build --target wasm32-wasip2 --release
 ```
 This uses `wit-bindgen` to implement the `spi:app/run` interface. The compiled `helloworld.wasm` file is located in `./example-apps/target/wasm32-wasip2/release/`.
@@ -26,7 +26,7 @@ python main.py
 ```
 
 **4. Compile Symphony Engine**
-Now we will compile the Symphony engine. The engine will automatically run the example app compiled above (currnetly hard-coded at [here](https://github.com/symphony-project/symphony/blob/d0193f224c0f98a029a3356b2f83344992367740/engine/src/main.rs#L90)).
+Now we will compile the Symphony engine. The engine will automatically run `simple-decoding` example application currnetly hard-coded at [here](https://github.com/symphony-project/symphony/blob/d0193f224c0f98a029a3356b2f83344992367740/engine/src/main.rs#L90).
 
 From the root of the repository, run:
 ```bash
