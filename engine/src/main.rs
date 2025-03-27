@@ -43,7 +43,7 @@ macro_rules! log_user {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    //console_subscriber::init();
+    console_subscriber::init();
 
     // 1) Ensure the cache directory exists
     fs::create_dir_all(PROGRAM_CACHE_DIR).context("Failed to create program cache directory")?;
@@ -51,7 +51,10 @@ async fn main() -> anyhow::Result<()> {
     //let l4m_backend = backend::SimulatedBackend::new(l4m::Simulator::new()).await;
     //let ping_backend = backend::SimulatedBackend::new(ping::Simulator::new()).await;
 
-    let backend = backend::ZmqBackend::bind("tcp://gimlab.org:8888").await?;
+    let endpoint = "tcp://gimlab.org:8888";
+    //let endpoint = "ipc:///tmp/zmq-ipc-example";
+
+    let backend = backend::ZmqBackend::bind(endpoint).await?;
 
     //return Ok(());
 
@@ -103,7 +106,7 @@ async fn dummy_client() -> anyhow::Result<()> {
         log_user!("Program uploaded successfully!");
     }
 
-    const num_instances: usize = 48;
+    const num_instances: usize = 20;
 
     // Launch 32 instances sequentially
     let mut instances = Vec::new();
