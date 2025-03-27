@@ -6,7 +6,6 @@ world imports {
     import l4m;
     import l4m-vision;
     import ping;
-    export run;
 }
 
 world app {

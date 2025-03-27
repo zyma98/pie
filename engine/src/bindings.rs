@@ -8,7 +8,7 @@ mod wit {
     use super::*;
     wasmtime::component::bindgen!({
         path: "../api/wit",
-        world: "app",
+        world: "imports",
         async: true,
         with: {
             "wasi:io/poll": wasmtime_wasi::bindings::io::poll,
