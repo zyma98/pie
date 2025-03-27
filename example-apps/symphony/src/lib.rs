@@ -22,9 +22,9 @@ pub mod bindings {
 }
 
 pub use crate::bindings::{
-    export, exports::symphony::app::run::Guest as RunSync, symphony::app::l4m,
-    symphony::app::l4m_vision, symphony::app::messaging, symphony::app::ping,
-    symphony::app::runtime,
+    export, exports::symphony::nbi::run::Guest as RunSync, symphony::nbi::l4m,
+    symphony::nbi::l4m_vision, symphony::nbi::messaging, symphony::nbi::ping,
+    symphony::nbi::runtime,
 };
 pub use crate::context::Model;
 pub use anyhow::Result;
