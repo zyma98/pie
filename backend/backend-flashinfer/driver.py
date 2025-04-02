@@ -8,7 +8,7 @@ from transformers import AutoTokenizer
 
 import config
 from common import ceil_div
-from l4ma import AttentionStorage, VectorStorage
+from l4ma import VectorStorage
 from llama import LlamaForCausalLM
 from l4m_pb2 import BatchAllocate, BatchDeallocate, BatchEmbedText, BatchMaskBlock, BatchCopyBlock, BatchDecodeTokenDistribution, BatchSampleTopKRequest, BatchSampleTopKResponse, \
     ObjectKind, SampleTopKResponse, BatchFillBlock
@@ -192,6 +192,7 @@ class Driver:
             offset = cmd.block_id # change this name to "offset" later.
             
             ctx_block_ids = cmd.context_block_ids # block == page. make names consistent later.
+            tgt_block_id = ctx_block_ids[-1]
             input_embeds = cmd.input_embedding_ids
             output_embeds = cmd.output_embedding_ids
             
@@ -208,14 +209,15 @@ class Driver:
         
             # let's compute the mask.
             
-            ctx_pos_ids = np.hstack([self.blocks[ctx_id].position_ids for ctx_id in ctx_block_ids])  # int
-            ctx_occupancy = np.hstack([self.blocks[ctx_id].occupancy for ctx_id in ctx_block_ids])  # bool
+
             inp_pos_ids = np.empty((len(input_embeds), ), dtype=np.int32)
             inp_occupancy = np.zeros((len(input_embeds), ), dtype=np.bool_)
 
             if len(input_embeds) > 1:
                 single_token_inference_mode = False
             
+            
+            tgt_block = self.blocks[tgt_block_id]
             for i in range(len(input_embeds)):
                 if input_embeds[i] in self.embeds:
                     embed = self.embeds[input_embeds[i]]
@@ -224,6 +226,8 @@ class Driver:
                         new_position_ids.append(embed.position_id)
                         inp_occupancy[i] = True
                         inp_pos_ids[i] = embed.position_id
+                        tgt_block.occupancy[i] = True
+                        tgt_block.position_ids[i] = embed.position_id
                 else:
                     # should never happen, since the controller should have already checked that the input embeds are valid.
                     raise ValueError("Input embedding not found")
@@ -233,7 +237,9 @@ class Driver:
                     "idx":  len(new_token_ids) -  len(output_embeds) + i,
                     "vec_id": output_embeds[i]
                 })
-            
+                
+            ctx_pos_ids = np.hstack([self.blocks[ctx_id].position_ids for ctx_id in ctx_block_ids])  # int
+            ctx_occupancy = np.hstack([self.blocks[ctx_id].occupancy for ctx_id in ctx_block_ids])  # bool
             casual_mask = ctx_pos_ids[None, :] <= inp_pos_ids[:, None]
             valid_mask = np.logical_and(ctx_occupancy[None, :], inp_occupancy[:, None])
             mask = np.logical_and(casual_mask, valid_mask)
