@@ -75,41 +75,10 @@ def main_run():
     model = LlamaForCausalLM.from_pretrained(
         FULL_MODEL_NAME, torch_dtype="bfloat16", device_map=device)
 
-    block_storage = AttentionStorage(
-        num_layers=model.config.num_hidden_layers,
-        num_blocks=1000,
-        num_heads=model.config.num_key_value_heads,
-        block_size=NUM_TOKENS_IN_BLOCK,
-        head_dim=model.config.hidden_size // model.config.num_attention_heads,
-        dtype=torch.bfloat16,
-        device=device
-    )
-
-    embed_storage_p1 = VectorStorage(
-        num_vectors=57000,
-        embed_dim=config.DIST_RESOLUTION,
-        dtype=torch.bfloat16,
-        device=device
-    )
-
-    embed_storage_p2 = VectorStorage(
-        num_vectors=57000,
-        embed_dim=config.DIST_RESOLUTION,
-        dtype=torch.long,
-        device=device
-    )
-
-    # dist_storage = VectorStorage(
-    #     num_vectors=1000,
-    #     embed_dim=model.config.vocab_size,
-    #     dtype=torch.bfloat16,
-    #     device=device
-    # )
-
     #endpoint = "tcp://*:8888"
     endpoint = "ipc:///tmp/symphony-ipc"
 
-    engine = Driver(model, block_storage, embed_storage_p1, embed_storage_p2)
+    engine = Driver(model, 5000, torch.bfloat16, device)
 
     context = zmq.Context()
     router = context.socket(zmq.ROUTER)
@@ -236,6 +205,9 @@ def llama3_format(prompt: str, hint: str | None, system: str = "You are a helpfu
     return temp
 
 
+
+
+
 def main_test():
     device = "cuda:0"
 
@@ -246,38 +218,8 @@ def main_test():
 
     tokenizer = AutoTokenizer.from_pretrained(FULL_MODEL_NAME)
 
-    block_storage = AttentionStorage(
-        num_layers=model.config.num_hidden_layers,
-        num_blocks=1000,
-        num_heads=model.config.num_key_value_heads,
-        block_size=NUM_TOKENS_IN_BLOCK,
-        head_dim=model.config.hidden_size // model.config.num_attention_heads,
-        dtype=torch.bfloat16,
-        device=device
-    )
 
-    embed_storage_p1 = VectorStorage(
-        num_vectors=1000,
-        embed_dim=config.DIST_RESOLUTION,
-        dtype=torch.bfloat16,
-        device=device
-    )
-
-    embed_storage_p2 = VectorStorage(
-        num_vectors=1000,
-        embed_dim=config.DIST_RESOLUTION,
-        dtype=torch.long,
-        device=device
-    )
-
-    # dist_storage = VectorStorage(
-    #     num_vectors=1000,
-    #     embed_dim=model.config.vocab_size,
-    #     dtype=torch.bfloat16,
-    #     device=device
-    # )
-
-    engine = Driver(model, block_storage, embed_storage_p1, embed_storage_p2)
+    engine = Driver(model, 5000, torch.bfloat16, device)
 
     test_prompt = llama3_format("What is Pinon coffee? ELI 5", None)
 
@@ -346,8 +288,8 @@ def main_test():
         # print(f"Elapsed time: {(time_end - time_start) * 1000:.2f}ms")
 
     print("done!")
-
-
+    
+    
 if __name__ == "__main__":
-    main_run()
-    # main_test()
+    #main_run()
+    main_test()
