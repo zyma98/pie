@@ -442,17 +442,27 @@ impl L4m {
     }
 
     pub fn print_stats(&self) {
-        // print style: kvpage: current/capacity (39% used)
+        // INSERT_YOUR_REWRITE_HERE
+        let mut stats = Vec::new();
+        for &managed_type in &[ManagedTypes::KvBlock, ManagedTypes::TokenEmb] {
+            let current = self.objects.available(managed_type).unwrap();
+            let capacity: usize = self.objects.capacity(managed_type).unwrap() as usize;
+            let used = capacity - current;
+            let percentage = (used as f32 / capacity as f32) * 100.0;
 
-        let kvpage_current = self.objects.available(ManagedTypes::KvBlock).unwrap();
-        let kvpage_capacity: usize = self.objects.capacity(ManagedTypes::KvBlock).unwrap() as usize;
-        let kvpage_used = kvpage_capacity - kvpage_current;
-        let kvpage_percentage = (kvpage_used as f32 / kvpage_capacity as f32) * 100.0;
+            let type_name = match managed_type {
+                ManagedTypes::KvBlock => "kvpage",
+                ManagedTypes::TokenEmb => "tokenemb",
+                _ => "unknown",
+            };
 
-        println!(
-            "kvpage: {} / {} ({:.2}% used)",
-            kvpage_used, kvpage_capacity, kvpage_percentage
-        );
+            stats.push(format!(
+                "{}: {} / {} ({:.2}% used)",
+                type_name, used, capacity, percentage
+            ));
+        }
+
+        println!("{}", stats.join(" | "));
     }
 
     fn get_cleanup_cmds(&mut self, inst_id: InstanceId) -> Vec<Command> {
@@ -468,6 +478,8 @@ impl L4m {
                 });
             }
         }
+
+        //println!("deallocating all objects for instance: {:?}", cmds);
 
         // Remove all exported blocks
         self.exported_blocks.retain(|_, v| v.owner != inst_id);
@@ -531,6 +543,7 @@ impl L4m {
                 ty,
                 ids,
             } => {
+
                 // check available space
                 if self.objects.available(ty).unwrap() < ids.len() {
                     runtime::trap(
@@ -562,12 +575,21 @@ impl L4m {
                 ty,
                 ids,
             } => {
+
+                // if ty == ManagedTypes::TokenEmb {
+                //     println!("deallocating tokenemb, ids: {:?}", ids);
+                //     println!("available tokenemb: {:?}", self.objects.available(ty));
+                // }
                
                 let ids = try_trap!(
                     self.objects.destroy_many(ty, inst_id, &ids),
                     inst_id,
                     "l4m::deallocation failed"
                 );
+
+                // if ty == ManagedTypes::TokenEmb {
+                //     println!("available tokenemb after deallocation: {:?}", self.objects.available(ty));
+                // }
 
                 if ids.is_empty() {
                     return None;

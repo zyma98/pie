@@ -1,6 +1,9 @@
 use num_traits::PrimInt;
 use std::collections::BTreeSet;
 use std::fmt;
+use std::rc::Rc;
+
+use crate::l4m;
 
 /// Errors that can occur while using the ID pool.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,28 +28,31 @@ impl fmt::Display for IdPoolError {
 
 impl std::error::Error for IdPoolError {}
 
-pub type Result<T> = std::result::Result<T, IdPoolError>;
+pub type Result = std::result::Result<u32, IdPoolError>;
 
 /// A very fast bounded ID pool that always returns the smallest available ID.
 /// The pool is created with a maximum capacity.
 #[derive(Debug)]
-pub struct IdPool<T> {
+pub struct IdPool {
+
+    model: Rc<l4m::Model>,
+
     /// The next (never‑allocated) ID.
-    next: T,
+    next: u32,
     /// The set of freed IDs.
-    free: BTreeSet<T>,
+    free: BTreeSet<u32>,
     /// The maximum number of IDs that can be allocated.
-    max_capacity: T,
+    max_capacity: u32,
+
 }
 
-impl<T> IdPool<T>
-where
-    T: PrimInt,
+impl IdPool
 {
     /// Create a new ID pool with the given maximum capacity.
-    pub fn new(max_capacity: T) -> Self {
+    pub fn new(model: Rc<l4m::Model>, max_capacity: u32) -> Self {
         Self {
-            next: T::zero(),
+            model,
+            next: 0,
             free: BTreeSet::new(),
             max_capacity,
         }
@@ -55,7 +61,7 @@ where
     /// Set a new capacity for the pool.
     ///
     /// Returns an error if the new capacity is less than the next available ID.
-    pub fn set_capacity(&mut self, capacity: T) -> Result<()> {
+    pub fn set_capacity(&mut self, capacity: u32) -> Result<()> {
         if capacity < self.next {
             return Err(IdPoolError::CapacityTooSmall);
         }
@@ -66,7 +72,7 @@ where
     /// Allocate and return the smallest available ID.
     ///
     /// Returns `Ok(id)` if an ID is available, or an error if the pool is exhausted.
-    pub fn acquire(&mut self) -> Result<T> {
+    pub fn acquire(&mut self) -> Result {
         if let Some(&id) = self.free.iter().next() {
             // A freed ID is available. Remove and return it.
             self.free.remove(&id);
@@ -74,7 +80,8 @@ where
         } else if self.next < self.max_capacity {
             // Allocate a fresh ID.
             let addr = self.next;
-            self.next = self.next + T::one();
+            self.next = self.next + 1;
+            self.model.allocate(0, l4m::ObjectType::TokenEmb, &[addr]);
             Ok(addr)
         } else {
             Err(IdPoolError::PoolExhausted)

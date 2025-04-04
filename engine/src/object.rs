@@ -321,6 +321,8 @@ where
         ns: NS,
         names: &[IdRepr],
     ) -> Result<Vec<IdRepr>, ObjectError> {
+
+
         // Get the namespace table for the given type and namespace.
         let ty_ns = (ty.clone(), ns);
         let table = self

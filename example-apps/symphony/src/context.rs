@@ -19,7 +19,6 @@ fn get_unique_stream() -> u32 {
 struct ResourcePool {
     block_ids: RcIdPool<u32>,
     embed_ids: IdPool<u32>,
-    dist_ids: IdPool<u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -134,17 +133,24 @@ impl Context {
     
     fn alloc(&mut self, ty: ObjectType, count: usize) -> Vec<u32> {
         let ids = match ty {
-            ObjectType::Block => RefCell::borrow_mut(&self.inner.resources)
-                .block_ids
-                .acquire_many(count)
-                .unwrap(),
-            ObjectType::Embed => RefCell::borrow_mut(&self.inner.resources)
-                .embed_ids
-                .acquire_many(count)
-                .unwrap(),
+            ObjectType::Block => {
+                let ids = RefCell::borrow_mut(&self.inner.resources)
+                    .block_ids
+                    .acquire_many(count)
+                    .unwrap();
+                self.inner.model.allocate(self.stream, ty, &ids);
+                ids
+            },
+            ObjectType::Embed => {
+                let ids = RefCell::borrow_mut(&self.inner.resources)
+                    .embed_ids
+                    .acquire_many(count)
+                    .unwrap();
+                self.inner.model.allocate(self.stream, ty, &ids);
+                ids
+            },
         };
 
-        self.inner.model.allocate(self.stream, ty, &ids);
         ids
     }
 
@@ -159,10 +165,12 @@ impl Context {
                     .model
                     .deallocate(self.stream, ty, &should_be_freed);
             }
-            ObjectType::Embed => RefCell::borrow_mut(&self.inner.resources)
-                .embed_ids
-                .release_many(ids)
-                .unwrap(),
+            ObjectType::Embed => {
+                RefCell::borrow_mut(&self.inner.resources)
+                    .embed_ids
+                    .release_many(ids)
+                    .unwrap();
+            }
         }
     }
 
