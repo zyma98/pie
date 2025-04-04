@@ -9,14 +9,10 @@ const ASSISTANT_PREFIX: &str = "<|start_header_id|>assistant<|end_header_id|>\n\
 const STOP_TOKEN: &str = "<|eot_id|>";
 const MAX_TOKENS: usize = 256;
 
-
 /// Asynchronously generates branches concurrently for proposing a plan.
 async fn propose_plan(mut ctx: Context, question: &str, num_branches: usize) -> Vec<Context> {
-    let prompt = format!(
-        "Please generate a high-level plan for solving the following question. As the first step, just say what method and idea you will use to solve the question. You can reorganize the information in the question. Do not do the actual calculation. Keep your response concise and within 80 words. Question: {}",
-        question
-    );
-    ctx.fill(format!(PROPOSE_PROMPT_TEMPLATE, question));
+    let prompt = format!("{} {}", PROPOSE_PROMPT_TEMPLATE, question);
+    ctx.fill(&prompt);
     let branch_futures = (0..num_branches).map(|_| {
         let mut fork = ctx.fork();
         async move {
@@ -31,13 +27,12 @@ async fn propose_plan(mut ctx: Context, question: &str, num_branches: usize) -> 
 
 /// Asynchronously generates branches concurrently for executing a plan.
 async fn execute_plan(mut ctx: Context, num_branches: usize) -> Vec<Context> {
-    let prompt = "The plan looks good! Now, use real numbers and do the calculation. Please solve the question step-by-step according to the high-level plan. Give me the final answer. Make your response short.";
-    ctx.fill(prompt);
+    ctx.fill(EXECUTE_PROMPT);
     let branch_futures = (0..num_branches).map(|_| {
         let mut fork = ctx.fork();
         async move {
-            fork.fill("<|start_header_id|>assistant<|end_header_id|>\n\n");
-            fork.generate_until("<|eot_id|>", 256).await;
+            fork.fill(ASSISTANT_PREFIX);
+            fork.generate_until(STOP_TOKEN, MAX_TOKENS).await;
             fork
         }
     });
@@ -47,13 +42,12 @@ async fn execute_plan(mut ctx: Context, num_branches: usize) -> Vec<Context> {
 
 /// Asynchronously generates branches concurrently for reflecting on the solution.
 async fn reflect_solution(mut ctx: Context, num_branches: usize) -> Vec<Context> {
-    let prompt = "Okay. Now you evaluate your own solution and give it a score on a scale of 1 to 5. Please do rigorous check of the correctness.";
-    ctx.fill(prompt);
+    ctx.fill(REFLECT_PROMPT);
     let branch_futures = (0..num_branches).map(|_| {
         let mut fork = ctx.fork();
         async move {
-            fork.fill("<|start_header_id|>assistant<|end_header_id|>\n\n");
-            fork.generate_until("<|eot_id|>", 256).await;
+            fork.fill(ASSISTANT_PREFIX);
+            fork.generate_until(STOP_TOKEN, MAX_TOKENS).await;
             fork
         }
     });
@@ -71,29 +65,29 @@ async fn tree_search_branch_parallel(
     // --- Level 1: Propose Plan ---
     let propose_prompt = format!("{} {}", PROPOSE_PROMPT_TEMPLATE, question);
     init_ctx.fill(&propose_prompt);
+    init_ctx.fill(ASSISTANT_PREFIX);
 
     let level1_futures = (0..num_branches).map(|_| {
         let mut propose_ctx = init_ctx.fork(); // Fork for the first level branch
         async move {
-            propose_ctx.fill(ASSISTANT_PREFIX);
             propose_ctx.generate_until(STOP_TOKEN, MAX_TOKENS).await;
 
             // --- Level 2: Execute Plan (nested within propose future) ---
             propose_ctx.fill(EXECUTE_PROMPT); // Add execute prompt to the *same* context
+            propose_ctx.fill(ASSISTANT_PREFIX);
 
             let level2_futures = (0..num_branches).map(|_| {
                 let mut execute_ctx = propose_ctx.fork(); // Fork from the propose context for the second level branch
                 async move {
-                    execute_ctx.fill(ASSISTANT_PREFIX);
                     execute_ctx.generate_until(STOP_TOKEN, MAX_TOKENS).await;
 
                     // --- Level 3: Reflect Solution (nested within execute future) ---
                     execute_ctx.fill(REFLECT_PROMPT); // Add reflect prompt to the *same* context
+                    execute_ctx.fill(ASSISTANT_PREFIX);
 
                     let level3_futures = (0..num_branches).map(|_| {
                         let mut reflect_ctx = execute_ctx.fork(); // Fork from the execute context for the third level branch (leaf)
                         async move {
-                            reflect_ctx.fill(ASSISTANT_PREFIX);
                             reflect_ctx.generate_until(STOP_TOKEN, MAX_TOKENS).await;
                             reflect_ctx // Return the final context for this leaf
                         }
@@ -122,40 +116,37 @@ async fn tree_search_branch_parallel(
     outputs
 }
 
+async fn tree_search_naive(
+    mut init_ctx: Context,
+    question: &str,
+    num_branches: usize,
+) -> Vec<String> {
+    let propose_prompt = format!("{} {}", PROPOSE_PROMPT_TEMPLATE, question);
 
+    init_ctx.fill(&propose_prompt);
 
-async fn tree_search_naive(mut init_ctx:  Context, question: &str, num_branches: usize) -> Vec<String> {  
-    let prompt_propose = format!(  
-        "Please generate a high-level plan for solving the following question. As the first step, just say what method and idea you will use to solve the question. You can reorganize the information in the question. Do not do the actual calculation. Keep your response concise and within 80 words. Question: {}",  
-        question  
-    );  
-    let prompt_execute = "The plan looks good! Now, use real numbers and do the calculation. Please solve the question step-by-step according to the high-level plan. Give me the final answer. Make your response short.";  
-    let prompt_reflect = "Okay. Now you evaluate your own solution and give it a score on a scale of 1 to 5. Please do rigorous check of the correctness.";  
+    let leaf_futures = (0..num_branches.pow(3))
+        .map(|_| {
+            let mut ctx = init_ctx.fork();
+            async move {
+                ctx.fill(ASSISTANT_PREFIX);
+                ctx.generate_until(STOP_TOKEN, MAX_TOKENS).await;
 
-    init_ctx.fill(&prompt_propose);
+                ctx.fill(EXECUTE_PROMPT);
+                ctx.fill(ASSISTANT_PREFIX);
+                ctx.generate_until(STOP_TOKEN, MAX_TOKENS).await;
 
-    let leaf_futures = (0..num_branches.pow(3)).map(|_| {  
-        let mut ctx = init_ctx.fork();  
-        async move {  
-            ctx.fill("<|start_header_id|>assistant<|end_header_id|>\n\n");  
-            ctx.generate_until("<|eot_id|>", 256).await;  
-      
-            ctx.fill(prompt_execute);  
-            ctx.fill("<|start_header_id|>assistant<|end_header_id|>\n\n");  
-            ctx.generate_until("<|eot_id|>", 256).await;  
-      
-            ctx.fill(prompt_reflect);  
-            ctx.fill("<|start_header_id|>assistant<|end_header_id|>\n\n");  
-            ctx.generate_until("<|eot_id|>", 256).await;  
-      
-            ctx.get_text()  
-        }  
-    }).collect::<Vec<_>>();  
+                ctx.fill(REFLECT_PROMPT);
+                ctx.fill(ASSISTANT_PREFIX);
+                ctx.generate_until(STOP_TOKEN, MAX_TOKENS).await;
 
-    join_all(leaf_futures).await  
+                ctx.get_text()
+            }
+        })
+        .collect::<Vec<_>>();
+
+    join_all(leaf_futures).await
 }
-
-
 
 /// Implements the tree search: propose a plan, execute it, then reflect on the solution.
 async fn tree_search(init_ctx: Context, question: &str, num_branches: usize) -> Vec<String> {
