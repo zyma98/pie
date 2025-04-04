@@ -131,6 +131,10 @@ impl Default for StreamPriority {
 
 #[derive(Debug)]
 pub enum Command {
+    Destroy {
+        inst_id: InstanceId,
+    },
+
     GetInfo {
         handle: oneshot::Sender<Info>,
     },
@@ -346,19 +350,12 @@ impl Service for L4m {
     type Command = Command;
 
     async fn handle(&mut self, cmd: Self::Command) {
-        match self.translate_cmd(cmd) {
-            // Should be sent to backend
-            Some((cmd, mut stream)) => {
-                // adjust stream priority
-                if let Some(priority) = self.stream_priorities.get(&stream) {
-                    stream.set_priority(*priority)
-                }
-
-                self.scheduler.send((stream, cmd)).await.unwrap();
+        if let Command::Destroy { inst_id } = cmd {
+            for cmd in self.get_cleanup_cmds(inst_id) {
+                self.handle_cmd(cmd).await;
             }
-
-            // No need to send to backend
-            None => {}
+        } else {
+            self.handle_cmd(cmd).await;
         }
     }
 }
@@ -368,8 +365,8 @@ impl L4m {
     where
         B: Backend + 'static,
     {
-        let (event_tx, event_rx) = mpsc::channel(1000);
-        let (scheduler_tx, scheduler_rx) = mpsc::channel(1000);
+        let (event_tx, event_rx) = mpsc::channel(1024 * 8);
+        let (scheduler_tx, scheduler_rx) = mpsc::channel(1024 * 8);
 
         backend.register_listener(0, event_tx).await;
         let event_table = Arc::new(DashMap::new());
@@ -441,7 +438,7 @@ impl L4m {
 
         driver
     }
-    async fn destroy(&mut self, inst_id: InstanceId) {
+    fn get_cleanup_cmds(&mut self, inst_id: InstanceId) -> Vec<Command> {
         let mut cmds = Vec::new();
 
         for ty in [ManagedTypes::KvBlock, ManagedTypes::TokenEmb] {
@@ -453,15 +450,35 @@ impl L4m {
             })
         }
 
-        for cmd in cmds {
-            self.handle(cmd).await;
-        }
-
         // Remove all exported blocks
         self.exported_blocks.retain(|_, v| v.owner != inst_id);
+
+        cmds
     }
-    fn translate_cmd(&mut self, cmd: Command) -> Option<(Command, Stream)> {
+
+    async fn handle_cmd(&mut self, cmd: Command) {
+        match self.resolve_cmd(cmd) {
+            // Should be sent to backend
+            Some((cmd, mut stream)) => {
+                // adjust stream priority
+                if let Some(priority) = self.stream_priorities.get(&stream) {
+                    stream.set_priority(*priority)
+                }
+
+                self.scheduler.send((stream, cmd)).await.unwrap();
+            }
+
+            // No need to send to backend
+            None => {}
+        }
+    }
+
+    fn resolve_cmd(&mut self, cmd: Command) -> Option<(Command, Stream)> {
         match cmd {
+            Command::Destroy { inst_id } => {
+                unreachable!()
+            }
+
             Command::GetInfo { handle } => Some((Command::GetInfo { handle }, Stream::default())),
 
             Command::GetBlockSize { handle } => {
@@ -542,12 +559,14 @@ impl L4m {
                 mut inputs,
                 mut outputs,
             } => {
-
                 if last_block_len == 0 || last_block_len > self.info.block_size {
                     // error
                     runtime::trap(
                         inst_id,
-                        format!("l4m::fill_block failed. last_block_len ({}) is 0 or greater than the block size ({})", last_block_len, self.info.block_size  )
+                        format!(
+                            "l4m::fill_block failed. last_block_len ({}) is 0 or greater than the block size ({})",
+                            last_block_len, self.info.block_size
+                        ),
                     );
                     return None;
                 }
@@ -558,7 +577,11 @@ impl L4m {
                     // error
                     runtime::trap(
                         inst_id,
-                        format!("l4m::fill_block failed. inputs length is greater than the max tokens: {} > {}", inputs.len(), max_tokens)
+                        format!(
+                            "l4m::fill_block failed. inputs length is greater than the max tokens: {} > {}",
+                            inputs.len(),
+                            max_tokens
+                        ),
                     );
                     return None;
                 }

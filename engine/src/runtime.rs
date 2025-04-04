@@ -8,7 +8,7 @@ use wasmtime::{Config, Engine, Store, component::Component, component::Linker};
 use wasmtime_wasi;
 
 use crate::instance::{Id as InstanceId, InstanceState};
-use crate::{bindings, server, service};
+use crate::{bindings, l4m, server, service};
 
 use crate::service::{Service, ServiceError};
 use thiserror::Error;
@@ -527,6 +527,16 @@ impl Runtime {
                 reason: format!("instance normally finished"),
             }
             .dispatch()
+            .ok();
+        }
+
+        // force cleanup of the remaining resources
+        for model in l4m::available_models() {
+            let service_id = service::get_service_id(model).unwrap();
+            l4m::Command::Destroy {
+                inst_id: instance_id.clone(),
+            }
+            .dispatch(service_id)
             .ok();
         }
     }
