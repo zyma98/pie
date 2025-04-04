@@ -131,6 +131,8 @@ impl Default for StreamPriority {
 
 #[derive(Debug)]
 pub enum Command {
+    PrintStats,
+
     Destroy {
         inst_id: InstanceId,
     },
@@ -438,16 +440,33 @@ impl L4m {
 
         driver
     }
+
+    pub fn print_stats(&self) {
+        // print style: kvpage: current/capacity (39% used)
+
+        let kvpage_current = self.objects.available(ManagedTypes::KvBlock).unwrap();
+        let kvpage_capacity: usize = self.objects.capacity(ManagedTypes::KvBlock).unwrap() as usize;
+        let kvpage_used = kvpage_capacity - kvpage_current;
+        let kvpage_percentage = (kvpage_used as f32 / kvpage_capacity as f32) * 100.0;
+
+        println!(
+            "kvpage: {} / {} ({:.2}% used)",
+            kvpage_used, kvpage_capacity, kvpage_percentage
+        );
+    }
+
     fn get_cleanup_cmds(&mut self, inst_id: InstanceId) -> Vec<Command> {
         let mut cmds = Vec::new();
 
         for ty in [ManagedTypes::KvBlock, ManagedTypes::TokenEmb] {
-            cmds.push(Command::Deallocate {
-                inst_id,
-                stream_id: 0,
-                ty,
-                ids: self.objects.all_names(ty, inst_id).unwrap(),
-            })
+            if let Ok(ids) = self.objects.all_names(ty, inst_id) {
+                cmds.push(Command::Deallocate {
+                    inst_id,
+                    stream_id: 0,
+                    ty,
+                    ids,
+                });
+            }
         }
 
         // Remove all exported blocks
@@ -475,7 +494,12 @@ impl L4m {
 
     fn resolve_cmd(&mut self, cmd: Command) -> Option<(Command, Stream)> {
         match cmd {
-            Command::Destroy { inst_id } => {
+            Command::PrintStats => {
+                self.print_stats();
+                None
+            }
+
+            Command::Destroy { .. } => {
                 unreachable!()
             }
 
@@ -507,6 +531,14 @@ impl L4m {
                 ty,
                 ids,
             } => {
+                // check available space
+                if self.objects.available(ty).unwrap() < ids.len() {
+                    runtime::trap(
+                        inst_id,
+                        "l4m::allocation failed. not enough available space",
+                    );
+                }
+
                 let ids = try_trap!(
                     self.objects.create_many(ty, inst_id, ids),
                     inst_id,
@@ -530,6 +562,7 @@ impl L4m {
                 ty,
                 ids,
             } => {
+               
                 let ids = try_trap!(
                     self.objects.destroy_many(ty, inst_id, &ids),
                     inst_id,
@@ -838,13 +871,14 @@ impl L4m {
         let mut sch = CommandScheduler::new(backend, event_table);
 
         loop {
-            let res = if sch.has_pending_command() {
-                // With pending tasks, wait up to 100µs for a new command.
-                timeout(Duration::from_micros(100), rx.recv()).await
-            } else {
-                // Without pending tasks, wait indefinitely.
-                Ok(rx.recv().await)
-            };
+            let res: Result<Option<(Stream, Command)>, tokio::time::error::Elapsed> =
+                if sch.has_pending_command() {
+                    // With pending tasks, wait up to 100µs for a new command.
+                    timeout(Duration::from_micros(100), rx.recv()).await
+                } else {
+                    // Without pending tasks, wait indefinitely.
+                    Ok(rx.recv().await)
+                };
 
             match res {
                 Ok(Some((stream, cmd))) => {

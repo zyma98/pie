@@ -347,14 +347,23 @@ impl Runtime {
     pub async fn terminate_instance(&self, instance_id: InstanceId, reason: String) {
         if let Some((_, handle)) = self.running_instances.remove(&instance_id) {
             handle.join_handle.abort();
+            
+
+            for model in l4m::available_models() {
+                let service_id = service::get_service_id(model).unwrap();
+                l4m::Command::Destroy {
+                    inst_id: instance_id.clone(),
+                }
+                .dispatch(service_id)
+                .ok();
+            }
+
             server::Command::DetachInstance {
                 inst_id: instance_id.clone(),
                 reason,
             }
             .dispatch()
             .ok();
-
-            // TODO: cleanup other resources (l4m, etc.)
         }
     }
 
