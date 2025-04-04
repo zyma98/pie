@@ -55,6 +55,24 @@ async fn reflect_solution(mut ctx: Context, num_branches: usize) -> Vec<Context>
     branches
 }
 
+async fn tree_search2(ctx: Context, question: &str, num_branches: usize) -> Vec<String> {
+    let prompt = format!(
+        "Please generate a high-level plan for solving the following question. As the first step, just say what method and idea you will use to solve the question. You can reorganize the information in the question. Do not do the actual calculation. Keep your response concise and within 80 words. Question: {}",
+        question
+    );
+    ctx.fill(&prompt);
+    let branch_futures = (0..num_branches).map(|_| {
+        let mut fork = ctx.fork();
+        async move {
+            fork.fill("<|start_header_id|>assistant<|end_header_id|>\n\n");
+            fork.generate_until("<|eot_id|>", 256).await;
+            fork
+        }
+    });
+    let branches: Vec<Context> = join_all(branch_futures).await.into_iter().collect();
+    branches
+}
+
 /// Implements the tree search: propose a plan, execute it, then reflect on the solution.
 async fn tree_search(init_ctx: Context, question: &str, num_branches: usize) -> Vec<String> {
     let plan_ctxs = propose_plan(init_ctx, question, num_branches).await;
