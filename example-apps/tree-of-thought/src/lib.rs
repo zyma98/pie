@@ -1,38 +1,8 @@
 use futures::future::join_all;
-use regex::Regex;
-use std::collections::HashMap;
+
 use symphony::{Context, Model};
 
-const INVALID: i64 = -9999999;
-const TEMP: f32 = 0.3; // Temperature value if supported
-
 // Extracts the last number from the answer string or returns INVALID.
-fn get_answer_value(answer: &str) -> i64 {
-    let cleaned = answer.replace(",", "");
-    let re = Regex::new(r"\d+").unwrap();
-    let numbers: Vec<&str> = re.find_iter(&cleaned).map(|m| m.as_str()).collect();
-    if numbers.is_empty() {
-        return INVALID;
-    }
-    numbers
-        .last()
-        .and_then(|num_str| num_str.parse::<i64>().ok())
-        .unwrap_or(INVALID)
-}
-
-// Returns the most frequent number in the slice.
-fn most_frequent_number(numbers: &[i64]) -> Option<i64> {
-    if numbers.is_empty() {
-        return None;
-    }
-    let mut freq = HashMap::new();
-    for &num in numbers {
-        *freq.entry(num).or_insert(0) += 1;
-    }
-    freq.into_iter()
-        .max_by_key(|&(_, count)| count)
-        .map(|(num, _)| num)
-}
 
 /// Asynchronously generates branches concurrently for proposing a plan.
 async fn propose_plan(mut ctx: Context, question: &str, num_branches: usize) -> Vec<Context> {

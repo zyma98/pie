@@ -100,6 +100,8 @@ class Driver:
         for cmd in cmds.items:
             if cmd.kind == ObjectKind.OBJECT_KIND_KV_BLOCK:
                 for i in range(cmd.count):
+                    #print(f"allocate {cmd.count} blocks", cmd.object_id_offset + i)
+
                     self.blocks[cmd.object_id_offset + i] = Block(
                         position_ids=np.array([0] * NUM_TOKENS_IN_BLOCK),
                         occupancy=np.array([False] * NUM_TOKENS_IN_BLOCK)
