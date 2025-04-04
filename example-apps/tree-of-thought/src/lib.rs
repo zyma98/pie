@@ -2,7 +2,13 @@ use futures::future::join_all;
 
 use symphony::{Context, Model};
 
-// Extracts the last number from the answer string or returns INVALID.
+const PROPOSE_PROMPT_TEMPLATE: &str = "Please generate a high-level plan for solving the following question. As the first step, just say what method and idea you will use to solve the question. You can reorganize the information in the question. Do not do the actual calculation. Keep your response concise and within 80 words. Question: {}";
+const EXECUTE_PROMPT: &str = "The plan looks good! Now, use real numbers and do the calculation. Please solve the question step-by-step according to the high-level plan. Give me the final answer. Make your response short.";
+const REFLECT_PROMPT: &str = "Okay. Now you evaluate your own solution and give it a score on a scale of 1 to 5. Please do rigorous check of the correctness.";
+const ASSISTANT_PREFIX: &str = "<|start_header_id|>assistant<|end_header_id|>\n\n";
+const STOP_TOKEN: &str = "<|eot_id|>";
+const MAX_TOKENS: usize = 256;
+
 
 /// Asynchronously generates branches concurrently for proposing a plan.
 async fn propose_plan(mut ctx: Context, question: &str, num_branches: usize) -> Vec<Context> {
@@ -10,12 +16,12 @@ async fn propose_plan(mut ctx: Context, question: &str, num_branches: usize) -> 
         "Please generate a high-level plan for solving the following question. As the first step, just say what method and idea you will use to solve the question. You can reorganize the information in the question. Do not do the actual calculation. Keep your response concise and within 80 words. Question: {}",
         question
     );
-    ctx.fill(&prompt);
+    ctx.fill(format!(PROPOSE_PROMPT_TEMPLATE, question));
     let branch_futures = (0..num_branches).map(|_| {
         let mut fork = ctx.fork();
         async move {
-            fork.fill("<|start_header_id|>assistant<|end_header_id|>\n\n");
-            fork.generate_until("<|eot_id|>", 256).await;
+            fork.fill(ASSISTANT_PREFIX);
+            fork.generate_until(STOP_TOKEN, MAX_TOKENS).await;
             fork
         }
     });
@@ -61,12 +67,7 @@ async fn tree_search_branch_parallel(
     num_branches: usize,
 ) -> Vec<String> {
     // Define prompts as constants for clarity
-    const PROPOSE_PROMPT_TEMPLATE: &str = "Please generate a high-level plan for solving the following question. As the first step, just say what method and idea you will use to solve the question. You can reorganize the information in the question. Do not do the actual calculation. Keep your response concise and within 80 words. Question: {}";
-    const EXECUTE_PROMPT: &str = "The plan looks good! Now, use real numbers and do the calculation. Please solve the question step-by-step according to the high-level plan. Give me the final answer. Make your response short.";
-    const REFLECT_PROMPT: &str = "Okay. Now you evaluate your own solution and give it a score on a scale of 1 to 5. Please do rigorous check of the correctness.";
-    const ASSISTANT_PREFIX: &str = "<|start_header_id|>assistant<|end_header_id|>\n\n";
-    const STOP_TOKEN: &str = "<|eot_id|>";
-    const MAX_TOKENS: usize = 256;
+
     // --- Level 1: Propose Plan ---
     let propose_prompt = format!("{} {}", PROPOSE_PROMPT_TEMPLATE, question);
     init_ctx.fill(&propose_prompt);
@@ -121,6 +122,41 @@ async fn tree_search_branch_parallel(
     outputs
 }
 
+
+
+async fn tree_search_naive(mut init_ctx:  Context, question: &str, num_branches: usize) -> Vec<String> {  
+    let prompt_propose = format!(  
+        "Please generate a high-level plan for solving the following question. As the first step, just say what method and idea you will use to solve the question. You can reorganize the information in the question. Do not do the actual calculation. Keep your response concise and within 80 words. Question: {}",  
+        question  
+    );  
+    let prompt_execute = "The plan looks good! Now, use real numbers and do the calculation. Please solve the question step-by-step according to the high-level plan. Give me the final answer. Make your response short.";  
+    let prompt_reflect = "Okay. Now you evaluate your own solution and give it a score on a scale of 1 to 5. Please do rigorous check of the correctness.";  
+
+    init_ctx.fill(&prompt_propose);
+
+    let leaf_futures = (0..num_branches.pow(3)).map(|_| {  
+        let mut ctx = init_ctx.fork();  
+        async move {  
+            ctx.fill("<|start_header_id|>assistant<|end_header_id|>\n\n");  
+            ctx.generate_until("<|eot_id|>", 256).await;  
+      
+            ctx.fill(prompt_execute);  
+            ctx.fill("<|start_header_id|>assistant<|end_header_id|>\n\n");  
+            ctx.generate_until("<|eot_id|>", 256).await;  
+      
+            ctx.fill(prompt_reflect);  
+            ctx.fill("<|start_header_id|>assistant<|end_header_id|>\n\n");  
+            ctx.generate_until("<|eot_id|>", 256).await;  
+      
+            ctx.get_text()  
+        }  
+    }).collect::<Vec<_>>();  
+
+    join_all(leaf_futures).await  
+}
+
+
+
 /// Implements the tree search: propose a plan, execute it, then reflect on the solution.
 async fn tree_search(init_ctx: Context, question: &str, num_branches: usize) -> Vec<String> {
     let plan_ctxs = propose_plan(init_ctx, question, num_branches).await;
@@ -165,6 +201,7 @@ async fn main() -> Result<(), String> {
     let num_branches = 3;
 
     //tree_search(ctx, question, num_branches).await;
-    tree_search_branch_parallel(ctx, question, num_branches).await;
+    //tree_search_branch_parallel(ctx, question, num_branches).await;\
+    tree_search_naive(ctx, question, num_branches).await;
     Ok(())
 }

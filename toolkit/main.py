@@ -35,7 +35,7 @@ async def main():
         print("Program uploaded successfully!")
 
     # Launch 200 instances
-    NUM_INSTANCES = 6
+    NUM_INSTANCES = 1
     instances = []
     for _ in range(NUM_INSTANCES):
         instance = await client.launch_instance(program_hash)
