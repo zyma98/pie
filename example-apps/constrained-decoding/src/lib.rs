@@ -192,7 +192,6 @@ async fn main() -> Result<(), String> {
     let model = symphony::Model::new(available_models.first().unwrap()).unwrap();
     let tokenizer = model.get_tokenizer();
 
-    let mut drafter = Empty {};
     let mut sampler = ConstrainedSampler::new(
         tokenizer.clone(),
         JSON_GRAMMAR,
@@ -217,7 +216,7 @@ async fn main() -> Result<(), String> {
     ctx.fill("<|start_header_id|>assistant<|end_header_id|>\n\n");
 
     let output_text = ctx
-        .generate_with_drafter(&mut drafter, &mut sampler, &mut stop_condition)
+        .generate(&mut sampler, &mut stop_condition)
         .await;
 
     println!("Output: {:?} (elapsed: {:?})", output_text, start.elapsed());
