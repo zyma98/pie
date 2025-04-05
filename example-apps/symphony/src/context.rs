@@ -460,7 +460,7 @@ impl Context {
     }
 
     // Simple autoregressive generation
-    pub async fn generate_with_beam<S: Sampler, C: StopCondition>(
+    pub async fn generate_with_beam<C: StopCondition>(
         &mut self,
         stop_condition: &mut C,
         beam_size: usize,
