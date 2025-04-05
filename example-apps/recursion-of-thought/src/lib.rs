@@ -1,198 +1,107 @@
-use futures::future::join_all;
-
+use std::future::Future;
+use std::pin::Pin;
 use symphony::{Context, Model};
 
-const PROPOSE_PROMPT_TEMPLATE: &str = "Please generate a high-level plan for solving the following question. As the first step, just say what method and idea you will use to solve the question. You can reorganize the information in the question. Do not do the actual calculation. Keep your response concise and within 80 words. Question: {}";
-const EXECUTE_PROMPT: &str = "The plan looks good! Now, use real numbers and do the calculation. Please solve the question step-by-step according to the high-level plan. Give me the final answer. Make your response short.";
-const REFLECT_PROMPT: &str = "Okay. Now you evaluate your own solution and give it a score on a scale of 1 to 5. Please do rigorous check of the correctness.";
+// Constants
+const DIVIDE_PROMPT_TEMPLATE: &str = "Your task is to analyze the given problem and decide whether it can be solved directly or needs to be divided into smaller subproblems. If the problem is simple and can be solved immediately, provide the solution wrapped in <leaf>final answer</leaf>. If not, divide the problem into exactly two independent subtasks such that solving these subtasks and combining their solutions will lead to the solution of the original problem. Present the subtasks wrapped in <branch>subtask1</branch> and <branch>subtask2</branch>. Be concise and ensure the subtasks are distinct and solvable. Problem: {}";
+const SOLVE_PROMPT: &str =
+    "Now, please solve the problem. Reason step-by-step. Make your response short.";
+const MERGE_PROMPT: &str =
+    "Now, please merge the two solutions into one. Make your response short.";
 const ASSISTANT_PREFIX: &str = "<|start_header_id|>assistant<|end_header_id|>\n\n";
 const STOP_TOKEN: &str = "<|eot_id|>";
 const MAX_TOKENS: usize = 256;
 
-/// Asynchronously generates branches concurrently for proposing a plan.
-async fn propose_plan(mut ctx: Context, question: &str, num_branches: usize) -> Vec<Context> {
-    let prompt = format!("{} {}", PROPOSE_PROMPT_TEMPLATE, question);
-    ctx.fill(&prompt);
-    let branch_futures = (0..num_branches).map(|_| {
-        let mut fork = ctx.fork();
-        async move {
-            fork.fill(ASSISTANT_PREFIX);
-            fork.generate_until(STOP_TOKEN, MAX_TOKENS).await;
-            fork
+// Type alias for a boxed future (single-threaded, no Send bound)
+type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
+// Parses the model's response to extract either a leaf answer or two branch subtasks.
+fn parse_response(response: &str) -> Result<(Option<String>, Option<(String, String)>), String> {
+    if let Some(start) = response.find("<leaf>") {
+        if let Some(end) = response.find("</leaf>") {
+            let answer = response[start + 6..end].trim().to_string();
+            return Ok((Some(answer), None));
         }
-    });
-    let branches: Vec<Context> = join_all(branch_futures).await.into_iter().collect();
-    branches
-}
-
-/// Asynchronously generates branches concurrently for executing a plan.
-async fn execute_plan(mut ctx: Context, num_branches: usize) -> Vec<Context> {
-    ctx.fill(EXECUTE_PROMPT);
-    let branch_futures = (0..num_branches).map(|_| {
-        let mut fork = ctx.fork();
-        async move {
-            fork.fill(ASSISTANT_PREFIX);
-            fork.generate_until(STOP_TOKEN, MAX_TOKENS).await;
-            fork
-        }
-    });
-    let branches: Vec<Context> = join_all(branch_futures).await.into_iter().collect();
-    branches
-}
-
-/// Asynchronously generates branches concurrently for reflecting on the solution.
-async fn reflect_solution(mut ctx: Context, num_branches: usize) -> Vec<Context> {
-    ctx.fill(REFLECT_PROMPT);
-    let branch_futures = (0..num_branches).map(|_| {
-        let mut fork = ctx.fork();
-        async move {
-            fork.fill(ASSISTANT_PREFIX);
-            fork.generate_until(STOP_TOKEN, MAX_TOKENS).await;
-            fork
-        }
-    });
-    let branches: Vec<Context> = join_all(branch_futures).await.into_iter().collect();
-    branches
-}
-
-async fn tree_search_branch_parallel(
-    mut init_ctx: Context,
-    question: &str,
-    num_branches: usize,
-) -> Vec<String> {
-    // Define prompts as constants for clarity
-
-    // --- Level 1: Propose Plan ---
-    let propose_prompt = format!("{} {}", PROPOSE_PROMPT_TEMPLATE, question);
-    init_ctx.fill(&propose_prompt);
-    init_ctx.fill(ASSISTANT_PREFIX);
-
-    let level1_futures = (0..num_branches).map(|_| {
-        let mut propose_ctx = init_ctx.fork(); // Fork for the first level branch
-        async move {
-            propose_ctx.generate_until(STOP_TOKEN, MAX_TOKENS).await;
-
-            // --- Level 2: Execute Plan (nested within propose future) ---
-            propose_ctx.fill(EXECUTE_PROMPT); // Add execute prompt to the *same* context
-            propose_ctx.fill(ASSISTANT_PREFIX);
-
-            let level2_futures = (0..num_branches).map(|_| {
-                let mut execute_ctx = propose_ctx.fork(); // Fork from the propose context for the second level branch
-                async move {
-                    execute_ctx.generate_until(STOP_TOKEN, MAX_TOKENS).await;
-
-                    // --- Level 3: Reflect Solution (nested within execute future) ---
-                    execute_ctx.fill(REFLECT_PROMPT); // Add reflect prompt to the *same* context
-                    execute_ctx.fill(ASSISTANT_PREFIX);
-
-                    let level3_futures = (0..num_branches).map(|_| {
-                        let mut reflect_ctx = execute_ctx.fork(); // Fork from the execute context for the third level branch (leaf)
-                        async move {
-                            reflect_ctx.generate_until(STOP_TOKEN, MAX_TOKENS).await;
-                            reflect_ctx // Return the final context for this leaf
-                        }
-                    });
-                    // Await all reflection branches stemming from this execution branch
-                    join_all(level3_futures).await
-                }
-            });
-            // Await all execution branches stemming from this proposal branch, collecting Vec<Vec<Context>>
-            join_all(level2_futures).await
-        }
-    });
-
-    // Await all proposal branches, collecting Vec<Vec<Vec<Context>>>
-    let nested_results: Vec<Vec<Vec<Context>>> = join_all(level1_futures).await;
-
-    // Flatten the results to get a list of all leaf contexts
-    let final_ctxs: Vec<Context> = nested_results
-        .into_iter()
-        .flatten() // Flattens Vec<Vec<Vec<Context>>> to Vec<Vec<Context>>
-        .flatten() // Flattens Vec<Vec<Context>> to Vec<Context>
-        .collect();
-
-    // Collect the final output text from each leaf context.
-    let outputs = final_ctxs.into_iter().map(|ctx| ctx.get_text()).collect();
-    outputs
-}
-
-async fn tree_search_naive(
-    mut init_ctx: Context,
-    question: &str,
-    num_branches: usize,
-) -> Vec<String> {
-    let propose_prompt = format!("{} {}", PROPOSE_PROMPT_TEMPLATE, question);
-
-    init_ctx.fill(&propose_prompt);
-    init_ctx.fill(ASSISTANT_PREFIX);
-
-    let leaf_futures = (0..num_branches.pow(3))
-        .map(|_| {
-            let mut ctx = init_ctx.fork();
-            async move {
-                ctx.generate_until(STOP_TOKEN, MAX_TOKENS).await;
-
-                ctx.fill(EXECUTE_PROMPT);
-                ctx.fill(ASSISTANT_PREFIX);
-                ctx.generate_until(STOP_TOKEN, MAX_TOKENS).await;
-
-                ctx.fill(REFLECT_PROMPT);
-                ctx.fill(ASSISTANT_PREFIX);
-                ctx.generate_until(STOP_TOKEN, MAX_TOKENS).await;
-
-                ctx.get_text()
+    } else {
+        let mut branches = Vec::new();
+        let mut remaining = response;
+        while let Some(start) = remaining.find("<branch>") {
+            if let Some(end) = remaining.find("</branch>") {
+                let task = remaining[start + 8..end].trim().to_string();
+                branches.push(task);
+                remaining = &remaining[end + 9..];
+            } else {
+                break;
             }
-        })
-        .collect::<Vec<_>>();
-
-    join_all(leaf_futures).await
+        }
+        if branches.len() == 2 {
+            return Ok((None, Some((branches[0].clone(), branches[1].clone()))));
+        }
+    }
+    Err("Invalid response format: expected one <leaf> or two <branch> tags".to_string())
 }
 
-/// Implements the tree search: propose a plan, execute it, then reflect on the solution.
-async fn tree_search(init_ctx: Context, question: &str, num_branches: usize) -> Vec<String> {
-    let plan_ctxs = propose_plan(init_ctx, question, num_branches).await;
+// Recursively divides a problem into subtasks, solves them, and merges the solutions.
+fn divide_and_conquer(
+    ctx: Context,
+    question: &str, // Reference with lifetime 'a
+    depth: usize,
+    max_depth: usize,
+) -> BoxFuture<String> {
+    // Return a future tied to 'a
+    Box::pin(async move {
+        let mut ctx = ctx;
+        if depth >= max_depth {
+            let solve_prompt = format!("{} {}", SOLVE_PROMPT, question);
+            ctx.fill(&solve_prompt);
+            ctx.fill(ASSISTANT_PREFIX);
+            return ctx.generate_until(STOP_TOKEN, MAX_TOKENS).await;
+        }
 
-    // Execute plan concurrently for each plan branch.
-    let exec_futures = plan_ctxs
-        .into_iter()
-        .map(|plan_ctx| execute_plan(plan_ctx, num_branches));
+        let divide_prompt = format!("{} {}", DIVIDE_PROMPT_TEMPLATE, question);
+        ctx.fill(&divide_prompt);
+        ctx.fill(ASSISTANT_PREFIX);
+        let response = ctx.generate_until(STOP_TOKEN, MAX_TOKENS).await;
 
-    let exec_results = join_all(exec_futures).await;
-    let mut solution_ctxs = Vec::new();
-    for branches in exec_results {
-        solution_ctxs.extend(branches);
-    }
+        match parse_response(&response) {
+            Ok((Some(answer), None)) => answer,
+            Ok((None, Some((task1, task2)))) => {
+                let solution1_future =
+                    divide_and_conquer(ctx.fork(), task1.as_str(), depth + 1, max_depth);
+                let solution2_future =
+                    divide_and_conquer(ctx.fork(), task2.as_str(), depth + 1, max_depth);
+                let (solution1, solution2) = futures::join!(solution1_future, solution2_future);
 
-    // Reflect on the solutions concurrently.
-    let reflect_futures = solution_ctxs
-        .into_iter()
-        .map(|sol_ctx| reflect_solution(sol_ctx, num_branches));
-    let reflect_results = join_all(reflect_futures).await;
-    let mut final_ctxs = Vec::new();
-    for branches in reflect_results {
-        final_ctxs.extend(branches);
-    }
-
-    // Collect the final output text from each context.
-    let outputs = final_ctxs.into_iter().map(|ctx| ctx.get_text()).collect();
-    outputs
+                let merge_prompt = format!(
+                    "Subtask 1 solution: {}\nSubtask 2 solution: {}\n{}",
+                    solution1, solution2, MERGE_PROMPT
+                );
+                let mut merge_ctx = ctx.fork();
+                merge_ctx.fill(&merge_prompt);
+                merge_ctx.fill(ASSISTANT_PREFIX);
+                merge_ctx.generate_until(STOP_TOKEN, MAX_TOKENS).await
+            }
+            Err(e) => format!("Error: {}", e),
+            _ => "Error: Invalid response format".to_string(),
+        }
+    })
 }
-
 #[symphony::main]
 async fn main() -> Result<(), String> {
-    // Initialize the Symphony model and a common context.
+    // Initialize the Symphony model and context
     let available_models = symphony::available_models();
-
     let model = Model::new(available_models.first().unwrap()).unwrap();
     let mut ctx = model.create_context();
     ctx.fill("<|begin_of_text|>");
     ctx.fill("<|start_header_id|>system<|end_header_id|>\n\nYou are a helpful, respectful and honest assistant.<|eot_id|>");
 
+    // Example question
     let question = "What is the sum of 123456789 and 987654321?";
-    let num_branches = 3;
+    let max_depth = 5;
 
-    //tree_search(ctx, question, num_branches).await;
-    //tree_search_branch_parallel(ctx, question, num_branches).await;\
-    tree_search_naive(ctx, question, num_branches).await;
+    // Execute Recursion-of-Thought and print the result
+    let solution_future = divide_and_conquer(ctx, question, 0, max_depth);
+    let solution = solution_future.await;
+    println!("Final solution: {}", solution);
+
     Ok(())
 }
