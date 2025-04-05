@@ -1,77 +1,87 @@
 use futures::future::join_all;
-use futures::{StreamExt, stream::FuturesUnordered}; // StreamExt is needed for `next()`
-
+use futures::{StreamExt, stream::FuturesUnordered};
 use symphony::{Context, Model};
 
-const PROPOSE_PROMPT_TEMPLATE: &str = "Could you suggest a method or approach to solve the following question? Please provide a high-level plan without doing the actual calculation. Keep it concise, around 80 words. Question: {}";
+const PROPOSAL_PROMPT: &str = "Could you suggest a method or approach to solve the following question? Please provide a high-level plan without doing the actual calculation. Keep it concise, around 80 words. Question: {}";
 const AGGREGATE_PROMPT: &str = "Please compare the following solution with the one you just provided and aggregate their ideas into a single, improved solution:\n";
-// Other constants (ASSISTANT_PREFIX, STOP_TOKEN, MAX_TOKENS) remain unchanged
 const ASSISTANT_PREFIX: &str = "<|start_header_id|>assistant<|end_header_id|>\n\n";
 const STOP_TOKEN: &str = "<|eot_id|>";
-const MAX_TOKENS: usize = 256;
 
-async fn async_aggregation(mut init_ctx: Context, question: &str) -> Vec<String> {
-    let propose_prompt = format!("{} {}", PROPOSE_PROMPT_TEMPLATE, question);
+// Main function to aggregate proposals asynchronously
+async fn aggregate_proposals_async(mut base_context: Context, question: &str) -> Vec<String> {
+    // Prepare the prompt for generating proposals
+    let propose_prompt = format!("{} {}", PROPOSAL_PROMPT, question);
+    base_context.fill(&propose_prompt);
+    base_context.fill(ASSISTANT_PREFIX);
 
-    init_ctx.fill(&propose_prompt);
-    init_ctx.fill(ASSISTANT_PREFIX);
-
-    // Gen
-    let mut aggregate_level1 = [16, 128, 32, 256, 128, 128, 16, 32]
+    // Generate proposals in parallel with varying max_tokens
+    let mut proposal_tasks = [16, 128, 32, 256, 128, 128, 16, 32]
         .into_iter()
         .map(|max_tokens| {
-            let mut ctx = init_ctx.fork();
-            async move { (ctx.generate_until(STOP_TOKEN, max_tokens).await, ctx) }
+            let mut ctx = base_context.fork();
+            async move {
+                let proposal_text = ctx.generate_until(STOP_TOKEN, max_tokens).await;
+                (proposal_text, ctx)
+            }
         })
         .collect::<FuturesUnordered<_>>();
 
-    let mut aggregate_level2 = FuturesUnordered::<_>::new();
-    let mut waiting_pair = None;
+    // First level of aggregation: pair proposals as they complete
+    let mut first_aggregation_tasks = FuturesUnordered::<_>::new();
+    let mut pending_proposal = None;
 
-    while let Some((output, mut ctx)) = aggregate_level1.next().await {
-        if waiting_pair.is_none() {
-            waiting_pair = Some(output);
+    while let Some((proposal_text, mut proposal_ctx)) = proposal_tasks.next().await {
+        if pending_proposal.is_none() {
+            pending_proposal = Some(proposal_text);
         } else {
-            let pair = waiting_pair.take().unwrap();
-            ctx.fill(AGGREGATE_PROMPT);
-            ctx.fill(&pair);
-            ctx.fill(ASSISTANT_PREFIX);
-            aggregate_level2.push(async move { (ctx.generate_until(STOP_TOKEN, 32).await, ctx) });
+            let previous_proposal = pending_proposal.take().unwrap();
+            proposal_ctx.fill(AGGREGATE_PROMPT);
+            proposal_ctx.fill(&previous_proposal);
+            proposal_ctx.fill(ASSISTANT_PREFIX);
+            first_aggregation_tasks.push(async move {
+                let aggregation_text = proposal_ctx.generate_until(STOP_TOKEN, 32).await;
+                (aggregation_text, proposal_ctx)
+            });
         }
     }
 
-    let mut aggregate_level3 = Vec::new();
-    let mut waiting_pair = None;
+    // Second level of aggregation: pair first-level aggregations
+    let mut second_aggregation_tasks = Vec::new();
+    let mut pending_aggregation = None;
 
-    while let Some((output, mut ctx)) = aggregate_level2.next().await {
-        if waiting_pair.is_none() {
-            waiting_pair = Some(output);
+    while let Some((aggregation_text, mut aggregation_ctx)) = first_aggregation_tasks.next().await {
+        if pending_aggregation.is_none() {
+            pending_aggregation = Some(aggregation_text);
         } else {
-            let pair = waiting_pair.take().unwrap();
-            ctx.fill(AGGREGATE_PROMPT);
-            ctx.fill(&pair);
-            ctx.fill(ASSISTANT_PREFIX);
-            aggregate_level3.push(async move { ctx.generate_until(STOP_TOKEN, 32).await });
+            let previous_aggregation = pending_aggregation.take().unwrap();
+            aggregation_ctx.fill(AGGREGATE_PROMPT);
+            aggregation_ctx.fill(&previous_aggregation);
+            aggregation_ctx.fill(ASSISTANT_PREFIX);
+            second_aggregation_tasks
+                .push(async move { aggregation_ctx.generate_until(STOP_TOKEN, 32).await });
         }
     }
 
-    join_all(aggregate_level3).await
+    // Collect and return the final aggregated solutions
+    join_all(second_aggregation_tasks).await
 }
 
 #[symphony::main]
 async fn main() -> Result<(), String> {
-    // Initialize the Symphony model and a common context.
+    // Initialize the model and context
     let available_models = symphony::available_models();
-
     let model = Model::new(available_models.first().unwrap()).unwrap();
     let mut ctx = model.create_context();
     ctx.fill("<|begin_of_text|>");
     ctx.fill("<|start_header_id|>system<|end_header_id|>\n\nYou are a helpful, respectful and honest assistant.<|eot_id|>");
 
+    // Example usage
     let question = "What is the sum of 123456789 and 987654321?";
+    let final_solutions = aggregate_proposals_async(ctx, question).await;
 
-    //tree_search(ctx, question, num_branches).await;
-    //tree_search_branch_parallel(ctx, question, num_branches).await;\
-    async_aggregation(ctx, question).await;
+    // Print the final aggregated solutions for demonstration
+    for (i, solution) in final_solutions.iter().enumerate() {
+        println!("Final aggregated solution {}: {}", i + 1, solution);
+    }
     Ok(())
 }

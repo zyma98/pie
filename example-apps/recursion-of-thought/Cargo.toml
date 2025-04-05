@@ -1,5 +1,5 @@
 [package]
-name = "graph-of-thought"
+name = "recursion-of-thought"
 version = "0.1.0"
 edition = "2024"
 
