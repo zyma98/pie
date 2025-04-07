@@ -6,7 +6,7 @@ from symphony import SymphonyClient, Instance  # Assuming these are defined else
 import random
 async def main():
     # Define the program name and construct the file path
-    program_name = "constrained_decoding"#"text_completion"# # # 
+    program_name = "agent_codeact"#"text_completion"# # # 
     program_path = Path(f"../example-apps/target/wasm32-wasip2/release/{program_name}.wasm")
 
     # Check if the program file exists
@@ -48,15 +48,15 @@ async def main():
         instance_start = time.monotonic()
         try:
             # Send two messages to the instance
-            await instance.send("please tell me about this natural number:" + str(random.randint(1, 1000000)))
+            #await instance.send("please tell me about this natural number:" + str(random.randint(1, 1000000)))
             #await instance.send("32") # max_num_outputs
-            await instance.send(str(NUM_PROMPTS)) # num_prompts
+            #await instance.send(str(NUM_PROMPTS)) # num_prompts
 
             # Listen for events until termination
             while True:
                 event, message = await instance.recv()
                 if event == "terminated":
-                    #print(f"Instance {instance.instance_id} terminated. Reason: {message}")
+                    print(f"Instance {instance.instance_id} terminated. Reason: {message}")
                     ...
                 else:
                     ...
