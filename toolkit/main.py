@@ -325,6 +325,94 @@ async def main_bench_agent():
     #await client.close()
     print("Client connection closed.")
     
+    
+    
+
+    
+async def main_rt_bench():
+    
+     # Define the program name and construct the file path
+    program_name = "rt_bench"#"text_completion"# # # 
+    program_path = Path(f"../example-apps/target/wasm32-wasip2/release/{program_name}.wasm")
+
+    # Check if the program file exists
+    if not program_path.exists():
+        print(f"Error: Program file not found at path: {program_path}")
+        return
+
+    # Server URI (matching the Rust code)
+    server_uri = "ws://127.0.0.1:9123"
+    print(f"Using program: {program_name}")
+
+    # Initialize and connect the client
+    client = SymphonyClient(server_uri)
+    await client.connect()
+
+    # Read the program file and compute its hash
+    with open(program_path, "rb") as f:
+        program_bytes = f.read()
+    program_hash = blake3(program_bytes).hexdigest()
+    print(f"Program file hash: {program_hash}")
+
+    # Check if the program exists on the server; upload if not
+    if not await client.program_exists(program_hash):
+        print("Program not found on server, uploading now...")
+        await client.upload_program(program_bytes)
+        print("Program uploaded successfully!")
+    for num_instances in [897]:
+        print(f"Running experiment with {num_instances} instances")
+
+        # Repeat the experiment 10 times and collect all latencies
+        all_latencies = []
+        for _ in range(5):
+            instances = []
+            for _ in range(num_instances):
+                instance = await client.launch_instance(program_hash)
+                instances.append(instance)
+
+            # Define a function to handle each instance's send/receive operations and measure latency
+            async def handle_instance(instance: Instance):
+                try:
+                    await instance.send("ping")
+                    # Listen for events until termination
+                    micros = 0
+                    while True:
+                        try:
+                            event, message = await instance.recv()
+                            if event == "terminated":
+                                ...
+                            else:
+                                micros += int(message)
+                                return micros
+                        except asyncio.TimeoutError:
+                            return 0
+                except Exception as e:
+                    return None
+
+            # Record overall start time before launching tasks
+            overall_start = time.monotonic()
+
+            # Create concurrent tasks for each instance and collect latencies
+            tasks = [asyncio.create_task(handle_instance(instance)) for instance in instances]
+            latencies = await asyncio.gather(*tasks)
+
+            # Record overall end time after tasks complete
+            overall_end = time.monotonic()
+
+            # Filter out any None values from failed instances
+            valid_latencies = [lat for lat in latencies if lat > 0]
+            all_latencies.extend(valid_latencies)
+
+        # Calculate the average latency over all experiments
+        if all_latencies:
+            # 24 is pings per instance
+            average_latency = (sum(all_latencies) / 24) / len(all_latencies)
+            print(f"Average latency per instance over 10 runs: {average_latency} microseconds")
+        else:
+            print("No valid latency measurements collected.")
+
+
+
 
 if __name__ == "__main__":
-    asyncio.run(main_bench_agent())
+    asyncio.run(main_rt_bench())
