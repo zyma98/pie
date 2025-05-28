@@ -68,7 +68,7 @@ def handle_request(d: Driver, request: l4m_pb2.Request) -> l4m_pb2.Response | No
 
 
 def main_run():
-    device = "cuda:1"
+    device = "cuda:0"
 
     # quantization_config = TorchAoConfig("int4_weight_only", group_size=128)
     # , quantization_config=quantization_config
