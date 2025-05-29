@@ -20,17 +20,26 @@ import zmq
 class ManagementCLI:
     """CLI tool for interacting with the Symphony Management Service."""
     
-    def __init__(self, service_endpoint: str = None):
-        if service_endpoint is None:
-            # Load default endpoint from config
+    def __init__(self, config_path: str = None):
+        # Load endpoint from config
+        if config_path is None:
             config_path = os.path.join(os.path.dirname(__file__), 'config.json')
-            try:
-                with open(config_path) as f:
-                    config = json.load(f)
-                service_endpoint = config["endpoints"]["cli_management"]
-            except (FileNotFoundError, KeyError):
-                # Fallback to hardcoded endpoint if config not found
-                service_endpoint = "ipc:///tmp/symphony-cli"
+        
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+            service_endpoint = config["endpoints"]["cli_management"]
+        except FileNotFoundError:
+            print(f"Error: Configuration file not found at {config_path}")
+            print("Please provide a valid configuration file using --config")
+            sys.exit(1)
+        except KeyError as e:
+            print(f"Error: Missing required configuration key {e} in {config_path}")
+            print("Please ensure the configuration file contains 'endpoints.cli_management'")
+            sys.exit(1)
+        except json.JSONDecodeError as e:
+            print(f"Error: Invalid JSON in configuration file {config_path}: {e}")
+            sys.exit(1)
         
         self.service_endpoint = service_endpoint
         self.context = zmq.Context()
@@ -230,8 +239,8 @@ class ManagementCLI:
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(description="Symphony Management CLI")
-    parser.add_argument("--endpoint", default="ipc:///tmp/symphony-ipc",
-                       help="Management service endpoint")
+    parser.add_argument("--config", 
+                       help="Path to configuration file (default: config.json in script directory)")
     
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
     
@@ -239,7 +248,7 @@ def main():
     start_parser = subparsers.add_parser("start-service", 
                                         help="Start the management service")
     start_parser.add_argument("--daemonize", action="store_true",
-                             help="Run service in background")
+                             help="Run service in background", default=True)
     
     # stop-service command
     subparsers.add_parser("stop-service", 
@@ -270,7 +279,7 @@ def main():
         return 1
     
     # Create CLI instance
-    with ManagementCLI(service_endpoint=args.endpoint) as cli:
+    with ManagementCLI(config_path=args.config) as cli:
         # Execute command
         success = True
         

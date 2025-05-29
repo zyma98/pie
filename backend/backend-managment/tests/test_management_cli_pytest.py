@@ -32,9 +32,9 @@ def real_config():
 
 
 @pytest.fixture
-def cli(real_config):
+def cli():
     """Create a ManagementCLI instance for testing using real config."""
-    return ManagementCLI(service_endpoint=real_config["endpoints"]["cli_management"])
+    return ManagementCLI()
 
 
 @pytest.fixture
@@ -54,7 +54,7 @@ class TestManagementCLI:
     
     def test_cli_initialization(self, real_config):
         """Test CLI initialization."""
-        cli = ManagementCLI(real_config["endpoints"]["cli_management"])
+        cli = ManagementCLI()
         assert cli.service_endpoint == real_config["endpoints"]["cli_management"]
         assert cli.context is not None
         
@@ -355,7 +355,7 @@ class TestManagementCLI:
             assert result is False
             captured = capsys.readouterr()
             assert "not running" in captured.out
-            
+
     def test_unload_model_error(self, cli, capsys):
         """Test model unloading with error."""
         with patch.object(cli, '_is_service_running') as mock_running, \
@@ -371,3 +371,49 @@ class TestManagementCLI:
             assert result is False
             captured = capsys.readouterr()
             assert "Model not found" in captured.out
+
+    def test_cli_missing_config_file(self, tmp_path):
+        """Test CLI with missing configuration file."""
+        missing_config_path = str(tmp_path / "missing_config.json")
+        
+        with pytest.raises(SystemExit):
+            ManagementCLI(config_path=missing_config_path)
+    
+    def test_cli_invalid_json_config(self, tmp_path):
+        """Test CLI with invalid JSON configuration file."""
+        invalid_config_path = tmp_path / "invalid_config.json"
+        invalid_config_path.write_text("{ invalid json")
+        
+        with pytest.raises(SystemExit):
+            ManagementCLI(config_path=str(invalid_config_path))
+    
+    def test_cli_missing_endpoint_in_config(self, tmp_path):
+        """Test CLI with configuration file missing endpoint."""
+        config_data = {
+            "model_backends": {
+                "llama3": "l4m_backend.py"
+            }
+            # Missing endpoints section
+        }
+        config_path = tmp_path / "no_endpoint_config.json"
+        config_path.write_text(json.dumps(config_data))
+        
+        with pytest.raises(SystemExit):
+            ManagementCLI(config_path=str(config_path))
+
+    def test_cli_custom_config_path(self, tmp_path):
+        """Test CLI with custom configuration file path."""
+        config_data = {
+            "endpoints": {
+                "client_handshake": "ipc:///tmp/test-symphony-ipc",
+                "cli_management": "ipc:///tmp/test-symphony-cli"
+            },
+            "model_backends": {
+                "llama3": "l4m_backend.py"
+            }
+        }
+        config_path = tmp_path / "custom_config.json"
+        config_path.write_text(json.dumps(config_data))
+        
+        cli = ManagementCLI(config_path=str(config_path))
+        assert cli.service_endpoint == "ipc:///tmp/test-symphony-cli"

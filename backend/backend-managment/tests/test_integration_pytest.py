@@ -36,12 +36,8 @@ class TestIntegration:
     
     def test_service_cli_status_integration(self, real_config):
         """Test service and CLI status integration."""
-        # Load config to get CLI endpoint
-        with open(real_config) as f:
-            config = json.load(f)
-        
         service = ManagementService(config_path=real_config)
-        cli = ManagementCLI(service_endpoint=config["endpoints"]["cli_management"])
+        cli = ManagementCLI(config_path=real_config)
         
         # Initialize service sockets without starting main loop
         assert service.initialize_sockets() is True
@@ -90,12 +86,8 @@ class TestIntegration:
         
         mock_popen.return_value = mock_process
         
-        # Load config to get CLI endpoint
-        with open(real_config) as f:
-            config = json.load(f)
-        
         service = ManagementService(config_path=real_config)
-        cli = ManagementCLI(service_endpoint=config["endpoints"]["cli_management"])
+        cli = ManagementCLI(config_path=real_config)
         
         # Initialize service sockets without starting main loop
         assert service.initialize_sockets() is True
@@ -138,12 +130,8 @@ class TestIntegration:
     @patch('management_service.subprocess.Popen')
     def test_service_cli_load_invalid_model_integration(self, mock_popen, real_config):
         """Test service and CLI load model integration with invalid model name."""
-        # Load config to get CLI endpoint
-        with open(real_config) as f:
-            config = json.load(f)
-        
         service = ManagementService(config_path=real_config)
-        cli = ManagementCLI(service_endpoint=config["endpoints"]["cli_management"])
+        cli = ManagementCLI(config_path=real_config)
         
         # Initialize service sockets without starting main loop
         assert service.initialize_sockets() is True
@@ -178,12 +166,8 @@ class TestIntegration:
     
     def test_service_cli_stop_integration(self, real_config):
         """Test service and CLI stop integration."""
-        # Load config to get CLI endpoint
-        with open(real_config) as f:
-            config = json.load(f)
-        
         service = ManagementService(config_path=real_config)
-        cli = ManagementCLI(service_endpoint=config["endpoints"]["cli_management"])
+        cli = ManagementCLI(config_path=real_config)
         
         # Initialize service sockets without starting main loop
         assert service.initialize_sockets() is True
@@ -214,12 +198,8 @@ class TestIntegration:
     
     def test_multiple_cli_commands(self, real_config):
         """Test multiple CLI commands in sequence."""
-        # Load config to get CLI endpoint
-        with open(real_config) as f:
-            config = json.load(f)
-        
         service = ManagementService(config_path=real_config)
-        cli = ManagementCLI(service_endpoint=config["endpoints"]["cli_management"])
+        cli = ManagementCLI(config_path=real_config)
         
         # Initialize service sockets without starting main loop
         assert service.initialize_sockets() is True
@@ -290,7 +270,7 @@ class TestIntegration:
                 time.sleep(0.1)
                 
                 # Verify service is still running by sending valid request
-                cli = ManagementCLI(service_endpoint=config["endpoints"]["cli_management"])
+                cli = ManagementCLI(config_path=real_config)
                 result = cli.status()
                 assert result is True
                 
