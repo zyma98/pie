@@ -1,0 +1,16 @@
+{
+  "model_backends": {
+    "llama": "l4m_backend.py",
+    "l4m": "l4m_backend.py",
+    "deepseek": "deepseek_backend.py"
+  },
+  "endpoints": {
+    "client_handshake": "ipc:///tmp/symphony-ipc",
+    "cli_management": "ipc:///tmp/symphony-cli"
+  },
+  "logging": {
+    "level": "INFO",
+    "format": "%(asctime)s [%(levelname)8s] %(name)s: %(message)s",
+    "date_format": "%Y-%m-%d %H:%M:%S"
+  }
+}
