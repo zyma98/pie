@@ -5,15 +5,14 @@
     <img alt="Pie: Programmable serving system for emerging LLM applications"
          src="https://pie-project.org/images/pie-light.svg"
          width="30%">
-    <p>
-    <strong>High-performance, programmable LLM serving</strong>
-  </p>
   </picture>
 
 [Getting started] | [Learn] | [Documentation] | [Contributing]
 </div>
 
-This is the main source code repository for [pie], a programmable inference engine for LLM applications
+[Pie] is a high-performance, programmable LLM serving system that empowers you to design and deploy custom inference logic and optimization strategies.
+
+---
 
 [pie]: https://pie-project.org/
 [Getting Started]: https://pie-project.org/learn/get-started
