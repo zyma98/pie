@@ -6,7 +6,6 @@ Unit tests for the Symphony Management CLI using pytest.
 import os
 import sys
 import json
-import tempfile
 import pytest
 from unittest.mock import Mock, patch, MagicMock
 import zmq
@@ -18,9 +17,24 @@ from management_cli import ManagementCLI
 
 
 @pytest.fixture
-def cli():
-    """Create a ManagementCLI instance for testing."""
-    return ManagementCLI(service_endpoint="ipc:///tmp/test-symphony-cli")
+def real_config():
+    """Use the real config file for testing."""
+    config_file = os.path.join(os.path.dirname(__file__), '..', 'config.json')
+    
+    # Verify the config file exists
+    if not os.path.exists(config_file):
+        pytest.skip(f"Config file not found: {config_file}")
+    
+    with open(config_file) as f:
+        config = json.load(f)
+    
+    yield config
+
+
+@pytest.fixture
+def cli(real_config):
+    """Create a ManagementCLI instance for testing using real config."""
+    return ManagementCLI(service_endpoint=real_config["endpoints"]["cli_management"])
 
 
 @pytest.fixture
@@ -38,16 +52,16 @@ def mock_zmq_socket():
 class TestManagementCLI:
     """Test the ManagementCLI class."""
     
-    def test_cli_initialization(self):
+    def test_cli_initialization(self, real_config):
         """Test CLI initialization."""
-        cli = ManagementCLI("ipc:///tmp/custom-endpoint")
-        assert cli.service_endpoint == "ipc:///tmp/custom-endpoint"
+        cli = ManagementCLI(real_config["endpoints"]["cli_management"])
+        assert cli.service_endpoint == real_config["endpoints"]["cli_management"]
         assert cli.context is not None
         
-    def test_cli_default_endpoint(self):
-        """Test CLI with default endpoint."""
+    def test_cli_default_endpoint(self, real_config):
+        """Test CLI with default endpoint from config."""
         cli = ManagementCLI()
-        assert cli.service_endpoint == "ipc:///tmp/symphony-cli"
+        assert cli.service_endpoint == real_config["endpoints"]["cli_management"]
         
     @patch('management_cli.zmq.Context')
     def test_send_command_success(self, mock_context, cli, mock_zmq_socket):
@@ -201,8 +215,8 @@ class TestManagementCLI:
             "endpoint": "ipc:///tmp/test",
             "models": [
                 {
-                    "name": "test-model",
-                    "type": "llama",
+                    "name": "Llama-3.1-8B-Instruct",
+                    "type": "llama3",
                     "endpoint": "ipc:///tmp/model-123",
                     "uptime": 300
                 }
@@ -220,7 +234,7 @@ class TestManagementCLI:
             assert result is True
             captured = capsys.readouterr()
             assert "Service Status: running" in captured.out
-            assert "test-model" in captured.out
+            assert "Llama-3.1-8B-Instruct" in captured.out
             assert "5 minutes" in captured.out
             
     def test_status_no_models(self, cli, capsys):
@@ -265,7 +279,7 @@ class TestManagementCLI:
                 "data": {"endpoint": "ipc:///tmp/model-123"}
             }
             
-            result = cli.load_model("test-model")
+            result = cli.load_model("Llama-3.1-8B-Instruct")
             
             assert result is True
             captured = capsys.readouterr()
@@ -283,7 +297,7 @@ class TestManagementCLI:
                 "data": {"endpoint": "ipc:///tmp/model-123"}
             }
             
-            result = cli.load_model("test-model", "/path/to/config.json")
+            result = cli.load_model("Llama-3.1-8B-Instruct", "/path/to/config.json")
             
             assert result is True
             # Check that config path was passed in parameters
@@ -325,7 +339,7 @@ class TestManagementCLI:
         with patch.object(cli, '_send_command') as mock_send:
             mock_send.return_value = {"success": True}
             
-            result = cli.unload_model("test-model")
+            result = cli.unload_model("Llama-3.1-8B-Instruct")
             
             assert result is True
             captured = capsys.readouterr()

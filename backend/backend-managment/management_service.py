@@ -93,6 +93,11 @@ class ManagementService:
         # Model type to backend script mapping (loaded from config)
         self.model_backends = self.config["model_backends"]
         
+        # Model name to type mapping (loaded from config)
+        self.model_type_mapping = {}
+        for model_info in self.config.get("supported_models", []):
+            self.model_type_mapping[model_info["name"]] = model_info["type"]
+
         # ZMQ setup
         self.context = zmq.Context()
         self.client_router = None  # For client handshakes
@@ -121,9 +126,49 @@ class ManagementService:
             sys.exit(1)
     
     def _get_default_backend_path(self) -> str:
-        """Get the default path to backend scripts."""
-        current_dir = Path(__file__).parent
-        return str(current_dir.parent / "backend-flashinfer")
+        """Get the default path to backend scripts.
+        
+        This method tries to locate the backend-flashinfer directory using
+        multiple strategies to ensure it works regardless of how the service
+        is invoked (from CLI, tests, or different working directories).
+        """
+        # Strategy 1: Use the file's location to find backend directory
+        # This works when the file structure is intact
+        current_file_dir = Path(__file__).parent.resolve()
+        backend_dir = current_file_dir.parent / "backend-flashinfer"
+        
+        if backend_dir.exists():
+            return str(backend_dir)
+        
+        # Strategy 2: Look for backend directory relative to current working directory
+        # This handles cases where the service is run from the project root
+        cwd_backend = Path.cwd() / "backend" / "backend-flashinfer"
+        if cwd_backend.exists():
+            return str(cwd_backend)
+        
+        # Strategy 3: Walk up the directory tree to find the symphony project root
+        # Look for characteristic files/directories that indicate project root
+        current_path = current_file_dir
+        for _ in range(5):  # Limit search depth to avoid infinite loops
+            # Check if this looks like the symphony project root
+            if ((current_path / "backend").exists() and 
+                (current_path / "engine").exists() and
+                (current_path / "example-apps").exists()):
+                
+                potential_backend = current_path / "backend" / "backend-flashinfer"
+                if potential_backend.exists():
+                    return str(potential_backend)
+            
+            # Move up one directory
+            parent = current_path.parent
+            if parent == current_path:  # Reached filesystem root
+                break
+            current_path = parent
+        
+        # Strategy 4: Return the original calculated path as fallback
+        # Even if it doesn't exist, let the calling code handle the error
+        print(f"Warning: Could not find backend-flashinfer directory, using fallback path: {backend_dir}")
+        return str(backend_dir)
     
     def _setup_logging(self):
         """Setup logging configuration."""
@@ -398,8 +443,28 @@ class ManagementService:
                 "error": "model_name parameter required"
             }
         
+        # Validate model exists in configuration early
         try:
-            endpoint = self._get_or_create_model_instance(model_name, config_path)
+            model_type = self._get_model_type(model_name)
+            if model_type not in self.model_backends:
+                return {
+                    "correlation_id": command.correlation_id,
+                    "success": False,
+                    "error": f"Backend for model type '{model_type}' not configured"
+                }
+        except ValueError as e:
+            return {
+                "correlation_id": command.correlation_id,
+                "success": False,
+                "error": str(e)
+            }
+        
+        # Config path should be ignored as config is fixed at service launch time
+        if config_path:
+            self.logger.warning(f"Ignoring config_path parameter in load-model command: {config_path}")
+        
+        try:
+            endpoint = self._get_or_create_model_instance(model_name, None)
             return {
                 "correlation_id": command.correlation_id,
                 "success": True,
@@ -469,7 +534,12 @@ class ManagementService:
     def _create_model_instance(self, model_name: str, config_path: str = None) -> Optional[str]:
         """Create a new model backend instance."""
         # Determine model type and backend script
-        model_type = self._get_model_type(model_name)
+        try:
+            model_type = self._get_model_type(model_name)
+        except ValueError as e:
+            self.logger.error(f"Failed to determine model type: {e}")
+            return None
+            
         if model_type not in self.model_backends:
             self.logger.error(f"Unknown model type: {model_type}")
             return None
@@ -553,12 +623,27 @@ class ManagementService:
             return None
     
     def _get_model_type(self, model_name: str) -> str:
-        """Determine model type from model name."""
-        # Simple heuristic for now
-        if "deepseek" in model_name.lower():
-            return "deepseek"
-        else:
-            return "llama"  # Default to llama/l4m
+        """Determine model type from model name using configuration mapping."""
+        # Try exact match with model name (case-sensitive)
+        if model_name in self.model_type_mapping:
+            return self.model_type_mapping[model_name]
+        
+        # If no exact match found, check for similar names with different capitalization
+        similar_names = []
+        for config_model_name in self.model_type_mapping.keys():
+            if model_name.lower() == config_model_name.lower():
+                similar_names.append(config_model_name)
+        
+        # If found similar names with different capitalization, suggest them
+        if similar_names:
+            if len(similar_names) == 1:
+                raise ValueError(f"Unknown model '{model_name}' - not found in configuration. Similar model name found. Do you mean: {similar_names[0]}?")
+            else:
+                similar_list = ", ".join(similar_names)
+                raise ValueError(f"Unknown model '{model_name}' - not found in configuration. Similar model names found. Do you mean: {similar_list}?")
+        
+        # If no similar names found, raise a generic error
+        raise ValueError(f"Unknown model '{model_name}' - not found in configuration")
     
     def _check_model_instances_health(self):
         """Check health of all model instances and clean up dead ones."""

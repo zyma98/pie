@@ -7,7 +7,6 @@ import os
 import sys
 import json
 import time
-import tempfile
 import threading
 import pytest
 from unittest.mock import Mock, patch
@@ -21,97 +20,28 @@ from management_cli import ManagementCLI
 
 
 @pytest.fixture
-def temp_config():
-    """Create a temporary config file for integration testing."""
-    temp_dir = tempfile.mkdtemp()
-    config_file = os.path.join(temp_dir, "integration_test_config.json")
+def real_config():
+    """Use the real config file for integration testing."""
+    config_file = os.path.join(os.path.dirname(__file__), '..', 'config.json')
     
-    test_config = {
-        "model_backends": {
-            "llama": "test_backend.py",
-            "test": "test_backend.py"
-        },
-        "endpoints": {
-            "client_handshake": "ipc:///tmp/test-integration-client",
-            "cli_management": "ipc:///tmp/test-integration-cli"
-        },
-        "logging": {
-            "level": "ERROR",  # Clean output during tests
-            "format": "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-        }
-    }
+    # Verify the config file exists
+    if not os.path.exists(config_file):
+        pytest.skip(f"Config file not found: {config_file}")
     
-    with open(config_file, 'w') as f:
-        json.dump(test_config, f)
-        
     yield config_file
-    
-    # Cleanup
-    if os.path.exists(config_file):
-        os.unlink(config_file)
-    os.rmdir(temp_dir)
-
-
-@pytest.fixture
-def mock_backend_script(temp_config):
-    """Create a mock backend script for testing."""
-    # Load config to get backend path
-    with open(temp_config) as f:
-        config = json.load(f)
-    
-    service = ManagementService(config_path=temp_config)
-    backend_dir = service.backend_base_path
-    os.makedirs(backend_dir, exist_ok=True)
-    
-    backend_script = os.path.join(backend_dir, "test_backend.py")
-    
-    # Create a simple mock backend that just sleeps
-    backend_content = '''#!/usr/bin/env python3
-import sys
-import time
-import argparse
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--ipc-endpoint", required=True)
-    parser.add_argument("--config")
-    args = parser.parse_args()
-    
-    print(f"Mock backend started on {args.ipc_endpoint}")
-    
-    # Just sleep to simulate a running backend
-    try:
-        while True:
-            time.sleep(0.1)
-    except KeyboardInterrupt:
-        print("Mock backend shutting down")
-
-if __name__ == "__main__":
-    main()
-'''
-    
-    with open(backend_script, 'w') as f:
-        f.write(backend_content)
-    
-    # Make it executable
-    os.chmod(backend_script, 0o755)
-    
-    yield backend_script
-    
-    # Cleanup
-    if os.path.exists(backend_script):
-        os.unlink(backend_script)
-    if os.path.exists(backend_dir):
-        os.rmdir(backend_dir)
 
 
 class TestIntegration:
     """Integration tests for Management Service and CLI."""
     
-    def test_service_cli_status_integration(self, temp_config):
+    def test_service_cli_status_integration(self, real_config):
         """Test service and CLI status integration."""
-        service = ManagementService(config_path=temp_config)
-        cli = ManagementCLI(service_endpoint="ipc:///tmp/test-integration-cli")
+        # Load config to get CLI endpoint
+        with open(real_config) as f:
+            config = json.load(f)
+        
+        service = ManagementService(config_path=real_config)
+        cli = ManagementCLI(service_endpoint=config["endpoints"]["cli_management"])
         
         # Initialize service sockets without starting main loop
         assert service.initialize_sockets() is True
@@ -147,7 +77,7 @@ class TestIntegration:
             time.sleep(0.2)
     
     @patch('management_service.subprocess.Popen')
-    def test_service_cli_load_model_integration(self, mock_popen, temp_config, mock_backend_script):
+    def test_service_cli_load_model_integration(self, mock_popen, real_config):
         """Test service and CLI load model integration."""
         # Mock the subprocess for backend creation
         mock_process = Mock()
@@ -160,8 +90,12 @@ class TestIntegration:
         
         mock_popen.return_value = mock_process
         
-        service = ManagementService(config_path=temp_config)
-        cli = ManagementCLI(service_endpoint="ipc:///tmp/test-integration-cli")
+        # Load config to get CLI endpoint
+        with open(real_config) as f:
+            config = json.load(f)
+        
+        service = ManagementService(config_path=real_config)
+        cli = ManagementCLI(service_endpoint=config["endpoints"]["cli_management"])
         
         # Initialize service sockets without starting main loop
         assert service.initialize_sockets() is True
@@ -178,33 +112,78 @@ class TestIntegration:
         time.sleep(0.1)
         
         try:
-            # Test CLI load model command
-            result = cli.load_model("test-model")
+            # Test CLI load model command using a backend from real config
+            result = cli.load_model("Llama-3.1-8B-Instruct")
             assert result is True
             
             # Verify model was loaded in service
-            assert "test-model" in service.model_instances
+            assert "Llama-3.1-8B-Instruct" in service.model_instances
             
             # Test CLI status shows loaded model
             result = cli.status()
             assert result is True
             
             # Test CLI unload model command
-            result = cli.unload_model("test-model")
+            result = cli.unload_model("Llama-3.1-8B-Instruct")
             assert result is True
             
             # Verify model was unloaded
-            assert "test-model" not in service.model_instances
+            assert "Llama-3.1-8B-Instruct" not in service.model_instances
             
         finally:
             # Stop service
             service.shutdown_requested = True
             time.sleep(0.1)
     
-    def test_service_cli_stop_integration(self, temp_config):
+    @patch('management_service.subprocess.Popen')
+    def test_service_cli_load_invalid_model_integration(self, mock_popen, real_config):
+        """Test service and CLI load model integration with invalid model name."""
+        # Load config to get CLI endpoint
+        with open(real_config) as f:
+            config = json.load(f)
+        
+        service = ManagementService(config_path=real_config)
+        cli = ManagementCLI(service_endpoint=config["endpoints"]["cli_management"])
+        
+        # Initialize service sockets without starting main loop
+        assert service.initialize_sockets() is True
+        
+        # Create a background thread to handle messages
+        def message_handler():
+            while not service.shutdown_requested:
+                service.handle_single_message(timeout=100)
+        
+        handler_thread = threading.Thread(target=message_handler, daemon=True)
+        handler_thread.start()
+        
+        # Give service time to initialize
+        time.sleep(0.1)
+        
+        try:
+            # Test CLI load model command with invalid model name
+            result = cli.load_model("invalid-model")
+            assert result is False
+            
+            # Test CLI load model command with similar but wrong case
+            result = cli.load_model("llama-3.1-8b-instruct")
+            assert result is False
+            
+            # Verify no models were loaded
+            assert len(service.model_instances) == 0
+            
+        finally:
+            # Stop service
+            service.shutdown_requested = True
+            time.sleep(0.1)
+    
+    def test_service_cli_stop_integration(self, real_config):
         """Test service and CLI stop integration."""
-        service = ManagementService(config_path=temp_config)
-        cli = ManagementCLI(service_endpoint="ipc:///tmp/test-integration-cli")
+        # Load config to get CLI endpoint
+        with open(real_config) as f:
+            config = json.load(f)
+        
+        service = ManagementService(config_path=real_config)
+        cli = ManagementCLI(service_endpoint=config["endpoints"]["cli_management"])
         
         # Initialize service sockets without starting main loop
         assert service.initialize_sockets() is True
@@ -233,10 +212,14 @@ class TestIntegration:
         # Verify service is stopped
         assert service.shutdown_requested is True
     
-    def test_multiple_cli_commands(self, temp_config):
+    def test_multiple_cli_commands(self, real_config):
         """Test multiple CLI commands in sequence."""
-        service = ManagementService(config_path=temp_config)
-        cli = ManagementCLI(service_endpoint="ipc:///tmp/test-integration-cli")
+        # Load config to get CLI endpoint
+        with open(real_config) as f:
+            config = json.load(f)
+        
+        service = ManagementService(config_path=real_config)
+        cli = ManagementCLI(service_endpoint=config["endpoints"]["cli_management"])
         
         # Initialize service sockets without starting main loop
         assert service.initialize_sockets() is True
@@ -269,9 +252,13 @@ class TestIntegration:
             service.shutdown_requested = True
             time.sleep(0.1)
     
-    def test_service_resilience(self, temp_config):
+    def test_service_resilience(self, real_config):
         """Test service resilience to malformed CLI requests."""
-        service = ManagementService(config_path=temp_config)
+        # Load config to get CLI endpoint
+        with open(real_config) as f:
+            config = json.load(f)
+        
+        service = ManagementService(config_path=real_config)
         
         # Initialize service sockets without starting main loop
         assert service.initialize_sockets() is True
@@ -294,7 +281,7 @@ class TestIntegration:
             req_socket.setsockopt(zmq.RCVTIMEO, 500)
             
             try:
-                req_socket.connect("ipc:///tmp/test-integration-cli")
+                req_socket.connect(config["endpoints"]["cli_management"])
                 
                 # Send invalid JSON
                 req_socket.send(b"invalid json")
@@ -303,7 +290,7 @@ class TestIntegration:
                 time.sleep(0.1)
                 
                 # Verify service is still running by sending valid request
-                cli = ManagementCLI(service_endpoint="ipc:///tmp/test-integration-cli")
+                cli = ManagementCLI(service_endpoint=config["endpoints"]["cli_management"])
                 result = cli.status()
                 assert result is True
                 

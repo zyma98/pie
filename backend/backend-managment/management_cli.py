@@ -20,7 +20,18 @@ import zmq
 class ManagementCLI:
     """CLI tool for interacting with the Symphony Management Service."""
     
-    def __init__(self, service_endpoint: str = "ipc:///tmp/symphony-cli"):
+    def __init__(self, service_endpoint: str = None):
+        if service_endpoint is None:
+            # Load default endpoint from config
+            config_path = os.path.join(os.path.dirname(__file__), 'config.json')
+            try:
+                with open(config_path) as f:
+                    config = json.load(f)
+                service_endpoint = config["endpoints"]["cli_management"]
+            except (FileNotFoundError, KeyError):
+                # Fallback to hardcoded endpoint if config not found
+                service_endpoint = "ipc:///tmp/symphony-cli"
+        
         self.service_endpoint = service_endpoint
         self.context = zmq.Context()
     
