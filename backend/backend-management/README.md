@@ -130,13 +130,9 @@ The CLI includes comprehensive unit tests using pytest:
 
 ```bash
 # Run all tests
-python -m pytest tests/
+python -m pytest tests/ -v
 
 # Run CLI-specific tests
 python -m pytest tests/test_management_cli_pytest.py
-
-# Run with verbose output
-python -m pytest tests/ -v
 ```
-
 _Note that the tests may take some time to run, especially if they involve starting/stopping the management service (e.g., integration tests)._

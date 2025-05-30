@@ -34,6 +34,23 @@ def real_config():
 class TestIntegration:
     """Integration tests for Management Service and CLI."""
     
+    def _safe_cleanup_cli(self, cli):
+        """Safely cleanup a CLI instance."""
+        if cli:
+            try:
+                cli.cleanup()
+            except Exception as e:
+                print(f"Warning: Error cleaning up CLI: {e}")
+    
+    def _safe_cleanup_service(self, service):
+        """Safely cleanup a service instance."""
+        if service:
+            try:
+                service.shutdown_requested = True
+                service._cleanup()
+            except Exception as e:
+                print(f"Warning: Error cleaning up service: {e}")
+    
     def test_service_cli_status_integration(self, real_config):
         """Test service and CLI status integration."""
         service = ManagementService(config_path=real_config)
@@ -66,6 +83,13 @@ class TestIntegration:
             assert result is True
             
         finally:
+            # Clean up CLI first
+            try:
+                cli.cleanup()
+            except:
+                pass
+                
+            # Then clean up service
             service.shutdown_requested = True
             time.sleep(0.2)  # Give time for cleanup
             # Stop service
@@ -123,6 +147,12 @@ class TestIntegration:
             assert "Llama-3.1-8B-Instruct" not in service.model_instances
             
         finally:
+            # Clean up CLI first
+            try:
+                cli.cleanup()
+            except:
+                pass
+                
             # Stop service
             service.shutdown_requested = True
             time.sleep(0.1)
@@ -160,6 +190,12 @@ class TestIntegration:
             assert len(service.model_instances) == 0
             
         finally:
+            # Clean up CLI first
+            try:
+                cli.cleanup()
+            except:
+                pass
+                
             # Stop service
             service.shutdown_requested = True
             time.sleep(0.1)
@@ -195,6 +231,12 @@ class TestIntegration:
         
         # Verify service is stopped
         assert service.shutdown_requested is True
+        
+        # Clean up CLI
+        try:
+            cli.cleanup()
+        except:
+            pass
     
     def test_multiple_cli_commands(self, real_config):
         """Test multiple CLI commands in sequence."""
@@ -228,6 +270,12 @@ class TestIntegration:
             assert "Unknown command" in response.get("error", "")
             
         finally:
+            # Clean up CLI first
+            try:
+                cli.cleanup()
+            except:
+                pass
+                
             # Stop service
             service.shutdown_requested = True
             time.sleep(0.1)
@@ -323,6 +371,12 @@ class TestIntegration:
             # Note: stop_service may return False if service was already stopped
             # The important thing is that it doesn't crash
             time.sleep(1)  # Allow shutdown time
+            
+            # Clean up CLI
+            try:
+                cli.cleanup()
+            except:
+                pass
 
     def test_ipc_endpoint_consistency(self, real_config):
         """Verify CLI and service use consistent IPC endpoints"""
@@ -630,6 +684,8 @@ class TestEndToEndIntegration:
     def test_concurrent_model_operations(self, real_config):
         """Test concurrent model loading/unloading operations"""
         service = None
+        cli1 = None
+        cli2 = None
         
         try:
             service = ManagementService(config_path=real_config)
@@ -674,6 +730,19 @@ class TestEndToEndIntegration:
                 pass
                 
         finally:
+            # Clean up CLI instances first
+            if cli1:
+                try:
+                    cli1.cleanup()
+                except:
+                    pass
+            if cli2:
+                try:
+                    cli2.cleanup()
+                except:
+                    pass
+                    
+            # Then clean up service
             if service:
                 service.shutdown_requested = True
                 service._cleanup()
@@ -690,6 +759,7 @@ class TestEndToEndIntegration:
         initial_sockets = self._get_symphony_sockets()
         
         service = None
+        cli = None
         try:
             # Start and use system
             service = ManagementService(config_path=real_config)
@@ -709,16 +779,27 @@ class TestEndToEndIntegration:
                     unload_result = cli.unload_model(model_name)
                     time.sleep(1)
             
-            # Stop service
+            # Stop service gracefully
             service.shutdown_requested = True
-            service._cleanup()
-            service = None
+            # Don't call _cleanup() here - let the service thread handle it
             time.sleep(3)
+            service = None
             
         finally:
+            # Clean up CLI first
+            if cli:
+                try:
+                    cli.cleanup()
+                except:
+                    pass
+                    
+            # Then clean up service  
             if service:
-                service.shutdown_requested = True
-                service._cleanup()
+                try:
+                    service.shutdown_requested = True
+                    service._cleanup()
+                except:
+                    pass
             self._cleanup_existing_processes()
             time.sleep(2)
         
@@ -738,6 +819,7 @@ class TestEndToEndIntegration:
     def test_error_recovery_and_robustness(self, real_config):
         """Test system robustness under various error conditions"""
         service = None
+        cli = None
         
         try:
             service = ManagementService(config_path=real_config)
@@ -768,9 +850,20 @@ class TestEndToEndIntegration:
             assert final_status is True
             
         finally:
+            # Clean up CLI first
+            if cli:
+                try:
+                    cli.cleanup()
+                except:
+                    pass
+                    
+            # Then clean up service
             if service:
-                service.shutdown_requested = True
-                service._cleanup()
+                try:
+                    service.shutdown_requested = True
+                    service._cleanup()
+                except:
+                    pass
             self._cleanup_existing_processes()
 
     def _test_backend_communication(self, config_path):
