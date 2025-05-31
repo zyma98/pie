@@ -1,5 +1,6 @@
 import time
 import argparse
+import warnings
 
 import torch
 import zmq
@@ -11,27 +12,39 @@ import l4m_vision_pb2
 import ping_pb2
 import handshake_pb2
 
-from common import ceil_div, handle_request # Updated import
+from common import ceil_div, handle_request
 from driver import Driver
-from llama import LlamaForCausalLM
-from config import VERSION, MODEL_NAME, FULL_MODEL_NAME, NUM_TOKENS_IN_BLOCK, MAX_NUM_PAGES, MAX_NUM_EMBEDS
+from qwen import QwenForCausalLM
+from config import MAX_NUM_PAGES, MAX_NUM_EMBEDS
 
 
 def main_run():
     # Parse command line arguments
-    parser = argparse.ArgumentParser(description='L4M Backend Server')
+    parser = argparse.ArgumentParser(description='Qwen Backend Server')
     parser.add_argument('--ipc-endpoint', type=str, default='ipc:///tmp/symphony-ipc', 
-                        help='IPC endpoint to bind to')
+                       help='IPC endpoint to bind to')
     parser.add_argument('--model-name', type=str, required=True,
-                        help='Model name to load (e.g., deepseek-ai/DeepSeek-V3, meta-llama/Llama-3.1-8B-Instruct)')
+                       help='Model name to load (e.g., deepseek-ai/DeepSeek-R1-0528-Qwen3-8B, Qwen/Qwen3-8B-Instruct)')
     args = parser.parse_args()
     
     device = "cuda:0"
 
-    # quantization_config = TorchAoConfig("int4_weight_only", group_size=128)
-    # , quantization_config=quantization_config
-    model = LlamaForCausalLM.from_pretrained(
-        args.model_name, torch_dtype="bfloat16", device_map=device)
+    # Load model using QwenForCausalLM wrapper
+    # This works for Qwen3 models including DeepSeek-R1-0528-Qwen3-8B
+    print(f"Loading Qwen3 model: {args.model_name}")
+    
+    # Suppress rope_scaling warnings during model loading
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="Unrecognized keys in `rope_scaling`")
+        
+        model = QwenForCausalLM.from_pretrained(
+            args.model_name, 
+            torch_dtype="bfloat16", 
+            device_map=device,
+            trust_remote_code=True
+        )
+    
+    print(f"Model loaded and wrapped successfully")
 
     endpoint = args.ipc_endpoint
 
@@ -44,7 +57,7 @@ def main_run():
     print(f"Server listening on {endpoint}")
 
     connected_clients = {}
-    protocols = ["l4m", "l4m-vision", "ping"]
+    protocols = ["l4m", "ping"]
     idle_start = time.time()
     while True:
         # ROUTER sockets receive multipart messages.
@@ -98,12 +111,6 @@ def main_run():
 
                 # print(f"elapsed time: {(time.time() - start) * 1000}ms")
 
-
-            elif protocol == "l4m-vision":
-
-                request = l4m_vision_pb2.Request()
-                request.ParseFromString(payload)
-
             elif protocol == "ping":
 
                 ping = ping_pb2.Ping()
@@ -115,8 +122,6 @@ def main_run():
                 ).SerializeToString()
 
                 router.send_multipart([client_identity, protocol_raw, pong])
-
-
 
         else:
             # do a handshake
@@ -130,7 +135,7 @@ def main_run():
             except:
                 print("Invalid handshake message.")
                 # send an error message back to the client
-                router.send_multipart([client_identity, b"\x00"])
+                router.send_multipart([client_identity, b"\\x00"])
                 continue
 
             # send available protocols to the client

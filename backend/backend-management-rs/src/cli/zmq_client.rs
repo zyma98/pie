@@ -4,25 +4,28 @@ use crate::types::{ManagementCommand, ManagementResponse};
 use crate::config::Config;
 use std::collections::HashMap;
 use super::cli::Commands;
+use zeromq::{DealerSocket, Socket, SocketRecv, SocketSend, ZmqMessage};
+use tokio::time::{timeout, Duration};
 
 pub struct ZmqClient {
-    socket: zmq::Socket,
+    socket: DealerSocket,
     endpoint: String,
 }
 
 impl ZmqClient {
-    pub fn new(service_endpoint: &str) -> Result<Self, String> {
-        let context = zmq::Context::new();
-        let socket = context.socket(zmq::DEALER).map_err(|e| e.to_string())?;
+    pub async fn new(service_endpoint: &str) -> Result<Self, String> {
+        let mut socket = DealerSocket::new();
         
-        // Set timeouts for send/recv (3 seconds for faster feedback)
-        socket.set_rcvtimeo(3000).map_err(|e| e.to_string())?;
-        socket.set_sndtimeo(3000).map_err(|e| e.to_string())?;
-        
-        // Set linger to 0 so socket closes immediately
-        socket.set_linger(0).map_err(|e| e.to_string())?;
-        
-        socket.connect(service_endpoint).map_err(|e| e.to_string())?;
+        // Connect to the service with timeout
+        match timeout(Duration::from_secs(3), socket.connect(service_endpoint)).await {
+            Ok(Ok(())) => {},
+            Ok(Err(e)) => {
+                return Err(format!("Failed to connect to {}: {}", service_endpoint, e));
+            },
+            Err(_) => {
+                return Err(format!("Timeout: Could not connect to service at {} (is the service running?)", service_endpoint));
+            }
+        }
         
         Ok(Self { 
             socket, 
@@ -30,34 +33,50 @@ impl ZmqClient {
         })
     }
 
-    pub fn send_command(&self, command: ManagementCommand) -> Result<ManagementResponse, String> {
+    pub async fn send_command(&mut self, command: ManagementCommand) -> Result<ManagementResponse, String> {
         let serialized_cmd = serde_json::to_string(&command)
             .map_err(|e| format!("Failed to serialize command: {}", e))?;
 
-        // Try to send the command
-        match self.socket.send(&serialized_cmd, 0) {
-            Ok(_) => {},
-            Err(zmq::Error::EAGAIN) => {
-                return Err(format!("Timeout: Could not send command to service at {} (is the service running?)", self.endpoint));
-            },
-            Err(e) => {
+        let msg = ZmqMessage::from(serialized_cmd.into_bytes());
+
+        // Try to send the command with timeout
+        match timeout(Duration::from_secs(3), self.socket.send(msg)).await {
+            Ok(Ok(())) => {},
+            Ok(Err(e)) => {
                 return Err(format!("Failed to send command to {}: {}", self.endpoint, e));
+            },
+            Err(_) => {
+                return Err(format!("Timeout: Could not send command to service at {} (is the service running?)", self.endpoint));
             }
         }
 
-        // Try to receive the response
-        let mut msg = zmq::Message::new();
-        match self.socket.recv(&mut msg, 0) {
-            Ok(_) => {
-                let response_str = msg.as_str().ok_or_else(|| "Received non-UTF8 response".to_string())?;
+        // Determine timeout based on command type - model loading needs much longer
+        let receive_timeout = if command.command == "load-model" {
+            Duration::from_secs(60) // 60 seconds for model loading
+        } else {
+            Duration::from_secs(10) // 10 seconds for other operations
+        };
+
+        // Try to receive the response with appropriate timeout
+        match timeout(receive_timeout, self.socket.recv()).await {
+            Ok(Ok(response_msg)) => {
+                let response_bytes = response_msg.get(0)
+                    .ok_or_else(|| "Received empty response".to_string())?;
+                let response_str = std::str::from_utf8(response_bytes)
+                    .map_err(|_| "Received non-UTF8 response".to_string())?;
                 serde_json::from_str(response_str)
                     .map_err(|e| format!("Failed to deserialize response: {}", e))
             },
-            Err(zmq::Error::EAGAIN) => {
-                Err(format!("Timeout: No response from service at {} (is the service running?)", self.endpoint))
-            },
-            Err(e) => {
+            Ok(Err(e)) => {
                 Err(format!("Failed to receive response from {}: {}", self.endpoint, e))
+            },
+            Err(_) => {
+                let timeout_msg = if command.command == "load-model" {
+                    "Timeout: Model loading took longer than 60 seconds"
+                } else {
+                    "Timeout: No response from service within 10 seconds"
+                };
+                Err(format!("{} (endpoint: {})", timeout_msg, self.endpoint))
             }
         }
     }
@@ -73,12 +92,12 @@ fn get_service_endpoint() -> String {
     "ipc:///tmp/symphony-cli".to_string()
 }
 
-pub fn send_command_to_service(command_enum: Commands, json: bool) -> Result<String, String> {
+pub async fn send_command_to_service(command_enum: Commands, json: bool) -> Result<String, String> {
     // 1. Determine the service endpoint
     let endpoint = get_service_endpoint();
 
     // 2. Create a ZmqClient instance
-    let client = ZmqClient::new(&endpoint)?;
+    let mut client = ZmqClient::new(&endpoint).await?;
 
     // 3. Convert cli::Commands enum to a types::ManagementCommand
     let core_command = match &command_enum {
@@ -104,7 +123,7 @@ pub fn send_command_to_service(command_enum: Commands, json: bool) -> Result<Str
     };
 
     // 4. Send the command and get a response
-    match client.send_command(core_command) {
+    match client.send_command(core_command).await {
         Ok(response) => {
             if json {
                 // Return raw JSON response

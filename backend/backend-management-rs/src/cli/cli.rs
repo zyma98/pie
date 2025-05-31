@@ -47,7 +47,7 @@ pub async fn process_cli_command(args: CliArgs) {
         }
         other_command => {
             // Use ZMQ client for all other commands
-            match zmq_client::send_command_to_service(other_command, args.json) {
+            match zmq_client::send_command_to_service(other_command, args.json).await {
                 Ok(response) => println!("{}", response),
                 Err(e) => {
                     if args.json {
@@ -63,7 +63,7 @@ pub async fn process_cli_command(args: CliArgs) {
 
 async fn handle_start_service(daemonize: bool, json: bool) {
     // First check if service is already running
-    match zmq_client::send_command_to_service(Commands::Status, json) {
+    match zmq_client::send_command_to_service(Commands::Status, json).await {
         Ok(_) => {
             if json {
                 println!("{}", serde_json::json!({"status": "already_running", "message": "Service is already running"}));

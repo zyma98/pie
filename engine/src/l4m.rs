@@ -30,7 +30,7 @@ macro_rules! try_trap {
         }
     };
 }
-pub const PROTOCOLS: [&str; 2] = ["l4m", "l4m-vision"]; // for future backward compatibility
+// Protocol definitions - backends dynamically report their supported protocols
 const PROTOCOL_BASE: usize = 0;
 const PROTOCOL_VISION: usize = 1;
 
@@ -1002,12 +1002,13 @@ where
     B: Backend + 'static,
 {
     fn new(backend: B, event_table: Arc<DashMap<u32, Vec<Event>>>) -> Self {
-        let protocol_ids = PROTOCOLS
+        let protocol_ids = backend
+            .supported_protocols()
             .iter()
             .map(|protoc| {
                 backend
                     .protocol_index(protoc)
-                    .expect("Failed to get protocol index")
+                    .expect(&format!("Failed to get protocol index: UnsupportedProtocol(\"{}\")", protoc))
             })
             .collect::<Vec<u8>>();
 
@@ -1095,8 +1096,12 @@ pub struct Simulator {
 impl Simulator {
     pub fn new() -> Self {
         Self {
-            protocols: PROTOCOLS.iter().map(|e| e.to_string()).collect(),
+            protocols: vec!["l4m".to_string()],
         }
+    }
+
+    pub fn new_with_protocols(protocols: Vec<String>) -> Self {
+        Self { protocols }
     }
 }
 
