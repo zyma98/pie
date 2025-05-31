@@ -8,6 +8,10 @@ use super::zmq_client;
 pub struct CliArgs {
     #[clap(subcommand)]
     pub command: Commands,
+    
+    /// Output responses in JSON format
+    #[clap(long, global = true)]
+    pub json: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -39,25 +43,33 @@ pub enum Commands {
 pub async fn process_cli_command(args: CliArgs) {
     match args.command {
         Commands::StartService { daemonize } => {
-            handle_start_service(daemonize).await;
+            handle_start_service(daemonize, args.json).await;
         }
         other_command => {
             // Use ZMQ client for all other commands
-            match zmq_client::send_command_to_service(other_command) {
+            match zmq_client::send_command_to_service(other_command, args.json) {
                 Ok(response) => println!("{}", response),
-                Err(e) => eprintln!("Error: {}", e),
+                Err(e) => {
+                    if args.json {
+                        println!("{}", serde_json::json!({"error": e}));
+                    } else {
+                        eprintln!("Error: {}", e);
+                    }
+                }
             }
         }
     }
 }
 
-async fn handle_start_service(daemonize: bool) {
-    println!("Start service command received (daemonize: {})", daemonize);
-    
+async fn handle_start_service(daemonize: bool, json: bool) {
     // First check if service is already running
-    match zmq_client::send_command_to_service(Commands::Status) {
+    match zmq_client::send_command_to_service(Commands::Status, json) {
         Ok(_) => {
-            println!("Service is already running.");
+            if json {
+                println!("{}", serde_json::json!({"status": "already_running", "message": "Service is already running"}));
+            } else {
+                println!("Service is already running.");
+            }
             return;
         }
         Err(_) => {
@@ -65,12 +77,88 @@ async fn handle_start_service(daemonize: bool) {
         }
     }
     
-    // TODO: Implement actual service starting logic
-    // This could involve:
-    // 1. Finding the symphony-management-service binary
-    // 2. Starting it as a subprocess (possibly daemonized)
-    // 3. Waiting for it to be ready
+    // Find the symphony-management-service binary
+    let binary_path = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|p| p.join("symphony-management-service")))
+        .filter(|path| path.exists())
+        .unwrap_or_else(|| std::path::PathBuf::from("./target/release/symphony-management-service"));
     
-    println!("Starting service... (not yet implemented)");
-    println!("Please manually run: symphony-management-service");
+    if !binary_path.exists() {
+        let error_msg = format!("Could not find symphony-management-service binary at: {}", binary_path.display());
+        if json {
+            println!("{}", serde_json::json!({"status": "error", "message": error_msg}));
+        } else {
+            eprintln!("Error: {}", error_msg);
+        }
+        return;
+    }
+    
+    // Start the service
+    let mut command = std::process::Command::new(&binary_path);
+    
+    if daemonize {
+        // For daemonization, we could use nohup or implement proper daemonization
+        // For now, we'll start it in the background
+        command.stdout(std::process::Stdio::null())
+               .stderr(std::process::Stdio::null())
+               .stdin(std::process::Stdio::null());
+    }
+    
+    match command.spawn() {
+        Ok(mut child) => {
+            if daemonize {
+                // For daemonized mode, we don't wait for the child
+                if json {
+                    println!("{}", serde_json::json!({
+                        "status": "started", 
+                        "message": "Service started in background",
+                        "pid": child.id()
+                    }));
+                } else {
+                    println!("✓ Service started in background (PID: {})", child.id());
+                }
+            } else {
+                if json {
+                    println!("{}", serde_json::json!({
+                        "status": "starting", 
+                        "message": "Service starting...",
+                        "pid": child.id()
+                    }));
+                } else {
+                    println!("✓ Service starting... (PID: {})", child.id());
+                    println!("Press Ctrl+C to stop the service");
+                }
+                
+                // Wait for the child process
+                match child.wait() {
+                    Ok(status) => {
+                        if json {
+                            println!("{}", serde_json::json!({
+                                "status": "exited", 
+                                "exit_code": status.code()
+                            }));
+                        } else {
+                            println!("Service exited with code: {:?}", status.code());
+                        }
+                    }
+                    Err(e) => {
+                        if json {
+                            println!("{}", serde_json::json!({"status": "error", "message": format!("Failed to wait for service: {}", e)}));
+                        } else {
+                            eprintln!("Error waiting for service: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            let error_msg = format!("Failed to start service: {}", e);
+            if json {
+                println!("{}", serde_json::json!({"status": "error", "message": error_msg}));
+            } else {
+                eprintln!("Error: {}", error_msg);
+            }
+        }
+    }
 }

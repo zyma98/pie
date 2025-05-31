@@ -108,6 +108,7 @@ impl service::ManagementServiceTrait for ManagementServiceImpl {
         // Create shutdown channel
         let (shutdown_tx, _shutdown_rx) = mpsc::channel::<()>(1);
         let shutdown_tx_clone = shutdown_tx.clone();
+        let shutdown_tx_for_commands = shutdown_tx.clone();
         self.shutdown_tx = Some(shutdown_tx);
 
         // Start ZMQ handler in background
@@ -146,8 +147,24 @@ impl service::ManagementServiceTrait for ManagementServiceImpl {
         tokio::spawn(async move {
             while is_running.load(std::sync::atomic::Ordering::SeqCst) {
                 if let Some((command, response_tx)) = command_rx.recv().await {
-                    let response = Self::process_command(command, &process_manager, &model_instances).await;
-                    let _ = response_tx.send(response).await;
+                    // Handle stop-service command specially
+                    if command.command == "stop-service" {
+                        info!("Received stop-service command, initiating graceful shutdown");
+                        let response = ManagementResponse::success(
+                            command.correlation_id.clone(),
+                            Some(serde_json::json!({
+                                "message": "Service shutdown initiated"
+                            }))
+                        );
+                        let _ = response_tx.send(response).await;
+                        
+                        // Trigger shutdown
+                        is_running.store(false, std::sync::atomic::Ordering::SeqCst);
+                        let _ = shutdown_tx_for_commands.send(()).await;
+                    } else {
+                        let response = Self::process_command(command, &process_manager, &model_instances).await;
+                        let _ = response_tx.send(response).await;
+                    }
                 } else {
                     break;
                 }
