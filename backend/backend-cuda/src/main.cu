@@ -11,7 +11,7 @@
 // FlashInfer headers
 // Adjust path based on your lib/flashinfer/include structure
 
-#include "flashinfer_ops.cuh" // KEPT as per your request!
+#include "flashinfer_ops.cuh"
 
 // --- Helper for checking CUDA errors (from common.h or define here) ---
 #ifndef CUDA_CHECK
