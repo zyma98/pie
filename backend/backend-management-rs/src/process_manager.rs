@@ -40,7 +40,7 @@ impl ProcessManager {
         // Strategy 1: Look relative to current executable
         if let Ok(exe_path) = std::env::current_exe() {
             if let Some(parent) = exe_path.parent() {
-                let backend_path = parent.join("../../backend/backend-flashinfer");
+                let backend_path = parent.join("../../backend/backend-python");
                 if backend_path.exists() {
                     return backend_path;
                 }
@@ -50,7 +50,7 @@ impl ProcessManager {
         // Strategy 2: Look relative to current working directory
         let cwd_backend = std::env::current_dir()
             .unwrap_or_default()
-            .join("backend/backend-flashinfer");
+            .join("backend/backend-python");
         
         if cwd_backend.exists() {
             return cwd_backend;
@@ -64,7 +64,7 @@ impl ProcessManager {
                 && current_path.join("engine").exists() 
                 && current_path.join("example-apps").exists() {
                 
-                let potential_backend = current_path.join("backend/backend-flashinfer");
+                let potential_backend = current_path.join("backend/backend-python");
                 if potential_backend.exists() {
                     return potential_backend;
                 }
@@ -78,8 +78,8 @@ impl ProcessManager {
         }
 
         // Fallback: return the expected path even if it doesn't exist
-        warn!("Could not find backend-flashinfer directory, using fallback");
-        PathBuf::from("backend/backend-flashinfer")
+        warn!("Could not find backend-python directory, using fallback");
+        PathBuf::from("backend/backend-python")
     }
 
     /// Spawn a new backend process for a model
