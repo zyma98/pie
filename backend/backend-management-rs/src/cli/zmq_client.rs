@@ -50,9 +50,13 @@ impl ZmqClient {
             }
         }
 
-        // Determine timeout based on command type - model loading needs much longer
+        // Determine timeout based on command type - model loading and installation need much longer
         let receive_timeout = if command.command == "load-model" {
             Duration::from_secs(60) // 60 seconds for model loading
+        } else if command.command == "install-model" {
+            Duration::from_secs(600) // 10 minutes for model installation
+        } else if command.command == "uninstall-model" {
+            Duration::from_secs(60) // 60 seconds for model uninstallation
         } else {
             Duration::from_secs(10) // 10 seconds for other operations
         };
@@ -73,6 +77,10 @@ impl ZmqClient {
             Err(_) => {
                 let timeout_msg = if command.command == "load-model" {
                     "Timeout: Model loading took longer than 60 seconds"
+                } else if command.command == "install-model" {
+                    "Timeout: Model installation took longer than 10 minutes"
+                } else if command.command == "uninstall-model" {
+                    "Timeout: Model uninstallation took longer than 60 seconds"
                 } else {
                     "Timeout: No response from service within 10 seconds"
                 };
@@ -116,6 +124,21 @@ pub async fn send_command_to_service(command_enum: Commands, json: bool) -> Resu
             ManagementCommand::new("unload-model".to_string(), params)
         }
         Commands::ListModels => ManagementCommand::new("list-models".to_string(), HashMap::new()),
+        Commands::InstallModel { model_name, local_name, force } => {
+            let mut params = HashMap::new();
+            params.insert("model_name".to_string(), serde_json::Value::String(model_name.clone()));
+            if let Some(name) = local_name {
+                params.insert("local_name".to_string(), serde_json::Value::String(name.clone()));
+            }
+            params.insert("force".to_string(), serde_json::Value::Bool(*force));
+            ManagementCommand::new("install-model".to_string(), params)
+        }
+        Commands::UninstallModel { model_name, force } => {
+            let mut params = HashMap::new();
+            params.insert("model_name".to_string(), serde_json::Value::String(model_name.clone()));
+            params.insert("force".to_string(), serde_json::Value::Bool(*force));
+            ManagementCommand::new("uninstall-model".to_string(), params)
+        }
         Commands::StopService => ManagementCommand::new("stop-service".to_string(), HashMap::new()),
         Commands::StartService { .. } => {
             return Err("StartService command should be handled locally, not sent to service".to_string());
@@ -185,12 +208,15 @@ fn format_response_pretty(command: &Commands, data: &serde_json::Value) -> Resul
             Ok(result)
         }
         Commands::ListModels => {
-            if let Some(models) = data.get("models").and_then(|m| m.as_array()) {
-                if models.is_empty() {
-                    Ok("No models currently loaded".to_string())
+            let mut result = String::new();
+            
+            // Show loaded models
+            if let Some(loaded_models) = data.get("loaded_models").and_then(|m| m.as_array()) {
+                if loaded_models.is_empty() {
+                    result.push_str("Loaded Models: None\n");
                 } else {
-                    let mut result = String::from("Loaded Models:\n");
-                    for model in models {
+                    result.push_str("Loaded Models:\n");
+                    for model in loaded_models {
                         if let Some(model_obj) = model.as_object() {
                             let model_name = model_obj.get("model_name")
                                 .and_then(|n| n.as_str())
@@ -213,16 +239,46 @@ fn format_response_pretty(command: &Commands, data: &serde_json::Value) -> Resul
                                 result.push_str(&format!(" | Endpoint: {}", endpoint));
                             }
                             result.push('\n');
-                        } else if let Some(name) = model.as_str() {
-                            // Fallback for simple string models
-                            result.push_str(&format!("  • {}\n", name));
                         }
                     }
-                    Ok(result.trim_end().to_string())
                 }
             } else {
-                Ok("No models currently loaded".to_string())
+                result.push_str("Loaded Models: None\n");
             }
+            
+            result.push('\n');
+            
+            // Show installed models
+            if let Some(installed_models) = data.get("installed_models").and_then(|m| m.as_array()) {
+                if installed_models.is_empty() {
+                    result.push_str("Installed Models: None");
+                } else {
+                    result.push_str("Installed Models:\n");
+                    for model in installed_models {
+                        if let Some(model_obj) = model.as_object() {
+                            let model_name = model_obj.get("model_name")
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("unknown");
+                            let local_name = model_obj.get("local_name")
+                                .and_then(|n| n.as_str())
+                                .unwrap_or(model_name);
+                            let model_type = model_obj.get("model_type")
+                                .and_then(|t| t.as_str())
+                                .unwrap_or("unknown");
+                            let path = model_obj.get("path")
+                                .and_then(|p| p.as_str())
+                                .unwrap_or("unknown");
+                            
+                            result.push_str(&format!("  • {} ({})\n", local_name, model_type));
+                            result.push_str(&format!("    Original: {} | Path: {}\n", model_name, path));
+                        }
+                    }
+                }
+            } else {
+                result.push_str("Installed Models: None");
+            }
+            
+            Ok(result.trim_end().to_string())
         }
         Commands::LoadModel { model_name, .. } => {
             if let Some(message) = data.get("message") {
@@ -247,6 +303,61 @@ fn format_response_pretty(command: &Commands, data: &serde_json::Value) -> Resul
         }
         Commands::StartService { .. } => {
             Ok("✓ Service started".to_string())
+        }
+        Commands::InstallModel { model_name, local_name, .. } => {
+            if let Some(status) = data.get("status").and_then(|s| s.as_str()) {
+                match status {
+                    "installed" => {
+                        let path = data.get("path")
+                            .and_then(|p| p.as_str())
+                            .unwrap_or("unknown path");
+                        let model_type = data.get("model_type")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("unknown");
+                        Ok(format!("✅ Model '{}' installed successfully as '{}'\n  Type: {}\n  Path: {}", 
+                                 model_name, local_name.as_deref().unwrap_or(model_name), model_type, path))
+                    }
+                    "already_installed" => {
+                        let path = data.get("path")
+                            .and_then(|p| p.as_str())
+                            .unwrap_or("unknown path");
+                        Ok(format!("ℹ️  Model '{}' is already installed\n  Path: {}", model_name, path))
+                    }
+                    _ => {
+                        if let Some(message) = data.get("message") {
+                            Ok(format!("✅ {}", message.as_str().unwrap_or("Model installation completed")))
+                        } else {
+                            Ok(format!("✅ Model '{}' installation completed", model_name))
+                        }
+                    }
+                }
+            } else {
+                Ok(format!("✅ Model '{}' installation completed\n\n📝 Note: Installation progress is shown in the management service logs.\n   Run 'journalctl -f -u symphony-management' to follow progress in real-time.", model_name))
+            }
+        }
+        Commands::UninstallModel { model_name, .. } => {
+            if let Some(status) = data.get("status").and_then(|s| s.as_str()) {
+                match status {
+                    "uninstalled" => {
+                        let path = data.get("path")
+                            .and_then(|p| p.as_str())
+                            .unwrap_or("unknown path");
+                        Ok(format!("✓ Model '{}' uninstalled successfully\n  Removed: {}", model_name, path))
+                    }
+                    "not_found" => {
+                        Ok(format!("ℹ Model '{}' was not installed", model_name))
+                    }
+                    _ => {
+                        if let Some(message) = data.get("message") {
+                            Ok(format!("✓ {}", message.as_str().unwrap_or("Model uninstallation completed")))
+                        } else {
+                            Ok(format!("✓ Model '{}' uninstallation completed", model_name))
+                        }
+                    }
+                }
+            } else {
+                Ok(format!("✓ Model '{}' uninstallation completed", model_name))
+            }
         }
     }
 }

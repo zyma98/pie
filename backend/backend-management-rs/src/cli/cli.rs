@@ -37,6 +37,25 @@ pub enum Commands {
     },
     /// List loaded models
     ListModels,
+    /// Install a model from HuggingFace Hub
+    InstallModel {
+        /// Model name or path on HuggingFace Hub (e.g., meta-llama/Llama-3.1-8B-Instruct)
+        model_name: String,
+        /// Local name to use for the model (optional, defaults to last part of model_name)
+        #[clap(long)]
+        local_name: Option<String>,
+        /// Force reinstall even if model already exists
+        #[clap(long, action)]
+        force: bool,
+    },
+    /// Uninstall a model from local storage
+    UninstallModel {
+        /// Model name to uninstall
+        model_name: String,
+        /// Force uninstall even if model is currently loaded
+        #[clap(long, action)]
+        force: bool,
+    },
     // TODO: Add other commands as needed, e.g., health, logs
 }
 

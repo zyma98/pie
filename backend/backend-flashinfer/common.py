@@ -44,7 +44,7 @@ def handle_request(d: Driver, request: l4m_pb2.Request) -> l4m_pb2.Response | No
     elif command == "get_info":
         return l4m_pb2.Response(correlation_id=request.correlation_id, get_info=l4m_pb2.GetInfoResponse(
             version=VERSION, # This needs to be defined or passed in
-            model_name=MODEL_NAME, # This needs to be defined or passed in
+            model_name=d.model_name_or_path, # Use the stored model name
             block_size=NUM_TOKENS_IN_BLOCK, # This needs to be defined or passed in
             num_available_blocks=d.max_num_pages,
             num_available_embeddings=d.max_num_embeds,

@@ -1,6 +1,8 @@
 import time
 import argparse
 
+import os
+import warnings
 import torch
 import zmq
 from transformers import TorchAoConfig, AutoTokenizer
@@ -28,10 +30,29 @@ def main_run():
     
     device = "cuda:0"
 
-    # quantization_config = TorchAoConfig("int4_weight_only", group_size=128)
-    # , quantization_config=quantization_config
-    model = LlamaForCausalLM.from_pretrained(
-        args.model_name, torch_dtype="bfloat16", device_map=device)
+    # Determine Symphony models cache directory
+    models_cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "symphony", "models")
+    # Local model path uses '--' in place of '/'
+    local_dir = os.path.join(models_cache_dir, args.model_name.replace("/", "--"))
+    if os.path.isdir(local_dir):
+        print(f"Loading Llama model from local cache: {local_dir}")
+        model_source = local_dir
+        local_only = True
+    else:
+        print(f"Loading Llama model from HuggingFace Hub: {args.model_name}")
+        model_source = args.model_name
+        local_only = False
+
+    # Suppress rope_scaling warnings if present
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="Unrecognized keys in `rope_scaling`")
+        model = LlamaForCausalLM.from_pretrained(
+            model_source,
+            torch_dtype="bfloat16",
+            device_map=device,
+            cache_dir=models_cache_dir,
+            local_files_only=local_only,
+        )
 
     endpoint = args.ipc_endpoint
 

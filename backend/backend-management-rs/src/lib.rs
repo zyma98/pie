@@ -12,6 +12,7 @@ pub mod zmq_handler;
 pub mod proto;
 pub mod cli;
 pub mod utils;
+pub mod model_installer;
 
 // Re-export commonly used types
 pub use config::Config;
@@ -19,6 +20,7 @@ pub use error::{ManagementError, Result};
 pub use service::{ManagementServiceTrait, ServiceStatus};
 pub use types::{ManagementCommand, ManagementResponse, ModelInstance, ModelInstanceStatus};
 pub use utils::{cleanup_ipc_socket, cleanup_all_symphony_sockets};
+pub use model_installer::{ModelInstaller, ModelInfo};
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -46,6 +48,8 @@ pub struct ManagementServiceImpl {
     command_tx: Option<mpsc::Sender<(ManagementCommand, mpsc::Sender<ManagementResponse>)>>,
     /// Shutdown signal sender
     shutdown_tx: Option<mpsc::Sender<()>>,
+    /// Model installer for downloading models from HuggingFace
+    model_installer: model_installer::ModelInstaller,
 }
 
 impl service::ManagementServiceFactory for ManagementServiceImpl {
@@ -90,6 +94,7 @@ impl service::ManagementServiceFactory for ManagementServiceImpl {
             command_tx: None,
             shutdown_tx: None,
             started_at: SystemTime::now(),
+            model_installer: model_installer::ModelInstaller::new(None),
         })
     }
 }
@@ -148,6 +153,7 @@ impl service::ManagementServiceTrait for ManagementServiceImpl {
         // Start command processing loop
         let process_manager = self.process_manager.clone();
         let model_instances = Arc::clone(&self.model_instances);
+        let model_installer = self.model_installer.clone();
         let is_running = self.is_running.clone();
         
         tokio::spawn(async move {
@@ -168,7 +174,7 @@ impl service::ManagementServiceTrait for ManagementServiceImpl {
                         is_running.store(false, std::sync::atomic::Ordering::SeqCst);
                         let _ = shutdown_tx_for_commands.send(()).await;
                     } else {
-                        let response = Self::process_command(command, &process_manager, &model_instances).await;
+                        let response = Self::process_command(command, &process_manager, &model_instances, &model_installer).await;
                         let _ = response_tx.send(response).await;
                     }
                 } else {
@@ -362,7 +368,7 @@ impl service::ManagementServiceTrait for ManagementServiceImpl {
         let process_manager = &self.process_manager;
         let model_instances = Arc::clone(&self.model_instances);
         
-        Ok(Self::process_command(command, process_manager, &model_instances).await)
+        Ok(Self::process_command(command, process_manager, &model_instances, &self.model_installer).await)
     }
 
     async fn handle_client_handshake(&mut self, request: &[u8]) -> Result<Vec<u8>> {
@@ -505,6 +511,7 @@ impl ManagementServiceImpl {
         command: ManagementCommand,
         process_manager: &process_manager::ProcessManager,
         model_instances: &Arc<RwLock<HashMap<String, ModelInstance>>>,
+        model_installer: &model_installer::ModelInstaller,
     ) -> ManagementResponse {
         debug!("Processing command: {}", command.command);
 
@@ -625,24 +632,115 @@ impl ManagementServiceImpl {
                 }
             }
             "list-models" => {
-                let instances = model_instances.read().unwrap();
-                let models: Vec<_> = instances.iter().map(|(name, instance)| {
-                    serde_json::json!({
-                        "model_name": name,
-                        "model_type": instance.model_type,
-                        "endpoint": instance.endpoint,
-                        "pid": instance.pid(),
-                        "uptime": instance.uptime().as_secs(),
-                        "is_alive": instance.process.id().is_some(),
-                    })
-                }).collect();
+                // Get loaded models
+                let loaded_models: Vec<_> = {
+                    let instances = model_instances.read().unwrap();
+                    instances.iter().map(|(name, instance)| {
+                        serde_json::json!({
+                            "model_name": name,
+                            "model_type": instance.model_type,
+                            "endpoint": instance.endpoint,
+                            "pid": instance.pid(),
+                            "uptime": instance.uptime().as_secs(),
+                            "is_alive": instance.process.id().is_some(),
+                        })
+                    }).collect()
+                }; // Drop the guard here
+
+                // Get installed models
+                let installed_models = match model_installer.list_installed_models().await {
+                    Ok(models) => models.into_iter().map(|model_info| {
+                        serde_json::json!({
+                            "model_name": model_info.model_name,
+                            "local_name": model_info.local_name,
+                            "model_type": model_info.model_type,
+                            "path": model_info.path,
+                            "tokenizer_path": model_info.tokenizer_path,
+                            "installed_at": model_info.installed_at,
+                            "architectures": model_info.architectures
+                        })
+                    }).collect::<Vec<_>>(),
+                    Err(e) => {
+                        warn!("Failed to list installed models: {}", e);
+                        Vec::new()
+                    }
+                };
 
                 ManagementResponse::success(
                     command.correlation_id.clone(),
                     Some(serde_json::json!({
-                        "models": models
+                        "loaded_models": loaded_models,
+                        "installed_models": installed_models
                     }))
                 )
+            }
+            "install-model" => {
+                let model_name = command.params.get("model_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+
+                if model_name.is_empty() {
+                    return ManagementResponse::error(
+                        command.correlation_id.clone(),
+                        "Missing model_name parameter".to_string()
+                    );
+                }
+
+                let local_name = command.params.get("local_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| {
+                        // Extract model name from HF path (e.g., "meta-llama/Llama-3.1-8B" -> "Llama-3.1-8B")
+                        model_name.split('/').last().unwrap_or(model_name)
+                    });
+
+                let force = command.params.get("force")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+
+                // Install the model using HuggingFace transformers
+                match Self::install_model_from_hf(model_installer, model_name, local_name, force).await {
+                    Ok(installation_info) => {
+                        ManagementResponse::success(
+                            command.correlation_id.clone(),
+                            Some(installation_info)
+                        )
+                    }
+                    Err(e) => {
+                        ManagementResponse::error(
+                            command.correlation_id.clone(),
+                            format!("Failed to install model: {}", e)
+                        )
+                    }
+                }
+            }
+            "uninstall-model" => {
+                let model_name = match command.params.get("model_name").and_then(|v| v.as_str()) {
+                    Some(name) => name,
+                    None => return ManagementResponse::error(
+                        command.correlation_id.clone(),
+                        "Missing required parameter: model_name".to_string()
+                    ),
+                };
+
+                let force = command.params.get("force")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+
+                // Uninstall the model
+                match Self::uninstall_model_from_storage(model_installer, model_name, force).await {
+                    Ok(uninstall_info) => {
+                        ManagementResponse::success(
+                            command.correlation_id.clone(),
+                            Some(uninstall_info)
+                        )
+                    }
+                    Err(e) => {
+                        ManagementResponse::error(
+                            command.correlation_id.clone(),
+                            format!("Failed to uninstall model: {}", e)
+                        )
+                    }
+                }
             }
             _ => {
                 warn!("Unknown command: {}", command.command);
@@ -672,6 +770,76 @@ impl ManagementServiceImpl {
     /// Generate a unique endpoint
     pub fn generate_unique_endpoint(&self) -> String {
         self.process_manager.generate_unique_endpoint()
+    }
+
+    /// Install a model from HuggingFace Hub using transformers
+    async fn install_model_from_hf(
+        model_installer: &model_installer::ModelInstaller,
+        model_name: &str, 
+        local_name: &str, 
+        force: bool
+    ) -> Result<serde_json::Value> {
+        info!("Installing model '{}' from HuggingFace Hub as '{}'", model_name, local_name);
+        
+        // Check if model is already installed (unless force is true)
+        if !force && model_installer.is_model_installed(model_name).await {
+            let model_info = model_installer.get_model_info(model_name).await?;
+            return Ok(serde_json::json!({
+                "status": "already_installed",
+                "model_name": model_name,
+                "local_name": local_name,
+                "path": model_info.path,
+                "model_type": model_info.model_type
+            }));
+        }
+        
+        // Install the model
+        let model_path = model_installer.install_model(model_name).await?;
+        let model_info = model_installer.get_model_info(model_name).await?;
+        
+        info!("Successfully installed model '{}' to {:?}", model_name, model_path);
+        
+        Ok(serde_json::json!({
+            "status": "installed",
+            "model_name": model_name,
+            "local_name": local_name,
+            "path": model_path,
+            "model_type": model_info.model_type,
+            "architectures": model_info.architectures
+        }))
+    }
+
+    /// Uninstall a model from local storage
+    async fn uninstall_model_from_storage(
+        model_installer: &model_installer::ModelInstaller,
+        model_name: &str,
+        _force: bool
+    ) -> Result<serde_json::Value> {
+        info!("Uninstalling model '{}' from local storage", model_name);
+        
+        // Check if model is installed
+        if !model_installer.is_model_installed(model_name).await {
+            return Ok(serde_json::json!({
+                "status": "not_found",
+                "model_name": model_name,
+                "message": format!("Model '{}' is not installed", model_name)
+            }));
+        }
+        
+        // TODO: Check if model is currently loaded and handle force flag
+        // For now, we'll proceed with uninstallation
+        
+        // Uninstall the model
+        let removed_path = model_installer.uninstall_model(model_name).await?;
+        
+        info!("Successfully uninstalled model '{}' from {:?}", model_name, removed_path);
+        
+        Ok(serde_json::json!({
+            "status": "uninstalled",
+            "model_name": model_name,
+            "path": removed_path,
+            "message": format!("Model '{}' uninstalled successfully", model_name)
+        }))
     }
 }
 

@@ -2,6 +2,7 @@ import time
 import argparse
 import warnings
 
+import os
 import torch
 import zmq
 from transformers import TorchAoConfig, AutoTokenizer
@@ -31,17 +32,28 @@ def main_run():
 
     # Load model using QwenForCausalLM wrapper
     # This works for Qwen3 models including DeepSeek-R1-0528-Qwen3-8B
-    print(f"Loading Qwen3 model: {args.model_name}")
-    
+    # Determine if model is in local Symphony cache
+    models_cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "symphony", "models")
+    local_dir = os.path.join(models_cache_dir, args.model_name.replace("/", "--"))
+    if os.path.isdir(local_dir):
+        print(f"Loading Qwen3 model from local cache: {local_dir}")
+        model_path_or_name = local_dir
+        local_only = True
+    else:
+        print(f"Loading Qwen3 model from HuggingFace Hub: {args.model_name}")
+        model_path_or_name = args.model_name
+        local_only = False
+
     # Suppress rope_scaling warnings during model loading
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message="Unrecognized keys in `rope_scaling`")
-        
         model = QwenForCausalLM.from_pretrained(
-            args.model_name, 
-            torch_dtype="bfloat16", 
+            model_path_or_name,
+            torch_dtype="bfloat16",
             device_map=device,
-            trust_remote_code=True
+            trust_remote_code=True,
+            cache_dir=models_cache_dir,
+            local_files_only=local_only,
         )
     
     print(f"Model loaded and wrapped successfully")
