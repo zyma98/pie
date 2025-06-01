@@ -4,11 +4,8 @@ from typing import Union
 
 import numpy as np
 import torch
-from transformers import AutoTokenizer
 
 import config
-from common import ceil_div
-from llama import LlamaForCausalLM
 from l4m_pb2 import BatchAllocate, BatchDeallocate, BatchEmbedText, BatchMaskBlock, BatchCopyBlock, BatchDecodeTokenDistribution, BatchSampleTopKRequest, BatchSampleTopKResponse, \
     ObjectKind, SampleTopKResponse, BatchFillBlock
 
@@ -63,6 +60,7 @@ class Driver:
         self.blocks = {}
 
         self.lm = model
+        self.model_name_or_path = model.config._name_or_path
         self.max_num_pages = max_num_pages
         self.max_num_embeds = max_num_embeds
         self.dtype = dtype
