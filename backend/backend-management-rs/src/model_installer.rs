@@ -167,6 +167,12 @@ impl ModelInstaller {
         // Execute huggingface-cli download
         self.download_model_with_hf_cli(model_name, revision, files_to_download, &model_path).await?;
 
+        // Convert HuggingFace tokenizer to Symphony format if present
+        if let Err(e) = crate::transform_tokenizer::convert_hf_tokenizer_to_symphony(&model_path).await {
+            warn!("Failed to convert tokenizer for model {}: {}", model_name, e);
+            // Continue with installation even if tokenizer conversion fails
+        }
+
         // Create model info file for Symphony compatibility
         self.create_model_info_file(model_name, &model_path).await?;
 

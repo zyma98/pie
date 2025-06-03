@@ -14,6 +14,7 @@ pub mod cli;
 pub mod utils;
 pub mod model_installer;
 pub mod command_handler;
+pub mod transform_tokenizer;
 
 // Re-export commonly used types
 pub use config::Config;
