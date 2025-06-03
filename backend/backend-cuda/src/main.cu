@@ -2,15 +2,16 @@
 #include <iostream>
 #include <vector>
 #include <cuda_runtime.h>
-#include <algorithm>     
-#include <cmath>         
+#include <algorithm>
+#include <cmath>
 
 #include <thrust/execution_policy.h>
 #include <thrust/device_vector.h>
 #include "flashinfer_ops.cuh"
 #include <zmq.hpp>
 
-int main() {
+int main()
+{
     std::cout << "hello world!" << std::endl;
 
     constexpr size_t head_dim_ckv = 512;
@@ -26,9 +27,11 @@ int main() {
     std::vector<int32_t> kv_indptr_host{0};
     std::vector<int32_t> kv_indicies_host;
     std::vector<int32_t> kv_last_page_len_host;
-    for (size_t i = 0; i < batch_size; ++i) {
-        for (size_t p = 0; p < pages_per_seq; ++p) {
-        kv_indicies_host.push_back(i * pages_per_seq + p);
+    for (size_t i = 0; i < batch_size; ++i)
+    {
+        for (size_t p = 0; p < pages_per_seq; ++p)
+        {
+            kv_indicies_host.push_back(i * pages_per_seq + p);
         }
         kv_indptr_host.push_back(kv_indptr_host.back() + pages_per_seq);
         kv_last_page_len_host.push_back((seqlen - 1) % page_size + 1);
@@ -42,7 +45,6 @@ int main() {
     thrust::device_vector<float> ckv_data(num_pages * page_size * head_dim_ckv);
     thrust::device_vector<float> kpe_data(num_pages * page_size * head_dim_kpe);
     thrust::device_vector<float> o(q_nope.size());
-
 
     return 0;
 }
