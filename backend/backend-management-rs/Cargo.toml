@@ -27,6 +27,8 @@ signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
 async-trait = "0.1"
 bytes = "1.0"
 clap = { version = "4.0", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }
+base64 = "0.22"
 
 [build-dependencies]
 prost-build = "0.12"
