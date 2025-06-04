@@ -5,8 +5,20 @@ use tokio;
 #[tokio::main]
 async fn main() -> Result<()> {
     println!("🚀 Testing layer renaming on real Llama 3.1 8B model...");
+    println!("💡 You can set SYMPHONY_MODEL_PATH environment variable to specify a custom model path");
     
-    let model_path = PathBuf::from("/home/sslee/.cache/symphony/models/meta-llama--Llama-3.1-8B-Instruct");
+    // Use environment variable or default path
+    let model_path = std::env::var("SYMPHONY_MODEL_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            // Default to standard Symphony cache directory
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".cache")
+                .join("symphony")
+                .join("models")
+                .join("meta-llama--Llama-3.1-8B-Instruct")
+        });
     
     // Verify the model path exists
     if !model_path.exists() {
