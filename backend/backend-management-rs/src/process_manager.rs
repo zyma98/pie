@@ -117,6 +117,7 @@ impl ProcessManager {
 
         let mut command = Command::new("python3");
         command
+            .arg("-u")  // Unbuffer stdout/stderr for immediate output
             .arg(&script_path)
             .arg("--ipc-endpoint")
             .arg(&endpoint)
@@ -130,7 +131,8 @@ impl ProcessManager {
         command
             .env("PYTHONPATH", &self.backend_base_path)
             .env("PIE_MODEL_NAME", full_model_name)
-            .env("PIE_ENDPOINT", &endpoint);
+            .env("PIE_ENDPOINT", &endpoint)
+            .env("PYTHONUNBUFFERED", "1");  // Ensure Python output is not buffered
 
         // Create log file for this backend instance
         let log_file_name = format!("symphony-backend-{}.log", model_name);

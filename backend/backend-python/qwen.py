@@ -1,206 +1,32 @@
-# qwen.py
 import torch
-import warnings
 from torch import nn
-from transformers import AutoModelForCausalLM, AutoConfig
+from transformers import PreTrainedModel
+from transformers.generation.utils import GenerationMixin
+from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
+
+from q4wen import Q4wenModel
 
 
-class QwenModelWrapper(nn.Module):
+class QwenForCausalLM(PreTrainedModel, GenerationMixin):
     """
-    Wrapper for the Qwen3 model.model to provide the same forward interface
-    as expected by the symphony driver.py
-    
-    This implementation uses a simplified approach that bridges the Symphony driver
-    interface with the standard transformers model, avoiding complex FlashInfer integration
-    while still maintaining compatibility with Symphony's expectations.
+    Qwen model for causal language modeling using FlashInfer for efficient attention.
+    This class follows the same pattern as LlamaForCausalLM.
     """
+    config_class = Qwen3Config
 
-    def __init__(self, qwen_model):
-        super().__init__()
-        self.qwen_model = qwen_model
-        self.embed_tokens = qwen_model.embed_tokens
-        self.config = qwen_model.config
-        
-        # Track state for debugging and cache management
-        self._last_position = None
-        self._sequence_id = None
-        self._past_key_values = None  # Store transformers KV cache
-        self._total_sequence_length = 0  # Track total sequence length
-
-    def forward(
-        self,
-        input_embeds: torch.Tensor,
-        position_ids: torch.Tensor,
-        kv_cache_at_layer,
-        kv_page_indices: torch.Tensor,
-        kv_page_indptr: torch.Tensor,
-        kv_last_page_lens: torch.Tensor,
-        qo_indptr: torch.Tensor,
-        custom_mask: torch.Tensor = None,
-        single_token_inference_mode: bool = False,
-        **kwargs
-    ):
-        """
-        Forward pass that provides Symphony driver compatibility.
-        
-        This implementation uses the transformers model's native KV cache
-        to maintain state between single-token inference calls.
-        """
-        seq_len = input_embeds.shape[0]
-        print(f"QwenModelWrapper forward: single_token_mode={single_token_inference_mode}, "
-              f"seq_len={seq_len}, total_seq_len={self._total_sequence_length}, has_cache={self._past_key_values is not None}")
-        
-        # Convert to transformers format (add batch dimension)
-        input_embeds_batched = input_embeds.unsqueeze(0)  # [seq_len, hidden] -> [1, seq_len, hidden]
-        position_ids_batched = position_ids.unsqueeze(0)  # [seq_len] -> [1, seq_len]
-        
-        # Handle attention mask for proper context awareness
-        attention_mask = None
-        if single_token_inference_mode and self._past_key_values is not None:
-            # In single-token mode, create attention mask that includes all previous tokens
-            # The past_key_values already contains the cached context
-            past_length = self._past_key_values[0][0].shape[2]  # Get the cached sequence length
-            total_length = past_length + seq_len
-            attention_mask = torch.ones((1, total_length), dtype=torch.long, device=input_embeds.device)
-            print(f"QwenModelWrapper: Single-token mode WITH CACHE, past_length={past_length}, total_length={total_length}")
-        elif single_token_inference_mode and self._past_key_values is None:
-            print("QwenModelWrapper: Single-token mode but NO CACHE available")
-        elif not single_token_inference_mode:
-            # In multi-token mode (prefill), we reset everything
-            print("QwenModelWrapper: Multi-token mode, resetting cache")
-            self._past_key_values = None
-            self._total_sequence_length = 0
-        
-        # Use transformers model with caching
-        try:
-            outputs = self.qwen_model(
-                inputs_embeds=input_embeds_batched,
-                position_ids=position_ids_batched,
-                attention_mask=attention_mask,
-                past_key_values=self._past_key_values,  # Use cached KV
-                use_cache=True,  # Enable caching for state persistence
-                return_dict=True
-            )
-            
-            # Update cache only if we're actually using it
-            if single_token_inference_mode or not single_token_inference_mode:
-                self._past_key_values = outputs.past_key_values
-                self._total_sequence_length += seq_len
-            
-            # Return the hidden states without batch dimension
-            hidden_states = outputs.last_hidden_state.squeeze(0)  # [1, seq_len, hidden] -> [seq_len, hidden]
-            
-            print(f"QwenModelWrapper forward successful: output_shape={hidden_states.shape}, "
-                  f"new_total_seq_len={self._total_sequence_length}, has_cache={self._past_key_values is not None}")
-            return hidden_states
-            
-        except Exception as e:
-            print(f"QwenModelWrapper forward failed: {e}")
-            print(f"  input_embeds.shape: {input_embeds.shape}")
-            print(f"  position_ids.shape: {position_ids.shape}")
-            print(f"  single_token_inference_mode: {single_token_inference_mode}")
-            print(f"  total_sequence_length: {self._total_sequence_length}")
-            print(f"  past_key_values: {type(self._past_key_values)}")
-            raise
-
-
-class QwenForCausalLM:
-    """
-    Wrapper for Qwen3 models that provides the same interface as DeepSeekForCausalLM
-    but uses the standard transformers implementation under the hood.
-
-    This is designed to work with models like:
-    - deepseek-ai/DeepSeek-R1-0528-Qwen3-8B (which is actually a Qwen3 model)
-    - Qwen/Qwen3-8B-Instruct
-    - Any other Qwen3-based models
-    """
-
-    def __init__(self, transformers_model):
-        """
-        Initialize with a pre-loaded transformers model
-        """
-        self.transformers_model = transformers_model
-        self.model = QwenModelWrapper(transformers_model.model)
-        self.lm_head = transformers_model.lm_head
-        self.config = transformers_model.config
-        self.vocab_size = transformers_model.config.vocab_size
-
-        # Ensure config has all required attributes for driver.py
-        self._ensure_config_compatibility()
-
-    def _ensure_config_compatibility(self):
-        """
-        Ensure the config has all attributes expected by driver.py
-        """
-        # Map Qwen3 config attributes to expected names if needed
-        if not hasattr(self.config, 'num_key_value_heads'):
-            if hasattr(self.config, 'num_kv_heads'):
-                self.config.num_key_value_heads = self.config.num_kv_heads
+    def __init__(self, config):
+        # Ensure config compatibility for FlashInfer
+        if not hasattr(config, 'num_key_value_heads'):
+            if hasattr(config, 'num_kv_heads'):
+                config.num_key_value_heads = config.num_kv_heads
             else:
-                # Default to num_attention_heads if not specified
-                self.config.num_key_value_heads = getattr(self.config, 'num_attention_heads', 32)
+                config.num_key_value_heads = getattr(config, 'num_attention_heads', 32)
 
-        # Ensure other required attributes exist
-        if not hasattr(self.config, 'hidden_size'):
-            self.config.hidden_size = getattr(self.config, 'd_model', 4096)
+        super().__init__(config)
+        self.model = Q4wenModel(config)
+        self.vocab_size = config.vocab_size
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
-        if not hasattr(self.config, 'num_attention_heads'):
-            self.config.num_attention_heads = getattr(self.config, 'n_head', 32)
-
-        if not hasattr(self.config, 'num_hidden_layers'):
-            self.config.num_hidden_layers = getattr(self.config, 'n_layer', 24)
-
-        # Debug print the configuration
-        print(f"Model config validation:")
-        print(f"  vocab_size: {getattr(self.config, 'vocab_size', 'NOT SET')}")
-        print(f"  hidden_size: {self.config.hidden_size}")
-        print(f"  num_attention_heads: {self.config.num_attention_heads}")
-        print(f"  num_key_value_heads: {self.config.num_key_value_heads}")
-        print(f"  num_hidden_layers: {self.config.num_hidden_layers}")
-
-        # Check for potential EOS token issues
-        if hasattr(self.config, 'eos_token_id'):
-            print(f"  eos_token_id: {self.config.eos_token_id}")
-        if hasattr(self.config, 'pad_token_id'):
-            print(f"  pad_token_id: {self.config.pad_token_id}")
-        if hasattr(self.config, 'bos_token_id'):
-            print(f"  bos_token_id: {self.config.bos_token_id}")
-
-        # Validate vocabulary size matches the model
-        expected_vocab_size = self.lm_head.out_features
-        config_vocab_size = getattr(self.config, 'vocab_size', expected_vocab_size)
-        if expected_vocab_size != config_vocab_size:
-            print(f"WARNING: Vocabulary size mismatch!")
-            print(f"  lm_head.out_features: {expected_vocab_size}")
-            print(f"  config.vocab_size: {config_vocab_size}")
-            # Update config to match actual model
-            self.config.vocab_size = expected_vocab_size
-            self.vocab_size = expected_vocab_size
-
-    @classmethod
-    def from_pretrained(cls, model_name_or_path, **kwargs):
-        """
-        Load a Qwen3 model using standard transformers AutoModelForCausalLM
-        """
-        print(f"Loading Qwen3 model: {model_name_or_path}")
-
-        # Ensure trust_remote_code is set
-        kwargs['trust_remote_code'] = True
-
-        # Suppress the rope_scaling warning about unrecognized keys
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", message="Unrecognized keys in `rope_scaling`")
-
-            # Load model using standard transformers
-            transformers_model = AutoModelForCausalLM.from_pretrained(
-                model_name_or_path,
-                **kwargs
-            )
-
-        print(f"Model loaded successfully: {type(transformers_model)}")
-        return cls(transformers_model)
-
-    # ----- embedding helpers (HF API) ------------------------------------ #
     def get_input_embeddings(self):
         return self.model.embed_tokens
 
@@ -212,3 +38,94 @@ class QwenForCausalLM:
 
     def set_output_embeddings(self, new_embeddings):
         self.lm_head = new_embeddings
+
+    # == Test only ==
+    def forward(self, input_ids=None, attention_mask=None, position_ids=None, past_key_values=None, **kwargs):
+        """
+        Forward pass for QwenForCausalLM.
+        
+        NOTE: This method is only used by test scripts and standalone usage.
+        In production, the Symphony driver calls self.model.forward() directly,
+        bypassing this wrapper method entirely.
+        """
+        # Convert input_ids to embeddings if needed
+        if input_ids is not None:
+            inputs_embeds = self.model.embed_tokens(input_ids)
+        else:
+            inputs_embeds = kwargs.get('inputs_embeds')
+
+        if inputs_embeds is None:
+            raise ValueError("Either input_ids or inputs_embeds must be provided")
+
+        batch_size, seq_len = inputs_embeds.shape[:2]
+        device = inputs_embeds.device
+
+        # Create simple position_ids if not provided
+        if position_ids is None:
+            position_ids = torch.arange(seq_len, device=device).unsqueeze(0).expand(batch_size, -1)
+
+        # Check if we have proper FlashInfer parameters from the driver
+        has_flashinfer_params = all(param is not None for param in [
+            kwargs.get('kv_cache_at_layer'),
+            kwargs.get('kv_page_indices'),
+            kwargs.get('kv_page_indptr'),
+            kwargs.get('kv_last_page_lens'),
+            kwargs.get('qo_indptr')
+        ])
+
+        if has_flashinfer_params:
+            # Production path: use driver-provided FlashInfer parameters
+            outputs = self.model(
+                input_embeds=inputs_embeds,
+                position_ids=position_ids,
+                **kwargs
+            )
+        else:
+            # Testing/fallback path: create minimal dummy FlashInfer parameters
+            
+            from config import NUM_TOKENS_IN_BLOCK
+            
+            # Calculate number of pages needed
+            total_tokens = batch_size * seq_len
+            num_pages = (total_tokens + NUM_TOKENS_IN_BLOCK - 1) // NUM_TOKENS_IN_BLOCK
+            
+            # Create dummy KV cache (simplified single-page setup)
+            head_dim = getattr(self.config, 'head_dim', self.config.hidden_size // self.config.num_attention_heads)
+            kv_cache_at_layer = [
+                torch.zeros(
+                    (num_pages, 2, NUM_TOKENS_IN_BLOCK, self.config.num_key_value_heads, head_dim),
+                    dtype=inputs_embeds.dtype,
+                    device=device
+                ) for _ in range(self.config.num_hidden_layers)
+            ]
+            
+            # Create dummy page indices and pointers for simple sequential layout
+            kv_page_indices = torch.arange(num_pages, dtype=torch.int32, device=device)
+            kv_page_indptr = torch.arange(batch_size + 1, dtype=torch.int32, device=device) * (num_pages // batch_size)
+            kv_last_page_lens = torch.full((batch_size,), seq_len % NUM_TOKENS_IN_BLOCK or NUM_TOKENS_IN_BLOCK, dtype=torch.int32, device=device)
+            qo_indptr = torch.arange(batch_size + 1, dtype=torch.int32, device=device) * seq_len
+            
+            # Create causal mask (lower triangular)
+            custom_mask = torch.tril(torch.ones(total_tokens, total_tokens, dtype=torch.bool, device=device))
+            
+            outputs = self.model(
+                input_embeds=inputs_embeds,
+                position_ids=position_ids,
+                kv_cache_at_layer=kv_cache_at_layer,
+                kv_page_indices=kv_page_indices,
+                kv_page_indptr=kv_page_indptr,
+                kv_last_page_lens=kv_last_page_lens,
+                qo_indptr=qo_indptr,
+                custom_mask=custom_mask,
+                single_token_inference_mode=False,
+            )
+
+        hidden_states = outputs[0] if isinstance(outputs, tuple) else outputs
+        logits = self.lm_head(hidden_states)
+
+        return type('ModelOutput', (), {
+            'logits': logits,
+            'past_key_values': getattr(outputs, 'past_key_values', None),
+            'hidden_states': getattr(outputs, 'hidden_states', None),
+            'attentions': getattr(outputs, 'attentions', None),
+        })()
