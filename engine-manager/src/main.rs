@@ -4,7 +4,7 @@ use axum::{
 };
 use engine_manager::{
     handlers::{heartbeat_handler, list_backends_handler, register_backend_handler},
-    state::{AppState, SharedState},
+    state::AppState,
 };
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
