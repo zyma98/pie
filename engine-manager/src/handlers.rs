@@ -19,13 +19,13 @@ pub async fn register_backend_handler(
     // You might want to validate the URL format for management_api_address
 
     tracing::info!("Registering backend with address: {}", payload.management_api_address);
-    
+
     // Explicitly scope the lock to ensure it's released
     let backend_id = {
         let mut state_guard = state.write().unwrap();
         state_guard.register_backend(payload.capabilities, payload.management_api_address)
     };
-    
+
     Ok(Json(BackendRegistrationResponse { backend_id }))
 }
 
@@ -35,13 +35,13 @@ pub async fn heartbeat_handler(
     Path(backend_id): Path<Uuid>,
 ) -> Result<Json<HeartbeatResponse>, StatusCode> {
     tracing::info!("Received heartbeat for backend_id: {}", backend_id);
-    
+
     // Explicitly scope the lock to ensure it's released
     let result = {
         let mut state_guard = state.write().unwrap();
         state_guard.record_heartbeat(&backend_id)
     };
-    
+
     match result {
         Ok(new_status) => Ok(Json(HeartbeatResponse {
             message: "Heartbeat received".to_string(),
@@ -59,13 +59,13 @@ pub async fn list_backends_handler(
     State(state): State<SharedState>,
 ) -> Result<Json<ListBackendsResponse>, StatusCode> {
     tracing::info!("Listing all backends");
-    
+
     // Explicitly scope the lock to ensure it's released
     let summaries = {
         let state_guard = state.read().unwrap();
         state_guard.get_all_backends_summary()
     };
-    
+
     Ok(Json(ListBackendsResponse {
         backends: summaries,
     }))

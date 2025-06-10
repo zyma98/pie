@@ -93,8 +93,8 @@ async fn test_register_backend_empty_address() {
 #[tokio::test]
 async fn test_heartbeat_success() {
     let shared_state = Arc::new(RwLock::new(AppState::new()));
-    
-    // First, register a backend manually  
+
+    // First, register a backend manually
     let backend_id = {
         let mut state = shared_state.write().unwrap();
         let id = state.register_backend(
@@ -105,7 +105,7 @@ async fn test_heartbeat_success() {
         drop(state);
         id
     };
-    
+
     // Verify initial status
     {
         let state = shared_state.read().unwrap();
@@ -185,7 +185,7 @@ async fn test_list_backends_empty() {
 #[tokio::test]
 async fn test_list_backends_with_data() {
     let shared_state = Arc::new(RwLock::new(AppState::new()));
-    
+
     // Register a few backends manually
     let backend_id1 = {
         let mut state_guard = shared_state.write().unwrap();
@@ -194,7 +194,7 @@ async fn test_list_backends_with_data() {
             "http://backend1:8080".to_string(),
         )
     };
-    
+
     let backend_id2 = {
         let mut state_guard = shared_state.write().unwrap();
         state_guard.register_backend(
@@ -217,9 +217,9 @@ async fn test_list_backends_with_data() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let list_response: ListBackendsResponse = serde_json::from_slice(&body).unwrap();
-    
+
     assert_eq!(list_response.backends.len(), 2);
-    
+
     // Find backends by ID
     let backend1_summary = list_response.backends.iter()
         .find(|b| b.backend_id == backend_id1)
@@ -227,11 +227,11 @@ async fn test_list_backends_with_data() {
     let backend2_summary = list_response.backends.iter()
         .find(|b| b.backend_id == backend_id2)
         .expect("Backend 2 should be in the list");
-    
+
     assert_eq!(backend1_summary.status, BackendStatus::Initializing);
     assert_eq!(backend1_summary.capabilities, vec!["gpu".to_string()]);
     assert_eq!(backend1_summary.management_api_address, "http://backend1:8080");
-    
+
     assert_eq!(backend2_summary.status, BackendStatus::Initializing);
     assert_eq!(backend2_summary.capabilities, vec!["cpu".to_string(), "avx2".to_string()]);
     assert_eq!(backend2_summary.management_api_address, "http://backend2:8081");
@@ -293,7 +293,7 @@ async fn test_end_to_end_flow() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let list_response: ListBackendsResponse = serde_json::from_slice(&body).unwrap();
-    
+
     assert_eq!(list_response.backends.len(), 1);
     let backend_summary = &list_response.backends[0];
     assert_eq!(backend_summary.backend_id, backend_id);
