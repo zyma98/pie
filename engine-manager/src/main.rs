@@ -27,8 +27,10 @@ struct Args {
 async fn main() {
     let args = Args::parse();
 
-    // Initialize tracing
-    tracing_subscriber::fmt::init();
+    // Initialize tracing with info level by default
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
 
     let shared_state = Arc::new(RwLock::new(AppState::new()));
 
@@ -47,6 +49,7 @@ async fn main() {
     };
 
     let addr = SocketAddr::from((ip, args.port));
+    println!("Starting engine-management-service on {}", addr);
     tracing::info!("engine-management-service listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
