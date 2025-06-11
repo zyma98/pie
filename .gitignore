@@ -204,3 +204,6 @@ program_cache/
 backend/backend-pytorch
 
 bin/
+
+# No MCP files
+.memory-bank

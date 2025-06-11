@@ -37,9 +37,89 @@ use std::fs;
 const PROGRAM_CACHE_DIR: &str = "./program_cache";
 
 //
-// Engine configuration structures
+// Engine configuration structures - compatible with unified config
+#[derive(Serialize, Deserialize, Debug)]
+struct Config {
+    system: SystemConfig,
+    services: ServicesConfig,
+    endpoints: EndpointsConfig,
+    logging: LoggingConfig,
+    models: ModelsConfig,
+    backends: BackendsConfig,
+    paths: PathsConfig,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct SystemConfig {
+    name: String,
+    version: String,
+    description: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct ServicesConfig {
+    engine_manager: EngineManagerConfig,
+    engine: EngineConfig,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct EngineManagerConfig {
+    host: String,
+    port: u16,
+    binary_name: String,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 struct EngineConfig {
+    binary_name: String,
+    default_port: u16,
+    base_args: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct EndpointsConfig {
+    client_handshake: String,
+    cli_management: String,
+    management_service: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct LoggingConfig {
+    level: String,
+    format: String,
+    date_format: String,
+    directory: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct ModelsConfig {
+    available: Vec<String>,
+    default: String,
+    supported_models: Vec<SupportedModel>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct SupportedModel {
+    name: String,
+    fullname: String,
+    #[serde(rename = "type")]
+    model_type: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct BackendsConfig {
+    model_backends: std::collections::HashMap<String, String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct PathsConfig {
+    engine_binary_search: Vec<String>,
+    engine_manager_binary_search: Vec<String>,
+}
+
+// Legacy EngineConfig structure for backward compatibility during transition
+#[derive(Serialize, Deserialize, Debug)]
+struct LegacyEngineConfig {
     management_service: ManagementServiceConfig,
     models: Vec<String>,
     default_model: String,
@@ -62,27 +142,44 @@ macro_rules! log_user {
 //use console_subscriber;
 
 /// Load engine configuration from JSON file
-fn load_config(config_path: Option<&str>) -> anyhow::Result<EngineConfig> {
+fn load_config(config_path: Option<&str>) -> anyhow::Result<(Vec<String>, String, String)> {
     let config_path = config_path.unwrap_or("./config.json");
 
     let config_content = std::fs::read_to_string(config_path)
         .with_context(|| format!("Failed to read config file: {}", config_path))?;
 
-    let config: EngineConfig = serde_json::from_str(&config_content)
-        .with_context(|| format!("Failed to parse config file: {}", config_path))?;
+    // Try to parse as unified config first
+    if let Ok(config) = serde_json::from_str::<Config>(&config_content) {
+        log_user!("Loaded unified config from: {}", config_path);
 
-    log_user!("Loaded engine config from: {}", config_path);
+        let models = config.models.available;
+        let default_model = config.models.default;
+        let management_endpoint = config.endpoints.management_service;
 
-    Ok(config)
+        return Ok((models, default_model, management_endpoint));
+    }
+
+    // Fall back to legacy config format
+    if let Ok(legacy_config) = serde_json::from_str::<LegacyEngineConfig>(&config_content) {
+        log_user!("Loaded legacy config from: {}", config_path);
+
+        let models = legacy_config.models;
+        let default_model = legacy_config.default_model;
+        let management_endpoint = legacy_config.management_service.endpoint;
+
+        return Ok((models, default_model, management_endpoint));
+    }
+
+    Err(anyhow::anyhow!("Failed to parse config file as either unified or legacy format: {}", config_path))
 }
 
 /// Check all models in config and return the first available one
-async fn find_first_available_model(config: &EngineConfig) -> anyhow::Result<String> {
+async fn find_first_available_model(models: &[String], management_endpoint: &str) -> anyhow::Result<String> {
     let mgmt_config = ManagementConfig {
-        endpoint: config.management_service.endpoint.clone(),
+        endpoint: management_endpoint.to_string(),
     };
 
-    for model_name in &config.models {
+    for model_name in models {
         // Try to get the model endpoint, which will load the model if it's not already loaded
         match get_model_endpoint(model_name, &mgmt_config).await {
             Ok(_endpoint) => {
@@ -95,7 +192,7 @@ async fn find_first_available_model(config: &EngineConfig) -> anyhow::Result<Str
         }
     }
 
-    Err(anyhow::anyhow!("No available models found from the configured list: {:?}", config.models))
+    Err(anyhow::anyhow!("No available models found from the configured list: {:?}", models))
 }
 
 #[tokio::main]
@@ -155,17 +252,17 @@ async fn main() -> anyhow::Result<()> {
     let use_dummy = *use_dummy;
 
     // Load engine configuration
-    let config = load_config(Some(config_path))?;
+    let (models, _default_model, management_endpoint) = load_config(Some(config_path))?;
 
     // Check if management service is running first
     let mgmt_config = ManagementConfig {
-        endpoint: config.management_service.endpoint.clone(),
+        endpoint: management_endpoint.clone(),
     };
     check_management_service_status(&mgmt_config).await
         .context("Management service is not available")?;
 
     // Find the first available model from the config
-    let model_name = find_first_available_model(&config).await
+    let model_name = find_first_available_model(&models, &management_endpoint).await
         .context("Failed to find any available models")?;
 
     log_user!("Using model: {}", model_name);
