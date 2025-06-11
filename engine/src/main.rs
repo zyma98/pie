@@ -20,7 +20,6 @@ mod utils;
 //
 use anyhow::Context;
 use std::path::{Path, PathBuf};
-use serde::{Deserialize, Serialize};
 
 use crate::client::{Client, hash_program};
 use crate::l4m::L4m;
@@ -33,104 +32,10 @@ use crate::service::Controller;
 use clap::{Arg, Command};
 use colored::Colorize;
 use std::fs;
+use pie_cli::config::Config;
 
 const PROGRAM_CACHE_DIR: &str = "./program_cache";
 
-//
-// Engine configuration structures - compatible with unified config
-#[derive(Serialize, Deserialize, Debug)]
-struct Config {
-    system: SystemConfig,
-    services: ServicesConfig,
-    endpoints: EndpointsConfig,
-    logging: LoggingConfig,
-    models: ModelsConfig,
-    backends: BackendsConfig,
-    paths: PathsConfig,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct SystemConfig {
-    name: String,
-    version: String,
-    description: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct ServicesConfig {
-    engine_manager: EngineManagerConfig,
-    engine: EngineConfig,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct EngineManagerConfig {
-    host: String,
-    port: u16,
-    binary_name: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct EngineConfig {
-    binary_name: String,
-    default_port: u16,
-    base_args: Vec<String>,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct EndpointsConfig {
-    client_handshake: String,
-    cli_management: String,
-    management_service: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct LoggingConfig {
-    level: String,
-    format: String,
-    date_format: String,
-    directory: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct ModelsConfig {
-    available: Vec<String>,
-    default: String,
-    supported_models: Vec<SupportedModel>,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct SupportedModel {
-    name: String,
-    fullname: String,
-    #[serde(rename = "type")]
-    model_type: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct BackendsConfig {
-    model_backends: std::collections::HashMap<String, String>,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct PathsConfig {
-    engine_binary_search: Vec<String>,
-    engine_manager_binary_search: Vec<String>,
-}
-
-// Legacy EngineConfig structure for backward compatibility during transition
-#[derive(Serialize, Deserialize, Debug)]
-struct LegacyEngineConfig {
-    management_service: ManagementServiceConfig,
-    models: Vec<String>,
-    default_model: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct ManagementServiceConfig {
-    endpoint: String,
-}
-
-//
 // Define a simple macro for client-side logging.
 #[macro_export]
 macro_rules! log_user {
@@ -139,38 +44,40 @@ macro_rules! log_user {
     }
 }
 
-//use console_subscriber;
-
 /// Load engine configuration from JSON file
+/// Returns (available_models, default_model, management_endpoint)
 fn load_config(config_path: Option<&str>) -> anyhow::Result<(Vec<String>, String, String)> {
-    let config_path = config_path.unwrap_or("./config.json");
+    let config_file = config_path.unwrap_or("config.json");
+    
+    // Load the unified configuration
+    let config_content = fs::read_to_string(config_file)
+        .with_context(|| format!("Failed to read config file: {}", config_file))?;
 
-    let config_content = std::fs::read_to_string(config_path)
-        .with_context(|| format!("Failed to read config file: {}", config_path))?;
+    let config: Config = serde_json::from_str(&config_content)
+        .with_context(|| format!("Failed to parse config file: {}", config_file))?;
 
-    // Try to parse as unified config first
-    if let Ok(config) = serde_json::from_str::<Config>(&config_content) {
-        log_user!("Loaded unified config from: {}", config_path);
+    log_user!("Loaded unified configuration from {}", config_file);
 
-        let models = config.models.available;
-        let default_model = config.models.default;
-        let management_endpoint = config.endpoints.management_service;
+    // Extract the models list from the config
+    let models: Vec<String> = config.models.supported_models.iter()
+        .map(|model| model.name.clone())
+        .collect();
 
-        return Ok((models, default_model, management_endpoint));
-    }
+    // Use the default model from config, or fall back to the first one
+    let default_model = if !config.models.default.is_empty() {
+        config.models.default
+    } else {
+        models.first()
+            .ok_or_else(|| anyhow::anyhow!("No models found in configuration"))?
+            .clone()
+    };
 
-    // Fall back to legacy config format
-    if let Ok(legacy_config) = serde_json::from_str::<LegacyEngineConfig>(&config_content) {
-        log_user!("Loaded legacy config from: {}", config_path);
+    // Build management endpoint from config
+    let management_endpoint = format!("http://{}:{}", 
+        config.services.engine_manager.host, 
+        config.services.engine_manager.port);
 
-        let models = legacy_config.models;
-        let default_model = legacy_config.default_model;
-        let management_endpoint = legacy_config.management_service.endpoint;
-
-        return Ok((models, default_model, management_endpoint));
-    }
-
-    Err(anyhow::anyhow!("Failed to parse config file as either unified or legacy format: {}", config_path))
+    Ok((models, default_model, management_endpoint))
 }
 
 /// Check all models in config and return the first available one
