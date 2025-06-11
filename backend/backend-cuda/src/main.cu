@@ -122,21 +122,11 @@ int main()
 
         model.embed_input_ids(input_ids, embed_output);
 
-        // Print first 10 elements of embed_output
-        std::cout << "embed_output: ";
 
-        // Print mean of embed_output
-        std::vector<__nv_bfloat16> embed_output_host(embed_output.size());
-        thrust::copy(embed_output.begin(), embed_output.end(), embed_output_host.begin());
-        float sum = 0.0f;
-        for (auto v : embed_output_host)
-        {
-            sum += __bfloat162float(v);
-        }
-        float mean = sum / embed_output_host.size();
-        std::cout << "Mean of embed_output: " << mean << std::endl;
 
-        // // --- 3. Prepare Inputs (Simulate a Tokenized Prompt) ---
+        
+
+               // // --- 3. Prepare Inputs (Simulate a Tokenized Prompt) ---
         // // In a real application, this would come from a tokenizer.
         // // Let's create a sample prompt with 5 tokens.
         // thrust::host_vector<int32_t> h_input_ids = {101, 2054, 2003, 2026, 102};
