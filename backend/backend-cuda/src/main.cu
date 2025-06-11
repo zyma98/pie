@@ -120,20 +120,21 @@ int main()
         // create a uninitalized vector with size equal to the number of len(input_ids) * config.hidden_size
         thrust::device_vector<__nv_bfloat16> embed_output(input_ids.size() * config.hidden_size);
 
-
         model.embed_input_ids(input_ids, embed_output);
 
         // Print first 10 elements of embed_output
-        size_t print_count = std::min<size_t>(10, embed_output.size());
-        std::vector<__nv_bfloat16> host_embed_output(print_count);
-        thrust::copy(embed_output.begin(), embed_output.begin() + print_count, host_embed_output.begin());
-        std::cout << "First 10 elements of embed_output: ";
-        for (size_t i = 0; i < print_count; ++i) {
-            // Convert __nv_bfloat16 to float for printing
-            float val = static_cast<float>(host_embed_output[i]);
-            std::cout << val << " ";
+        std::cout << "embed_output: ";
+
+        // Print mean of embed_output
+        std::vector<__nv_bfloat16> embed_output_host(embed_output.size());
+        thrust::copy(embed_output.begin(), embed_output.end(), embed_output_host.begin());
+        float sum = 0.0f;
+        for (auto v : embed_output_host)
+        {
+            sum += __bfloat162float(v);
         }
-        std::cout << std::endl;
+        float mean = sum / embed_output_host.size();
+        std::cout << "Mean of embed_output: " << mean << std::endl;
 
         // // --- 3. Prepare Inputs (Simulate a Tokenized Prompt) ---
         // // In a real application, this would come from a tokenizer.

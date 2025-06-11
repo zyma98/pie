@@ -1,19 +1,23 @@
 #pragma once
 
 #include <thrust/device_vector.h>
+#include <cublasLt.h>
 #include <cuda_runtime.h>
 #include <stdexcept>
 #include <cstdint>
 #include <cstdio>
 
 // A simple CUDA error-checking macro for robust code.
-#define CHECK_CUDA(call) do { \
-    cudaError_t err = call; \
-    if (err != cudaSuccess) { \
-        fprintf(stderr, "CUDA Error: %s at %s:%d\n", cudaGetErrorString(err), __FILE__, __LINE__); \
-        throw std::runtime_error(cudaGetErrorString(err)); \
-    } \
-} while (0)
+#define CHECK_CUDA(call)                                                                               \
+    do                                                                                                 \
+    {                                                                                                  \
+        cudaError_t err = call;                                                                        \
+        if (err != cudaSuccess)                                                                        \
+        {                                                                                              \
+            fprintf(stderr, "CUDA Error: %s at %s:%d\n", cudaGetErrorString(err), __FILE__, __LINE__); \
+            throw std::runtime_error(cudaGetErrorString(err));                                         \
+        }                                                                                              \
+    } while (0)
 
 // Forward declare the datatypes from CUDA headers
 struct __half;
@@ -40,25 +44,14 @@ void embed(
     int embed_width,
     cudaStream_t stream);
 
-// --- Explicit Template Instantiations ---
-// By explicitly instantiating these templates, we tell the compiler that the 
-// definitions for these types exist in another translation unit (embedding.cu),
-// allowing us to separate the declaration from the implementation.
-
-// extern template void embed<float>(
-//     const thrust::device_vector<float>&, 
-//     const thrust::device_vector<uint32_t>&, 
-//     thrust::device_vector<float>*, 
-//     int, int, cudaStream_t);
-
-// extern template void embed<__half>(
-//     const thrust::device_vector<__half>&, 
-//     const thrust::device_vector<uint32_t>&, 
-//     thrust::device_vector<__half>*, 
-//     int, int, cudaStream_t);
-
-// extern template void embed<__nv_bfloat16>(
-//     const thrust::device_vector<__nv_bfloat16>&, 
-//     const thrust::device_vector<uint32_t>&, 
-//     thrust::device_vector<__nv_bfloat16>*, 
-//     int, int, cudaStream_t);
+template <typename T>
+void gemm_cublasLt(cublasLtHandle_t ltHandle,
+                   cudaStream_t stream,
+                   const thrust::device_vector<T> &A,
+                   const thrust::device_vector<T> &B,
+                   const thrust::device_vector<T> *bias,
+                   thrust::device_vector<T> &C,
+                   int m, int n, int k,
+                   thrust::device_vector<char> &workspace,
+                   bool transa,
+                   bool transb);
