@@ -5,7 +5,7 @@
 #include <cublasLt.h>
 #include <thrust/device_vector.h>
 #include <cuda_bf16.h>
-
+#include "common.cuh"
 #include <string>
 #include <vector>
 #include <memory>
@@ -175,13 +175,19 @@ public:
 
     L4maConfig get_config() const { return config_; }
 
-    void embed_input_ids(thrust::device_vector<T> &output,
-                         const thrust::device_vector<int32_t> &input_ids,
-                         cudaStream_t stream)
+    void embed_input_ids(const thrust::device_vector<uint32_t> &input_ids,
+                         thrust::device_vector<T> &output,
+                         cudaStream_t stream=0)
     {
-
-        // print the shape of embedding_weights_ thrust vec
-        int num_tokens = input_ids.size();
+        int embedding_dim = config_.hidden_size;
+        // Resize output to hold the embeddings
+        // Call the embed function (from common.cuh)
+        embed(
+            embedding_weights_,
+            input_ids,
+            &output,
+            embedding_dim,
+            stream);
     }
 
 private:

@@ -11,9 +11,11 @@
 #include <string>
 #include <format>
 
-void print_tokens(const std::vector<bpe::Rank>& tokens) {
+void print_tokens(const std::vector<bpe::Rank> &tokens)
+{
     std::cout << "[";
-    for (size_t i = 0; i < tokens.size(); ++i) {
+    for (size_t i = 0; i < tokens.size(); ++i)
+    {
         std::cout << tokens[i] << (i == tokens.size() - 1 ? "" : ", ");
     }
     std::cout << "]" << std::endl;
@@ -26,7 +28,8 @@ void print_tokens(const std::vector<bpe::Rank>& tokens) {
  * @param size The number of elements to search.
  * @return The index of the maximum logit relative to the offset.
  */
-int get_next_token(const thrust::device_vector<float>& logits, size_t offset, size_t size) {
+int get_next_token(const thrust::device_vector<float> &logits, size_t offset, size_t size)
+{
     // Find the iterator to the maximum element in the specified range
     auto max_it = thrust::max_element(logits.begin() + offset, logits.begin() + offset + size);
     // Return the index of that element by calculating the distance from the beginning of the range
@@ -35,16 +38,17 @@ int get_next_token(const thrust::device_vector<float>& logits, size_t offset, si
 
 // Formats a prompt for the Llama 3 model.
 std::string llama3_format(
-    const std::string& prompt,
-    const std::optional<std::string>& hint,
-    const std::string& system = "You are a helpful, respectful and honest assistant."
-) {
+    const std::string &prompt,
+    const std::optional<std::string> &hint,
+    const std::string &system = "You are a helpful, respectful and honest assistant.")
+{
     std::string temp = "<|begin_of_text|>";
     temp += std::format("<|start_header_id|>system<|end_header_id|>\n\n{}<|eot_id|>", system);
     temp += std::format("<|start_header_id|>user<|end_header_id|>\n\n{}<|eot_id|>", prompt);
     temp += "<|start_header_id|>assistant<|end_header_id|>\n\n";
 
-    if (hint) {
+    if (hint)
+    {
         temp += *hint;
     }
 
@@ -55,32 +59,23 @@ int main()
 {
     std::cout << "hello world!" << std::endl;
 
-
     /// tokenizer test
 
-    try {
-        std::string model_path = "/home/ingim/Workspace/model-index/meta-llama--Llama-3.2-1B-Instruct/tokenizer.model";
-        auto tokenizer = bpe::llama3_tokenizer(model_path);
+    std::string model_path = "/home/ingim/Workspace/model-index/meta-llama--Llama-3.2-1B-Instruct/tokenizer.model";
+    auto tokenizer = bpe::llama3_tokenizer(model_path);
 
-        std::string text = llama3_format("What is the capital of France?", std::nullopt);
-        
-        std::cout << "Original text: " << text << std::endl;
+    std::string text = llama3_format("What is the capital of France?", std::nullopt);
 
-        // Encode the text
-        auto tokens = tokenizer.encode_with_special_tokens(text);
-        std::cout << "Encoded tokens: ";
-        print_tokens(tokens);
+    std::cout << "Original text: " << text << std::endl;
 
-        // Decode the tokens
-        std::string decoded_text = tokenizer.decode(tokens);
-        std::cout << "Decoded text: " << decoded_text << std::endl;
+    // Encode the text
+    auto tokens = tokenizer.encode_with_special_tokens(text);
+    std::cout << "Encoded tokens: ";
+    print_tokens(tokens);
 
-    } catch (const std::exception& e) {
-        std::cerr << "Error: " << e.what() << std::endl;
-        return 1;
-    }
-
-
+    // Decode the tokens
+    std::string decoded_text = tokenizer.decode(tokens);
+    std::cout << "Decoded text: " << decoded_text << std::endl;
 
     // --- Print ztensor metadata for llama1b.zt ---
     std::string pie_home;
@@ -116,11 +111,30 @@ int main()
         // Extract config details needed for setup
         // IMPORTANT: The model class should expose its config. For this example, we re-load it.
         // In a better design, model.config() would be a public method.
-        L4maConfig config = load_l4ma_config_from_yaml(config_path);
+        L4maConfig config = model.get_config();
+        config.print();
+
+        // construct input_ids from tokens
+        thrust::device_vector<uint32_t> input_ids(tokens.begin(), tokens.end());
+
+        // create a uninitalized vector with size equal to the number of len(input_ids) * config.hidden_size
+        thrust::device_vector<__nv_bfloat16> embed_output(input_ids.size() * config.hidden_size);
 
 
+        model.embed_input_ids(input_ids, embed_output);
 
-        
+        // Print first 10 elements of embed_output
+        size_t print_count = std::min<size_t>(10, embed_output.size());
+        std::vector<__nv_bfloat16> host_embed_output(print_count);
+        thrust::copy(embed_output.begin(), embed_output.begin() + print_count, host_embed_output.begin());
+        std::cout << "First 10 elements of embed_output: ";
+        for (size_t i = 0; i < print_count; ++i) {
+            // Convert __nv_bfloat16 to float for printing
+            float val = static_cast<float>(host_embed_output[i]);
+            std::cout << val << " ";
+        }
+        std::cout << std::endl;
+
         // // --- 3. Prepare Inputs (Simulate a Tokenized Prompt) ---
         // // In a real application, this would come from a tokenizer.
         // // Let's create a sample prompt with 5 tokens.

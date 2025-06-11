@@ -331,7 +331,19 @@ void gemm_cublasLt(cublasLtHandle_t ltHandle, cudaStream_t stream, const T *A, c
     cublasLtMatrixLayoutDestroy(Bdesc);
     cublasLtMatrixLayoutDestroy(Cdesc);
 }
-void L4maConfig::print() const { /* Omitted for brevity */ }
+void L4maConfig::print() const {
+    printf("L4maConfig:\n");
+    printf("  hidden_size: %d\n", hidden_size);
+    printf("  intermediate_size: %d\n", intermediate_size);
+    printf("  num_attention_heads: %d\n", num_attention_heads);
+    printf("  num_key_value_heads: %d\n", num_key_value_heads);
+    printf("  num_hidden_layers: %d\n", num_hidden_layers);
+    printf("  use_qkv_bias: %s\n", use_qkv_bias ? "true" : "false");
+    printf("  rms_norm_eps: %g\n", rms_norm_eps);
+    printf("  vocab_size: %d\n", vocab_size);
+    printf("  pad_token_id: %d\n", pad_token_id);
+    printf("  rope_base: %g\n", rope_base);
+}
 
 // *** FIXED IMPLEMENTATION ***
 L4maConfig load_l4ma_config_from_yaml(const std::string &yaml_path)
