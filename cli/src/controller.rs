@@ -3,46 +3,49 @@ use anyhow::{Result, anyhow, bail};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 use std::path::{Path, PathBuf};
+use std::fs::{OpenOptions, create_dir_all};
 use tokio::time::sleep;
-use tracing::{info, error, warn, debug};
+use tracing::{info, warn, debug};
 use serde_json::Value;
+use crate::spinner::{with_spinner, with_dynamic_spinner};
+use crate::constants::{network, spinner as spinner_constants};
 
 #[derive(Subcommand)]
 pub enum ControllerCommands {
     /// Start the pie controller and its child processes (engine-manager and engine)
     Start {
         /// Host address for the controller services
-        #[arg(long, default_value = "127.0.0.1")]
+        #[arg(long, default_value = network::DEFAULT_HOST)]
         host: String,
 
         /// Port for the engine management service
-        #[arg(long, default_value = "8080")]
+        #[arg(long, default_value_t = network::DEFAULT_HTTP_PORT)]
         port: u16,
 
         /// Engine WebSocket port
-        #[arg(long, default_value = "9123")]
+        #[arg(long, default_value_t = network::DEFAULT_GRPC_PORT)]
         engine_port: u16,
     },
 
     /// Check the status of controller and managed processes
     Status {
         /// Host address for the controller services
-        #[arg(long, default_value = "127.0.0.1")]
+        #[arg(long, default_value = network::DEFAULT_HOST)]
         host: String,
 
         /// Port for the engine management service
-        #[arg(long, default_value = "8080")]
+        #[arg(long, default_value_t = network::DEFAULT_HTTP_PORT)]
         port: u16,
     },
 
     /// Stop the controller and all managed processes
     Stop {
         /// Host address for the controller services
-        #[arg(long, default_value = "127.0.0.1")]
+        #[arg(long, default_value = network::DEFAULT_HOST)]
         host: String,
 
         /// Port for the engine management service
-        #[arg(long, default_value = "8080")]
+        #[arg(long, default_value_t = network::DEFAULT_HTTP_PORT)]
         port: u16,
     },
 }
@@ -62,34 +65,70 @@ pub async fn handle_command(cmd: ControllerCommands) -> Result<()> {
 }
 
 async fn start_controller(host: &str, port: u16, _engine_port: u16) -> Result<()> {
-    info!("Starting Pie controller...");
-
     // Check if engine-manager is already running
     if check_engine_manager_health(&format!("http://{}:{}", host, port)).await {
-        println!("Engine-manager is already running at http://{}:{}", host, port);
-        println!("Use 'pie-cli controller status' to check status");
+        println!("✓ Engine-manager is already running at http://{}:{}", host, port);
+        println!("  Use 'pie-cli controller status' to check status");
         return Ok(());
     }
 
-    // Start engine-manager process in detached mode
-    info!("Starting engine-manager on {}:{}", host, port);
-    start_engine_manager_detached(host, port)?;
+    // Start the spinner immediately and run the entire startup process
+    let startup_future = async {
+        // Start engine-manager process in detached mode
+        start_engine_manager_detached(host, port).await?;
 
-    // Wait a bit for engine-manager to start
-    sleep(Duration::from_secs(2)).await;
+        // Wait for engine-manager to start with a spinning indicator
+        // Instead of a single 2-second sleep, we'll do smaller sleeps
+        // and update the spinner message to show progress
+        for i in 1..=spinner_constants::CONTROLLER_STARTUP_CYCLES {
+            tokio::time::sleep(spinner_constants::STARTUP_SLEEP_DURATION).await;
 
-    // Verify engine-manager is responding
-    if !check_engine_manager_health(&format!("http://{}:{}", host, port)).await {
-        error!("Engine-manager failed to start properly");
-        bail!("Failed to start engine-manager");
-    }
+            // The spinner will keep spinning during this time automatically
+            // because it's running in the tokio::select! loop
+
+            // After 1 second, we can start trying health checks
+            if i >= spinner_constants::HEALTH_CHECK_START_CYCLES {
+                let management_url = format!("http://{}:{}", host, port);
+                if check_engine_manager_health(&management_url).await {
+                    return Ok(());
+                }
+            }
+        }
+
+        // If we get here, do additional health check retries
+        let management_url = format!("http://{}:{}", host, port);
+        for attempt in 1..=5 {
+            if check_engine_manager_health(&management_url).await {
+                return Ok(());
+            }
+            if attempt < 5 {
+                sleep(Duration::from_millis(500)).await;
+            }
+        }
+
+        Err(anyhow!("Engine-manager did not become healthy within reasonable time"))
+    };
+
+    // Run with dynamic spinner that shows progress during waiting
+    let message_updates = vec![
+        (Duration::from_millis(500), "Starting engine-manager process...".to_string()),
+        (Duration::from_millis(1000), "Waiting for service initialization...".to_string()),
+        (Duration::from_millis(1500), "Checking service health...".to_string()),
+    ];
+
+    with_dynamic_spinner(
+        startup_future,
+        &format!("Starting engine-manager on {}:{}...", host, port),
+        "Engine-manager started successfully!",
+        message_updates
+    ).await?;
 
     info!("Engine-manager started successfully");
-
     info!("Pie controller started successfully!");
-    info!("Engine management service available at: http://{}:{}", host, port);
-    info!("Use 'pie-cli controller status' to check status");
-    info!("Use 'pie-cli controller stop' to stop all services");
+
+    println!("🚀 Engine management service available at: http://{}:{}", host, port);
+    println!("   Use 'pie-cli controller status' to check status");
+    println!("   Use 'pie-cli controller stop' to stop all services");
 
     Ok(())
 }
@@ -126,12 +165,24 @@ fn find_engine_manager_binary() -> Result<PathBuf> {
     bail!("Could not find pie_engine_manager binary. Please ensure it's compiled or in PATH.")
 }
 
-fn start_engine_manager_detached(host: &str, port: u16) -> Result<()> {
+async fn start_engine_manager_detached(host: &str, port: u16) -> Result<()> {
     let binary_path = find_engine_manager_binary()?;
+
+    // Create logs directory if it doesn't exist
+    create_dir_all("logs").unwrap_or_default();
+
+    // Create log file for engine-manager
+    let timestamp = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let log_file_name = format!("logs/engine-manager-{}-{}.log", port, timestamp);
+    let log_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_file_name)?;
 
     let mut cmd = Command::new(&binary_path);
     cmd.args(&[
         "--port", &port.to_string(),
+        "--no-color",  // Disable ANSI colors for clean log files
     ]);
 
     // Add bind-all if not localhost
@@ -139,15 +190,18 @@ fn start_engine_manager_detached(host: &str, port: u16) -> Result<()> {
         cmd.arg("--bind-all");
     }
 
-    // Detach the process - don't capture stdout/stderr
-    cmd.stdout(Stdio::null())
-       .stderr(Stdio::null())
+    // Redirect output to log file
+    cmd.stdout(Stdio::from(log_file.try_clone()?))
+       .stderr(Stdio::from(log_file))
        .stdin(Stdio::null());
 
     info!("Starting engine-manager from: {}", binary_path.display());
+    info!("Engine-manager logs will be written to: {}", log_file_name);
 
-    cmd.spawn()
+    let child = cmd.spawn()
         .map_err(|e| anyhow!("Failed to start engine-manager from {}: {}", binary_path.display(), e))?;
+
+    info!("Engine-manager started with PID: {}", child.id());
 
     Ok(())
 }
@@ -236,36 +290,42 @@ async fn check_status(host: &str, port: u16) -> Result<()> {
 }
 
 async fn stop_controller(host: &str, port: u16) -> Result<()> {
-    info!("Stopping Pie controller...");
+    let shutdown_future = async {
+        info!("Stopping Pie controller...");
 
-    let client = reqwest::Client::new();
-    let base_url = format!("http://{}:{}", host, port);
-    let shutdown_url = format!("{}/shutdown", base_url);
+        let client = reqwest::Client::new();
+        let base_url = format!("http://{}:{}", host, port);
+        let shutdown_url = format!("{}/shutdown", base_url);
 
-    match client.post(&shutdown_url).send().await {
-        Ok(response) if response.status().is_success() => {
-            match response.json::<Value>().await {
-                Ok(result) => {
-                    if let Some(message) = result.get("message") {
-                        println!("{}", message.as_str().unwrap_or("Engine-manager is shutting down"));
-                    } else {
-                        println!("Engine-manager is shutting down");
+        match client.post(&shutdown_url).send().await {
+            Ok(response) if response.status().is_success() => {
+                match response.json::<Value>().await {
+                    Ok(result) => {
+                        let message = result.get("message")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("Engine-manager service is shutting down");
+                        Ok(message.to_string())
+                    }
+                    Err(_) => {
+                        Ok("Engine-manager service is shutting down".to_string())
                     }
                 }
-                Err(_) => {
-                    println!("Engine-manager is shutting down");
-                }
+            }
+            Ok(response) => {
+                Err(anyhow!("Failed to shutdown: HTTP {}", response.status()))
+            }
+            Err(e) => {
+                Err(anyhow!("Cannot connect to engine-manager at {}: {}", base_url, e))
             }
         }
-        Ok(response) => {
-            warn!("Shutdown request returned status: {}", response.status());
-            println!("Controller may not have stopped properly");
-        }
-        Err(e) => {
-            warn!("Failed to send shutdown request: {}", e);
-            println!("Controller may not be running or not accessible at {}:{}", host, port);
-        }
-    }
+    };
+
+    // Run with spinner
+    with_spinner(
+        shutdown_future,
+        "Stopping Pie controller...",
+        ""
+    ).await?;
 
     info!("Pie controller stop command completed");
     Ok(())

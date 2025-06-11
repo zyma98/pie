@@ -43,7 +43,7 @@ impl AppState {
                 // If Terminated, a heartbeat should ideally not occur or be ignored.
                 false
             };
-            
+
             if status_changed {
                 Ok(Some(backend.status.clone()))
             } else {
@@ -73,5 +73,35 @@ impl AppState {
         } else {
             Err("Backend not found")
         }
+    }
+
+    /// Check for backends that haven't sent heartbeats within the timeout period
+    /// and mark them as unresponsive. Returns the number of backends marked as unresponsive.
+    pub fn check_for_timeouts(&mut self, timeout_secs: u64) -> Vec<(Uuid, String)> {
+        let now = std::time::SystemTime::now();
+        let mut marked_unresponsive = Vec::new();
+
+        for (backend_id, backend) in &mut self.backends {
+            // Only check running backends for timeouts
+            if backend.status != BackendStatus::Running {
+                continue;
+            }
+
+            if let Some(last_heartbeat) = backend.last_heartbeat {
+                if let Ok(elapsed) = now.duration_since(last_heartbeat) {
+                    if elapsed.as_secs() > timeout_secs {
+                        let backend_name = backend.capabilities.iter()
+                            .find(|cap| cap.starts_with("name:"))
+                            .map(|cap| cap[5..].to_string())
+                            .unwrap_or_else(|| format!("Backend-{}", backend_id));
+
+                        backend.status = BackendStatus::Unresponsive;
+                        marked_unresponsive.push((*backend_id, backend_name));
+                    }
+                }
+            }
+        }
+
+        marked_unresponsive
     }
 }

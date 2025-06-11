@@ -189,10 +189,56 @@ pub async fn controller_stop_handler() -> Result<Json<Value>, StatusCode> {
 }
 
 // POST /shutdown - Gracefully shutdown the engine-manager service
-pub async fn shutdown_handler() -> Result<Json<Value>, StatusCode> {
+pub async fn shutdown_handler(
+    State(state): State<SharedState>,
+) -> Result<Json<Value>, StatusCode> {
+    tracing::info!("=== SHUTDOWN HANDLER CALLED ===");
     tracing::info!("Received shutdown request");
 
-    // First stop any running engine processes
+    // First, terminate all registered backends
+    let backends_to_terminate = {
+        let state_guard = state.read().unwrap();
+        tracing::info!("Found {} backends registered for termination", state_guard.backends.len());
+        for (id, info) in &state_guard.backends {
+            tracing::info!("Backend {} at {}", id, info.management_api_address);
+        }
+        state_guard.backends.clone()
+    };
+
+    if !backends_to_terminate.is_empty() {
+        tracing::info!("Terminating {} registered backends", backends_to_terminate.len());
+
+        for (backend_id, backend_info) in backends_to_terminate {
+            let mgmt_api_address = &backend_info.management_api_address;
+            tracing::info!("Sending terminate signal to backend {} at {}", backend_id, mgmt_api_address);
+
+            // Send terminate request to backend's management API
+            let terminate_url = format!("{}/manage/terminate", mgmt_api_address);
+            tracing::info!("Constructed terminate URL: {}", terminate_url);
+            let client = reqwest::Client::new();
+
+            match client.post(&terminate_url).send().await {
+                Ok(response) if response.status().is_success() => {
+                    tracing::info!("Successfully sent terminate signal to backend {}", backend_id);
+                }
+                Ok(response) => {
+                    tracing::warn!("Backend {} responded with status {} to terminate request",
+                                 backend_id, response.status());
+                }
+                Err(e) => {
+                    tracing::error!("Failed to send terminate signal to backend {}: {}", backend_id, e);
+                }
+            }
+        }
+
+        // Wait a bit for backends to terminate gracefully
+        tracing::info!("Waiting for backends to terminate gracefully...");
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+    } else {
+        tracing::info!("No backends registered, proceeding with shutdown");
+    }
+
+    // Then stop any running engine processes
     let processes = get_controller_processes();
     let mut processes_guard = processes.lock().unwrap();
 
@@ -216,6 +262,6 @@ pub async fn shutdown_handler() -> Result<Json<Value>, StatusCode> {
 
     Ok(Json(json!({
         "status": "shutting_down",
-        "message": "Engine-manager service is shutting down"
+        "message": "Engine-manager service is shutting down after terminating all backends"
     })))
 }

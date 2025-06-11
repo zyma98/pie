@@ -23,6 +23,10 @@ struct Args {
     /// Port to listen on
     #[arg(short = 'p', long = "port", default_value = "3000")]
     port: u16,
+
+    /// Disable colored output (useful when redirecting to files)
+    #[arg(long = "no-color", help = "Disable colored output")]
+    no_color: bool,
 }
 
 #[tokio::main]
@@ -30,11 +34,40 @@ async fn main() {
     let args = Args::parse();
 
     // Initialize tracing with info level by default
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .init();
+    if args.no_color {
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_ansi(false)
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .init();
+    }
 
     let shared_state = Arc::new(RwLock::new(AppState::new()));
+
+    // Start timeout monitoring task
+    let timeout_state = shared_state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
+        interval.tick().await; // First tick is immediate
+
+        loop {
+            interval.tick().await;
+
+            let timeout_backends = {
+                let mut state = timeout_state.write().unwrap();
+                state.check_for_timeouts(35)
+            };
+
+            if !timeout_backends.is_empty() {
+                for (backend_id, backend_name) in timeout_backends {
+                    tracing::warn!("Backend {} ({}) marked as unresponsive due to timeout", backend_name, backend_id);
+                }
+            }
+        }
+    });
 
     // Build our application with routes
     let app = Router::new()

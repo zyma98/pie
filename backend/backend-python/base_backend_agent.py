@@ -3,7 +3,7 @@ Base Backend Agent for Symphony/Pie model backends.
 
 This module provides a base class that handles:
 - Registration with the engine-management-service
-- Heartbeat maintenance 
+- Heartbeat maintenance
 - Local management API for receiving commands
 - Model loading/unloading operations
 
@@ -41,14 +41,14 @@ class ModelUnloadRequest(BaseModel):
 class BaseBackendAgent(ABC):
     """
     Base class for Symphony/Pie backend agents.
-    
+
     Handles registration, heartbeat, and basic management API.
     Model-specific backends should inherit and implement abstract methods.
     """
-    
-    def __init__(self, 
-                 management_service_url: str, 
-                 backend_host: str, 
+
+    def __init__(self,
+                 management_service_url: str,
+                 backend_host: str,
                  backend_api_port: int,
                  backend_type: str,
                  service_name: str,
@@ -57,7 +57,7 @@ class BaseBackendAgent(ABC):
                  shutdown_callback: Callable = None):
         """
         Initialize the backend agent.
-        
+
         Args:
             management_service_url: URL of the engine management service
             backend_host: Host for the backend's local management API
@@ -75,27 +75,27 @@ class BaseBackendAgent(ABC):
         self.service_name = service_name
         self.ipc_endpoint = ipc_endpoint
         self.shutdown_callback = shutdown_callback
-        
+
         self.capabilities = {
             "type": backend_type,
             "name": service_name,
             "supported_models": supported_models or [],
             "ipc_endpoint": ipc_endpoint
         }
-        
+
         # Backend ID will be assigned by management service on registration
         self.backend_id = None
-        
+
         self.heartbeat_thread = None
         self.api_thread = None
         self.stop_event = threading.Event()
-        
+
         # Track loaded models
         self.loaded_models = {}
-        
+
         # Setup FastAPI app
         self.local_api_app = FastAPI(
-            title=f"{service_name} Management API", 
+            title=f"{service_name} Management API",
             version="0.1.0",
             description=f"Management API for {service_name} backend"
         )
@@ -103,13 +103,13 @@ class BaseBackendAgent(ABC):
 
     def _setup_routes(self):
         """Setup the management API routes."""
-        
+
         @self.local_api_app.get("/manage/health", tags=["Management"])
         async def health_check():
             """Provides the health status of the backend agent."""
             return {
-                "status": "healthy", 
-                "backend_id": self.backend_id, 
+                "status": "healthy",
+                "backend_id": self.backend_id,
                 "service_name": self.service_name,
                 "backend_type": self.backend_type,
                 "loaded_models": list(self.loaded_models.keys()),
@@ -120,24 +120,24 @@ class BaseBackendAgent(ABC):
         async def terminate_backend():
             """Signals the backend agent and main service to terminate."""
             logger.info(f"Received terminate command for backend {self.backend_id} ({self.service_name}). Initiating shutdown.")
-            
+
             # Call shutdown callback if provided
             if self.shutdown_callback:
                 try:
                     self.shutdown_callback()
                 except Exception as e:
                     logger.error(f"Error in shutdown callback: {e}")
-            
+
             # Signal agent to stop
             self.stop()
-            
+
             # Schedule process termination after a brief delay to allow response
             def delayed_exit():
                 time.sleep(1)
                 os._exit(0)
-            
+
             threading.Thread(target=delayed_exit, daemon=True).start()
-            
+
             return {"message": "Termination initiated. Process will exit shortly."}
 
         @self.local_api_app.post("/manage/models/load", tags=["Model Management"])
@@ -146,7 +146,7 @@ class BaseBackendAgent(ABC):
             try:
                 logger.info(f"Loading model: {request.model_name}")
                 result = await self._load_model_impl(request)
-                
+
                 if result.get("success", False):
                     self.loaded_models[request.model_name] = {
                         "model_path": request.model_path,
@@ -155,26 +155,26 @@ class BaseBackendAgent(ABC):
                         "additional_params": request.additional_params
                     }
                     logger.info(f"Successfully loaded model: {request.model_name}")
-                
+
                 return result
-                
+
             except Exception as e:
                 logger.error(f"Failed to load model {request.model_name}: {e}")
                 raise HTTPException(status_code=500, detail=f"Failed to load model: {str(e)}")
 
-        @self.local_api_app.post("/manage/models/unload", tags=["Model Management"])  
+        @self.local_api_app.post("/manage/models/unload", tags=["Model Management"])
         async def unload_model(request: ModelUnloadRequest):
             """Unload a model from the backend."""
             try:
                 logger.info(f"Unloading model: {request.model_name}")
                 result = await self._unload_model_impl(request)
-                
+
                 if result.get("success", False):
                     self.loaded_models.pop(request.model_name, None)
                     logger.info(f"Successfully unloaded model: {request.model_name}")
-                
+
                 return result
-                
+
             except Exception as e:
                 logger.error(f"Failed to unload model {request.model_name}: {e}")
                 raise HTTPException(status_code=500, detail=f"Failed to unload model: {str(e)}")
@@ -191,23 +191,23 @@ class BaseBackendAgent(ABC):
     async def _load_model_impl(self, request: ModelLoadRequest) -> Dict[str, Any]:
         """
         Implementation-specific model loading logic.
-        
+
         Args:
             request: Model load request with model details
-            
+
         Returns:
             Dict with success status and any additional info
         """
         pass
 
-    @abstractmethod  
+    @abstractmethod
     async def _unload_model_impl(self, request: ModelUnloadRequest) -> Dict[str, Any]:
         """
         Implementation-specific model unloading logic.
-        
+
         Args:
             request: Model unload request
-            
+
         Returns:
             Dict with success status and any additional info
         """
@@ -237,7 +237,7 @@ class BaseBackendAgent(ABC):
             except socket.error as e:
                 logger.warning(f"Could not determine IP/hostname, using '127.0.0.1'. Error: {e}")
                 host_to_report = "127.0.0.1"
-        
+
         return f"http://{host_to_report}:{self.backend_api_port}"
 
     def register(self):
@@ -247,7 +247,7 @@ class BaseBackendAgent(ABC):
             return True
 
         registration_url = f"{self.management_service_url}/backends/register"
-        
+
         # Convert capabilities to the format expected by engine-management-service
         # Capabilities should be a list of strings, not an object
         capabilities_list = []
@@ -262,26 +262,26 @@ class BaseBackendAgent(ABC):
                 capabilities_list.append(f"ipc_endpoint:{self.capabilities['ipc_endpoint']}")
         else:
             capabilities_list = self.capabilities if self.capabilities else []
-        
+
         payload = {
             "capabilities": capabilities_list,
             "management_api_address": self.get_management_api_address()
         }
-        
+
         try:
             logger.info(f"Registering backend '{self.service_name}' to {registration_url}")
             response = requests.post(registration_url, json=payload, timeout=10)
             response.raise_for_status()
             data = response.json()
             self.backend_id = data.get("backend_id")
-            
+
             if self.backend_id:
                 logger.info(f"Backend registered successfully. Received backend_id: {self.backend_id}")
                 return True
             else:
                 logger.error(f"Registration response did not include backend_id. Response: {data}")
                 return False
-                
+
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to register backend '{self.service_name}': {e}")
             return False
@@ -289,13 +289,13 @@ class BaseBackendAgent(ABC):
     def _send_heartbeat_loop(self):
         """Main heartbeat loop."""
         heartbeat_url_template = f"{self.management_service_url}/backends/{{backend_id}}/heartbeat"
-        
+
         # Initial registration attempt if we don't have a backend_id
         if not self.backend_id:
             logger.info("No backend_id found, attempting initial registration.")
             if not self.register():
                 logger.warning("Initial registration failed. Will retry periodically during heartbeat loop.")
-        
+
         while not self.stop_event.is_set():
             # If we don't have a backend_id, try to register
             if not self.backend_id:
@@ -312,7 +312,7 @@ class BaseBackendAgent(ABC):
                 response = requests.post(current_heartbeat_url, timeout=5)
                 response.raise_for_status()
                 logger.debug(f"Heartbeat successful for '{self.service_name}'. Status: {response.status_code}")
-                
+
             except requests.exceptions.RequestException as e:
                 logger.error(f"Failed to send heartbeat for '{self.service_name}': {e}")
                 if isinstance(e, requests.exceptions.HTTPError) and e.response.status_code == 404:
@@ -320,8 +320,8 @@ class BaseBackendAgent(ABC):
                                    "Management service may have restarted. Clearing backend_id.")
                     self.backend_id = None
                     # Will attempt re-registration on next loop iteration
-            
-            self.stop_event.wait(30)  # Wait 30 seconds between heartbeats
+
+            self.stop_event.wait(10)  # Wait 10 seconds between heartbeats
 
         logger.info(f"Heartbeat loop stopped for '{self.service_name}'.")
 
@@ -338,9 +338,9 @@ class BaseBackendAgent(ABC):
             try:
                 logger.info(f"Starting local management API for '{self.service_name}' on {self.backend_host}:{self.backend_api_port}")
                 uvicorn.run(
-                    self.local_api_app, 
-                    host=self.backend_host, 
-                    port=self.backend_api_port, 
+                    self.local_api_app,
+                    host=self.backend_host,
+                    port=self.backend_api_port,
                     log_level="warning",
                     access_log=False  # Reduce log noise
                 )
@@ -371,13 +371,13 @@ class BaseBackendAgent(ABC):
         """Stop the backend agent."""
         logger.info(f"Stopping BackendAgent for '{self.service_name}'...")
         self.stop_event.set()
-        
+
         if self.heartbeat_thread and self.heartbeat_thread.is_alive():
             logger.debug(f"Waiting for heartbeat thread of '{self.service_name}' to join...")
             self.heartbeat_thread.join(timeout=5)
             if self.heartbeat_thread.is_alive():
                 logger.warning(f"Heartbeat thread of '{self.service_name}' did not join in time.")
-        
+
         logger.info(f"BackendAgent for '{self.service_name}' stop sequence complete.")
 
     def wait_until_stopped(self):
