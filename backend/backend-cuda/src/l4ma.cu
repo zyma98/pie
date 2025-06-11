@@ -5,9 +5,25 @@
 #include <thrust/copy.h>
 #include <thrust/host_vector.h>
 #include <cassert>
+#include <cstdint>
 #include <iostream>
 #include <flashinfer/norm.cuh>
 #include <flashinfer/activation.cuh>
+
+// Helper to get pointer alignment (inspired by the provided example)
+uint32_t _getAlignment(const void *ptr)
+{
+    uintptr_t address = reinterpret_cast<uintptr_t>(ptr);
+    if (address % 16 == 0)
+        return 16;
+    if (address % 8 == 0)
+        return 8;
+    if (address % 4 == 0)
+        return 4;
+    if (address % 2 == 0)
+        return 2;
+    return 1;
+}
 
 // Macro for error checking
 #define CUDA_CHECK(call)                                                                                       \
@@ -202,7 +218,6 @@ void silu_and_mul(
     cudaLaunchKernelEx(&config, kernel, out_ptr, in_ptr, d_half);
 }
 
-
 /***************************************************************************************************
  * HELPER FUNCTIONS
  ***************************************************************************************************/
@@ -225,6 +240,36 @@ struct CudaDataType<__nv_bfloat16>
     static constexpr cudaDataType_t value = CUDA_R_16BF;
 };
 
+// Helper function to convert cudaDataType_t to a string for printing
+const char* cudaDataTypeToString(cudaDataType_t dtype) {
+    switch (dtype) {
+        case CUDA_R_16F:    return "CUDA_R_16F (half)";
+        case CUDA_R_16BF:   return "CUDA_R_16BF (bfloat16)";
+        case CUDA_R_32F:    return "CUDA_R_32F (float)";
+        case CUDA_R_64F:    return "CUDA_R_64F (double)";
+        case CUDA_R_8I:     return "CUDA_R_8I (int8)";
+        case CUDA_R_8U:     return "CUDA_R_8U (uint8)";
+        case CUDA_R_32I:    return "CUDA_R_32I (int32)";
+        case CUDA_R_32U:    return "CUDA_R_32U (uint32)";
+        default:            return "Unknown CUDA Data Type";
+    }
+}
+
+// Helper function to convert cublasComputeType_t to a string for printing
+const char* cublasComputeTypeToString(cublasComputeType_t ctype) {
+    switch (ctype) {
+        case CUBLAS_COMPUTE_16F:      return "CUBLAS_COMPUTE_16F";
+        case CUBLAS_COMPUTE_32F:      return "CUBLAS_COMPUTE_32F";
+        case CUBLAS_COMPUTE_32F_FAST_16F: return "CUBLAS_COMPUTE_32F_FAST_16F";
+        case CUBLAS_COMPUTE_32F_FAST_16BF: return "CUBLAS_COMPUTE_32F_FAST_16BF";
+        case CUBLAS_COMPUTE_32F_FAST_TF32: return "CUBLAS_COMPUTE_32F_FAST_TF32";
+        case CUBLAS_COMPUTE_64F:      return "CUBLAS_COMPUTE_64F";
+        case CUBLAS_COMPUTE_32I:      return "CUBLAS_COMPUTE_32I";
+        default:                      return "Unknown CUBLAS Compute Type";
+    }
+}
+
+
 template <typename T>
 void gemm_cublasLt(cublasLtHandle_t ltHandle, cudaStream_t stream, const T *A, const T *B, T *C,
                    int m, int n, int k, bool transa = false, bool transb = false)
@@ -233,26 +278,59 @@ void gemm_cublasLt(cublasLtHandle_t ltHandle, cudaStream_t stream, const T *A, c
     cublasLtMatmulDesc_t matmulDesc;
     cublasLtMatrixLayout_t Adesc, Bdesc, Cdesc;
 
-    CUBLAS_CHECK(cublasLtMatmulDescCreate(&matmulDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F));
+    cudaDataType_t cuda_dtype = CudaDataType<T>::value;
+    cublasComputeType_t compute_type;
+
+    // Determine compute type based on data type T
+    if (cuda_dtype == CUDA_R_16F || cuda_dtype == CUDA_R_16BF) {
+        compute_type = CUBLAS_COMPUTE_32F; // A common and safe choice for FP16/BF16
+    } else if (cuda_dtype == CUDA_R_32F) {
+        compute_type = CUBLAS_COMPUTE_32F;
+    } else {
+        // Fallback for other types, may need adjustment
+        compute_type = CUBLAS_COMPUTE_32F;
+    }
+
+    CUBLAS_CHECK(cublasLtMatmulDescCreate(&matmulDesc, compute_type, CUDA_R_32F));
     cublasOperation_t opA = transa ? CUBLAS_OP_T : CUBLAS_OP_N;
     cublasOperation_t opB = transb ? CUBLAS_OP_T : CUBLAS_OP_N;
     CUBLAS_CHECK(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSA, &opA, sizeof(opA)));
     CUBLAS_CHECK(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSB, &opB, sizeof(opB)));
 
-    cudaDataType_t dtype = CudaDataType<T>::value;
-    // Note: Leading dimension (last arg) for row-major matrix is the number of columns (the 'n' in k-by-n)
-    CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&Adesc, dtype, transa ? k : m, transa ? m : k, transa ? m : k));
-    CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&Bdesc, dtype, transb ? n : k, transb ? k : n, transb ? k : n));
-    CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&Cdesc, dtype, m, n, n));
+    // Assuming Row-Major Layout for inputs
+    int64_t lda = transa ? m : k;
+    int64_t ldb = transb ? k : n;
+    int64_t ldc = n; // For row-major C matrix, leading dimension is the number of columns
 
+    CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&Adesc, cuda_dtype, transa ? k : m, transa ? m : k, lda));
+    CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&Bdesc, cuda_dtype, transb ? n : k, transb ? k : n, ldb));
+    CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&Cdesc, cuda_dtype, m, n, ldc));
+
+    // --- Start of Debug Printout ---
+    printf("--------------------------------------------------\n");
+    printf("[DEBUG] cuBLASLt GEMM Configuration:\n");
+    printf("  Problem Dimensions:\n");
+    printf("    m: %d, n: %d, k: %d\n", m, n, k);
+    printf("  Transpose Options:\n");
+    printf("    transa: %s, transb: %s\n", transa ? "Yes (T)" : "No (N)", transb ? "Yes (T)" : "No (N)");
+    printf("  Data Types:\n");
+    printf("    Matrix A/B/C Type: %s\n", cudaDataTypeToString(cuda_dtype));
+    printf("    Compute Type:      %s\n", cublasComputeTypeToString(compute_type));
+    printf("  Leading Dimensions (Row-Major assumption):\n");
+    printf("    lda: %lld, ldb: %lld, ldc: %lld\n", (long long)lda, (long long)ldb, (long long)ldc);
+    printf("--------------------------------------------------\n");
+    // --- End of Debug Printout ---
+
+
+    // This is the line that was failing (L283)
     CUBLAS_CHECK(cublasLtMatmul(ltHandle, matmulDesc, &alpha, A, Adesc, B, Bdesc, &beta, C, Cdesc, C, Cdesc, nullptr, nullptr, 0, stream));
+
 
     cublasLtMatmulDescDestroy(matmulDesc);
     cublasLtMatrixLayoutDestroy(Adesc);
     cublasLtMatrixLayoutDestroy(Bdesc);
     cublasLtMatrixLayoutDestroy(Cdesc);
 }
-
 void L4maConfig::print() const { /* Omitted for brevity */ }
 
 // *** FIXED IMPLEMENTATION ***

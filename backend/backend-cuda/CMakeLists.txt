@@ -55,6 +55,7 @@ CPMAddPackage(
 add_executable(cuda_app
     src/main.cu
     src/l4ma.cu
+    src/bpe.cpp
 )
 
 # 6. Set compiler flags and options for the target

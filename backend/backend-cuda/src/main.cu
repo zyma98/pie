@@ -7,6 +7,17 @@
 #include <thrust/host_vector.h>
 #include <thrust/sequence.h>
 #include <thrust/extrema.h>
+#include "bpe.hpp"
+#include <string>
+#include <format>
+
+void print_tokens(const std::vector<bpe::Rank>& tokens) {
+    std::cout << "[";
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        std::cout << tokens[i] << (i == tokens.size() - 1 ? "" : ", ");
+    }
+    std::cout << "]" << std::endl;
+}
 
 /**
  * @brief Finds the index of the maximum element in a portion of a device vector.
@@ -22,10 +33,54 @@ int get_next_token(const thrust::device_vector<float>& logits, size_t offset, si
     return thrust::distance(logits.begin() + offset, max_it);
 }
 
+// Formats a prompt for the Llama 3 model.
+std::string llama3_format(
+    const std::string& prompt,
+    const std::optional<std::string>& hint,
+    const std::string& system = "You are a helpful, respectful and honest assistant."
+) {
+    std::string temp = "<|begin_of_text|>";
+    temp += std::format("<|start_header_id|>system<|end_header_id|>\n\n{}<|eot_id|>", system);
+    temp += std::format("<|start_header_id|>user<|end_header_id|>\n\n{}<|eot_id|>", prompt);
+    temp += "<|start_header_id|>assistant<|end_header_id|>\n\n";
+
+    if (hint) {
+        temp += *hint;
+    }
+
+    return temp;
+}
 
 int main()
 {
     std::cout << "hello world!" << std::endl;
+
+
+    /// tokenizer test
+
+    try {
+        std::string model_path = "/home/ingim/Workspace/model-index/meta-llama--Llama-3.2-1B-Instruct/tokenizer.model";
+        auto tokenizer = bpe::llama3_tokenizer(model_path);
+
+        std::string text = llama3_format("What is the capital of France?", std::nullopt);
+        
+        std::cout << "Original text: " << text << std::endl;
+
+        // Encode the text
+        auto tokens = tokenizer.encode_with_special_tokens(text);
+        std::cout << "Encoded tokens: ";
+        print_tokens(tokens);
+
+        // Decode the tokens
+        std::string decoded_text = tokenizer.decode(tokens);
+        std::cout << "Decoded text: " << decoded_text << std::endl;
+
+    } catch (const std::exception& e) {
+        std::cerr << "Error: " << e.what() << std::endl;
+        return 1;
+    }
+
+
 
     // --- Print ztensor metadata for llama1b.zt ---
     std::string pie_home;
@@ -47,7 +102,7 @@ int main()
     std::string zt_path = pie_home + "/llama1b.zt";
 
     // set config_path to "./l4ma.yaml"
-    std::string config_path = "./l4ma.yaml";
+    std::string config_path = "../../l4ma.yaml";
     const int MAX_TOTAL_TOKENS = 2048;
 
     try
