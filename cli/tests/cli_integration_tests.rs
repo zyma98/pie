@@ -97,23 +97,25 @@ async fn test_backend_help_command() {
 }
 
 #[tokio::test]
-async fn test_backend_list_command_stub() {
+async fn test_backend_list_without_service() {
+    // Test that backend list fails gracefully when no management service is running
     let mut cmd = Command::new(TestContext::get_cli_binary());
     cmd.arg("backend").arg("list");
     cmd.assert()
-        .success()
-        .stdout(predicate::str::contains("will be implemented in Phase"));
+        .failure() // Expected to fail when no management service is running
+        .stderr(predicate::str::contains("Failed to connect to management service"));
 }
 
 #[tokio::test]
-async fn test_backend_start_command_stub() {
+async fn test_backend_start_without_config() {
+    // Test that backend start fails gracefully when configuration is missing
     let mut cmd = Command::new(TestContext::get_cli_binary());
     cmd.arg("backend")
         .arg("start")
         .arg("test-backend-type");
     cmd.assert()
-        .success()
-        .stdout(predicate::str::contains("will be implemented in Phase"));
+        .failure() // Expected to fail because test-backend-type doesn't exist
+        .stderr(predicate::str::contains("Unknown model or backend type"));
 }
 
 // Model command tests (Phase 4 - stubs for now)
@@ -229,10 +231,76 @@ async fn test_controller_with_mock_engine_manager() {
 }
 
 #[tokio::test]
-#[ignore] // Ignored until Phase 3 implementation
 async fn test_backend_registration_flow() {
-    // This test would verify backend registration with the engine-manager
-    // Implementation would be added in Phase 3
+    use std::process::{Command, Stdio};
+    use tokio::time::{timeout, Duration};
+
+    // Start engine manager service for testing
+    let test_port = 18081; // Use a different port to avoid conflicts
+
+    // Check if engine manager binary exists
+    let engine_manager_check = Command::new("cargo")
+        .args(&["check", "--bin", "pie_engine_manager"])
+        .current_dir("../engine-manager")
+        .output();
+
+    if engine_manager_check.is_err() {
+        println!("Skipping test: engine-manager binary not available");
+        return;
+    }
+
+    // Start the engine manager in the background
+    let mut engine_manager = Command::new("cargo")
+        .args(&["run", "--bin", "pie_engine_manager", "--", "--port", &test_port.to_string()])
+        .current_dir("../engine-manager")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("Failed to start engine manager");
+
+    // Wait for service to be ready with timeout
+    let service_url = format!("http://127.0.0.1:{}", test_port);
+    let health_url = format!("{}/health", service_url);
+
+    let service_ready = timeout(Duration::from_secs(10), async {
+        for _ in 0..20 {
+            if let Ok(response) = reqwest::get(&health_url).await {
+                if response.status().is_success() {
+                    return true;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        false
+    }).await;
+
+    if !service_ready.unwrap_or(false) {
+        engine_manager.kill().expect("Failed to kill engine manager");
+        let _ = engine_manager.wait();
+        panic!("Engine manager service did not become ready in time");
+    }
+
+    // Test backend list with running service
+    let mut cmd = Command::new(TestContext::get_cli_binary());
+    cmd.arg("backend")
+        .arg("list")
+        .arg("--management-service-url")
+        .arg(&service_url);
+
+    let output = cmd.output().expect("Failed to execute command");
+
+    // Should succeed and show no backends
+    assert!(output.status.success(),
+        "Backend list command failed: {}",
+        String::from_utf8_lossy(&output.stderr));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("No backends currently registered") || stdout.contains("Registered Backends"),
+        "Unexpected output: {}", stdout);
+
+    // Clean up: terminate the engine manager
+    engine_manager.kill().expect("Failed to kill engine manager");
+    let _ = engine_manager.wait();
 }
 
 #[tokio::test]
