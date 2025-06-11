@@ -118,74 +118,77 @@ int main()
         // In a better design, model.config() would be a public method.
         L4maConfig config = load_l4ma_config_from_yaml(config_path);
 
-        // --- 3. Prepare Inputs (Simulate a Tokenized Prompt) ---
-        // In a real application, this would come from a tokenizer.
-        // Let's create a sample prompt with 5 tokens.
-        thrust::host_vector<int32_t> h_input_ids = {101, 2054, 2003, 2026, 102};
-        thrust::device_vector<int32_t> d_input_ids = h_input_ids;
-        int num_input_tokens = d_input_ids.size();
 
-        // Create position IDs: [0, 1, 2, 3, 4]
-        thrust::device_vector<int32_t> d_position_ids(num_input_tokens);
-        thrust::sequence(d_position_ids.begin(), d_position_ids.end());
-        std::cout << "Prepared input with " << num_input_tokens << " tokens." << std::endl;
 
-        // --- 4. Prepare Paged KV Cache ---
-        // This simulates what an inference server's memory manager would do.
-        const int batch_size = 1; // We are processing one prompt
-        const int num_kv_heads = config.num_key_value_heads;
-        const int head_dim = config.head_dim();
-        const int num_layers = config.num_hidden_layers;
+        
+        // // --- 3. Prepare Inputs (Simulate a Tokenized Prompt) ---
+        // // In a real application, this would come from a tokenizer.
+        // // Let's create a sample prompt with 5 tokens.
+        // thrust::host_vector<int32_t> h_input_ids = {101, 2054, 2003, 2026, 102};
+        // thrust::device_vector<int32_t> d_input_ids = h_input_ids;
+        // int num_input_tokens = d_input_ids.size();
 
-        // Allocate the main KV cache buffers
-        const int num_cache_pages = (MAX_TOTAL_TOKENS / PAGE_SIZE) * num_layers;
-        size_t cache_buffer_size = num_cache_pages * PAGE_SIZE * num_kv_heads * head_dim;
-        thrust::device_vector<__nv_bfloat16> kv_cache_k(cache_buffer_size);
-        thrust::device_vector<__nv_bfloat16> kv_cache_v(cache_buffer_size);
+        // // Create position IDs: [0, 1, 2, 3, 4]
+        // thrust::device_vector<int32_t> d_position_ids(num_input_tokens);
+        // thrust::sequence(d_position_ids.begin(), d_position_ids.end());
+        // std::cout << "Prepared input with " << num_input_tokens << " tokens." << std::endl;
 
-        // Metadata to describe the cache layout for this request
-        // For a single prompt prefill, the layout is simple.
-        int pages_for_request = (num_input_tokens + PAGE_SIZE - 1) / PAGE_SIZE;
+        // // --- 4. Prepare Paged KV Cache ---
+        // // This simulates what an inference server's memory manager would do.
+        // const int batch_size = 1; // We are processing one prompt
+        // const int num_kv_heads = config.num_key_value_heads;
+        // const int head_dim = config.head_dim();
+        // const int num_layers = config.num_hidden_layers;
 
-        // kv_page_indices: The list of physical page numbers assigned to this request
-        thrust::device_vector<int32_t> d_kv_page_indices(pages_for_request);
-        thrust::sequence(d_kv_page_indices.begin(), d_kv_page_indices.end()); // Assign pages [0, 1, 2, ...]
+        // // Allocate the main KV cache buffers
+        // const int num_cache_pages = (MAX_TOTAL_TOKENS / PAGE_SIZE) * num_layers;
+        // size_t cache_buffer_size = num_cache_pages * PAGE_SIZE * num_kv_heads * head_dim;
+        // thrust::device_vector<__nv_bfloat16> kv_cache_k(cache_buffer_size);
+        // thrust::device_vector<__nv_bfloat16> kv_cache_v(cache_buffer_size);
 
-        // kv_page_indptr: Start and end pointers into the kv_page_indices list for each sequence in the batch
-        thrust::device_vector<int32_t> d_kv_page_indptr = {0, pages_for_request};
+        // // Metadata to describe the cache layout for this request
+        // // For a single prompt prefill, the layout is simple.
+        // int pages_for_request = (num_input_tokens + PAGE_SIZE - 1) / PAGE_SIZE;
 
-        // kv_last_page_lens: The number of tokens in the last page of each sequence. For prefill, it's 0.
-        thrust::device_vector<int32_t> d_kv_last_page_lens = {0};
+        // // kv_page_indices: The list of physical page numbers assigned to this request
+        // thrust::device_vector<int32_t> d_kv_page_indices(pages_for_request);
+        // thrust::sequence(d_kv_page_indices.begin(), d_kv_page_indices.end()); // Assign pages [0, 1, 2, ...]
 
-        // qo_indptr: Start and end indices for tokens in the flat input_ids tensor.
-        thrust::device_vector<int32_t> d_qo_indptr = {0, num_input_tokens};
+        // // kv_page_indptr: Start and end pointers into the kv_page_indices list for each sequence in the batch
+        // thrust::device_vector<int32_t> d_kv_page_indptr = {0, pages_for_request};
 
-        std::cout << "KV Cache allocated and configured for prefill." << std::endl;
+        // // kv_last_page_lens: The number of tokens in the last page of each sequence. For prefill, it's 0.
+        // thrust::device_vector<int32_t> d_kv_last_page_lens = {0};
 
-        // --- 5. Run Inference ---
-        thrust::device_vector<float> d_logits;
-        cudaStream_t stream = 0; // Use default stream
+        // // qo_indptr: Start and end indices for tokens in the flat input_ids tensor.
+        // thrust::device_vector<int32_t> d_qo_indptr = {0, num_input_tokens};
 
-        std::cout << "\nRunning forward pass..." << std::endl;
-        model.forward(d_logits, d_input_ids, d_position_ids,
-                      kv_cache_k, kv_cache_v,
-                      thrust::raw_pointer_cast(d_kv_page_indices.data()),
-                      thrust::raw_pointer_cast(d_kv_page_indptr.data()),
-                      thrust::raw_pointer_cast(d_kv_last_page_lens.data()),
-                      thrust::raw_pointer_cast(d_qo_indptr.data()),
-                      batch_size, stream);
+        // std::cout << "KV Cache allocated and configured for prefill." << std::endl;
 
-        // Wait for all CUDA kernels to finish
-        cudaDeviceSynchronize();
-        std::cout << "Forward pass complete." << std::endl;
+        // // --- 5. Run Inference ---
+        // thrust::device_vector<float> d_logits;
+        // cudaStream_t stream = 0; // Use default stream
 
-        // --- 6. Get Result ---
-        // We want the logits for the *last* token to predict the next one.
-        size_t last_token_offset = (num_input_tokens - 1) * config.vocab_size;
-        int next_token_id = get_next_token(d_logits, last_token_offset, config.vocab_size);
+        // std::cout << "\nRunning forward pass..." << std::endl;
+        // model.forward(d_logits, d_input_ids, d_position_ids,
+        //               kv_cache_k, kv_cache_v,
+        //               thrust::raw_pointer_cast(d_kv_page_indices.data()),
+        //               thrust::raw_pointer_cast(d_kv_page_indptr.data()),
+        //               thrust::raw_pointer_cast(d_kv_last_page_lens.data()),
+        //               thrust::raw_pointer_cast(d_qo_indptr.data()),
+        //               batch_size, stream);
 
-        std::cout << "\n--- Inference Result ---" << std::endl;
-        std::cout << "Predicted Next Token ID: " << next_token_id << std::endl;
+        // // Wait for all CUDA kernels to finish
+        // cudaDeviceSynchronize();
+        // std::cout << "Forward pass complete." << std::endl;
+
+        // // --- 6. Get Result ---
+        // // We want the logits for the *last* token to predict the next one.
+        // size_t last_token_offset = (num_input_tokens - 1) * config.vocab_size;
+        // int next_token_id = get_next_token(d_logits, last_token_offset, config.vocab_size);
+
+        // std::cout << "\n--- Inference Result ---" << std::endl;
+        // std::cout << "Predicted Next Token ID: " << next_token_id << std::endl;
     }
     catch (const std::exception &e)
     {

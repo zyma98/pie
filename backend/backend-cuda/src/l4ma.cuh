@@ -173,6 +173,17 @@ public:
                  int batch_size,
                  cudaStream_t stream);
 
+    L4maConfig get_config() const { return config_; }
+
+    void embed_input_ids(thrust::device_vector<T> &output,
+                         const thrust::device_vector<int32_t> &input_ids,
+                         cudaStream_t stream)
+    {
+
+        // print the shape of embedding_weights_ thrust vec
+        int num_tokens = input_ids.size();
+    }
+
 private:
     L4maConfig config_;
     cublasLtHandle_t cublaslt_handle_;
