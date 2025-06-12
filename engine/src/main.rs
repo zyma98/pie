@@ -17,7 +17,7 @@ mod utils;
 
 //
 use anyhow::Context;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 // use crate::client::{Client, hash_program};
 use crate::l4m::L4m;
@@ -121,19 +121,11 @@ async fn async_main() -> anyhow::Result<()> {
                 .default_value("http://127.0.0.1:8080"),
         )
         .arg(
-            Arg::new("http")
-                .short('H')
-                .long("http")
-                .action(clap::ArgAction::SetTrue)
-                .help("Run the HTTP server")
-                .default_value("false"),
-        )
-        .arg(
             Arg::new("port")
                 .short('p')
                 .long("port")
                 .value_name("PORT")
-                .help("Port to run the HTTP server on")
+                .help("Port to run the client entry point")
                 .default_value("9123"),
         )
         .arg(
@@ -147,9 +139,8 @@ async fn async_main() -> anyhow::Result<()> {
         .get_matches();
 
     let _program_name = matches.get_one::<String>("program").unwrap();
-    let _is_http = matches.get_one::<bool>("http").unwrap();
     let port = matches.get_one::<String>("port").unwrap();
-    let _port: u16 = port.parse().unwrap_or(9123);
+    let port: u16 = port.parse().unwrap_or(9123);
     let use_dummy = matches.get_one::<bool>("dummy").unwrap();
     let use_dummy = *use_dummy;
 
@@ -170,7 +161,10 @@ async fn async_main() -> anyhow::Result<()> {
     let runtime = Runtime::new();
     runtime.load_existing_programs(Path::new(PROGRAM_CACHE_DIR))?;
 
-    let server = Server::new("127.0.0.1:9123");
+    // Get port from args
+    let server_url = format!("127.0.0.1:{}", port);
+    log_user!("Server URL: {}", server_url);
+    let server = Server::new(&server_url);
     let messaging_inst2inst = PubSub::new();
     let messaging_user2inst = PushPull::new();
 
