@@ -1,5 +1,5 @@
 #include "l4ma.cuh"
-
+#include "common.cuh"
 #include "ztensor.hpp"
 #include <yaml-cpp/yaml.h>
 #include <thrust/copy.h>
@@ -24,29 +24,6 @@ uint32_t _getAlignment(const void *ptr)
         return 2;
     return 1;
 }
-
-// Macro for error checking
-#define CUDA_CHECK(call)                                                                                       \
-    do                                                                                                         \
-    {                                                                                                          \
-        cudaError_t err = call;                                                                                \
-        if (err != cudaSuccess)                                                                                \
-        {                                                                                                      \
-            fprintf(stderr, "CUDA Error in %s at line %d: %s\n", __FILE__, __LINE__, cudaGetErrorString(err)); \
-            exit(EXIT_FAILURE);                                                                                \
-        }                                                                                                      \
-    } while (0)
-
-#define CUBLAS_CHECK(status)                                                                            \
-    do                                                                                                  \
-    {                                                                                                   \
-        cublasStatus_t _status = (status);                                                              \
-        if (_status != CUBLAS_STATUS_SUCCESS)                                                           \
-        {                                                                                               \
-            fprintf(stderr, "cuBLAS Error in %s at line %d: Status %d\n", __FILE__, __LINE__, _status); \
-            exit(EXIT_FAILURE);                                                                         \
-        }                                                                                               \
-    } while (0)
 
 /***************************************************************************************************
  * CUDA KERNELS

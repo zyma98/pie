@@ -6,19 +6,6 @@
 #include <stdexcept>
 #include <type_traits>
 
-// Simple macro for checking CUBLAS API calls
-#define CUBLAS_CHECK(status)                                    \
-    do                                                          \
-    {                                                           \
-        cublasStatus_t err = (status);                          \
-        if (err != CUBLAS_STATUS_SUCCESS)                       \
-        {                                                       \
-            fprintf(stderr, "cuBLAS error at %s:%d, code=%d\n", \
-                    __FILE__, __LINE__, err);                   \
-            exit(EXIT_FAILURE);                                 \
-        }                                                       \
-    } while (0)
-
 /**
  * @brief High-performance CUDA kernel for embedding lookup.
  *
@@ -192,6 +179,53 @@ static uint32_t getAlignment(const void *ptr)
 }
 
 template <typename T>
+void gemm_cublasLt2(cublasLtHandle_t ltHandle, cudaStream_t stream, const T *A, const T *B, T *C,
+                    int m, int n, int k, bool transa, bool transb)
+{
+    float alpha = 1.0f, beta = 0.0f;
+    cublasLtMatmulDesc_t matmulDesc;
+    cublasLtMatrixLayout_t Adesc, Bdesc, Cdesc;
+
+    cudaDataType_t cuda_dtype = get_cuda_data_type<T>();
+    cublasComputeType_t compute_type;
+
+    // Determine compute type based on data type T
+    if (cuda_dtype == CUDA_R_16F || cuda_dtype == CUDA_R_16BF)
+    {
+        compute_type = CUBLAS_COMPUTE_32F; // A common and safe choice for FP16/BF16
+    }
+    else if (cuda_dtype == CUDA_R_32F)
+    {
+        compute_type = CUBLAS_COMPUTE_32F;
+    }
+    else
+    {
+        compute_type = CUBLAS_COMPUTE_32F;
+    }
+
+    CUBLAS_CHECK(cublasLtMatmulDescCreate(&matmulDesc, compute_type, CUDA_R_32F));
+
+    cublasOperation_t opA = transa ? CUBLAS_OP_T : CUBLAS_OP_N;
+    cublasOperation_t opB = transb ? CUBLAS_OP_T : CUBLAS_OP_N;
+    CUBLAS_CHECK(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSA, &opB, sizeof(opB)));
+    CUBLAS_CHECK(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSB, &opA, sizeof(opA)));
+
+    CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&Adesc, cuda_dtype, n, k, n));
+    CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&Bdesc, cuda_dtype, k, m, k));
+    CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&Cdesc, cuda_dtype, n, m, n));
+
+    CUBLAS_CHECK(cublasLtMatmul(ltHandle, matmulDesc, &alpha, B, Adesc, A, Bdesc, &beta, C, Cdesc, C, Cdesc, nullptr, nullptr, 0, stream));
+
+    cublasLtMatmulDescDestroy(matmulDesc);
+    cublasLtMatrixLayoutDestroy(Adesc);
+    cublasLtMatrixLayoutDestroy(Bdesc);
+    cublasLtMatrixLayoutDestroy(Cdesc);
+}
+
+template void gemm_cublasLt2(cublasLtHandle_t, cudaStream_t, const __nv_bfloat16 *, const __nv_bfloat16 *, __nv_bfloat16 *,
+                             int, int, int, bool, bool);
+
+template <typename T>
 void gemm_cublasLt(cublasLtHandle_t ltHandle,
                    cudaStream_t stream,
                    const thrust::device_vector<T> &A,
@@ -208,6 +242,7 @@ void gemm_cublasLt(cublasLtHandle_t ltHandle,
         return;
     }
 
+    // --- Pointers and Workspace Setup ---
     const T *d_A = thrust::raw_pointer_cast(A.data());
     const T *d_B = thrust::raw_pointer_cast(B.data());
     T *d_C = thrust::raw_pointer_cast(C.data());
@@ -215,60 +250,89 @@ void gemm_cublasLt(cublasLtHandle_t ltHandle,
     void *d_workspace = thrust::raw_pointer_cast(workspace.data());
     size_t workspaceSize = workspace.size();
 
+    // --- Scaling Factors ---
     float alpha = 1.0f;
     float beta = (d_bias != nullptr) ? 1.0f : 0.0f;
 
+    // --- Descriptors for cuBLASLt ---
     cublasLtMatmulDesc_t matmulDesc = nullptr;
     cublasLtMatrixLayout_t Adesc = nullptr, Bdesc = nullptr, Cdesc = nullptr;
     cublasLtMatmulPreference_t preference = nullptr;
 
-    // Use the new helper function to get the data type
+    // --- Data and Compute Type Configuration ---
     cudaDataType_t cuda_dtype = get_cuda_data_type<T>();
     cublasComputeType_t compute_type;
+    cudaDataType_t scale_type = CUDA_R_32F; // Use FP32 for alpha/beta for precision
 
-    if (cuda_dtype == CUDA_R_32F)
+    if (std::is_same<T, float>::value)
     {
-        compute_type = CUBLAS_COMPUTE_32F_FAST_TF32;
-    }
-    else if (cuda_dtype == CUDA_R_16F || cuda_dtype == CUDA_R_16BF)
-    {
-        compute_type = CUBLAS_COMPUTE_32F;
+        compute_type = CUBLAS_COMPUTE_32F_FAST_TF32; // Use TF32 for float GEMM
     }
     else
     {
-        compute_type = CUBLAS_COMPUTE_32F;
+        compute_type = CUBLAS_COMPUTE_32F; // Accumulate in FP32 for mixed-precision
     }
 
-    CUBLAS_CHECK(cublasLtMatmulDescCreate(&matmulDesc, compute_type, CUDA_R_32F));
-    CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&Adesc, cuda_dtype, transa ? k : m, transa ? m : k, transa ? m : k));
-    CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&Bdesc, cuda_dtype, transb ? n : k, transb ? k : n, transb ? k : n));
-    CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&Cdesc, cuda_dtype, m, n, n));
+    // --- Core Correction using (A*B)^T = op(B)^T * op(A)^T strategy ---
+    // We ask cuBLAS to compute C_col(n,m) = op(B)^T_col(n,k) * op(A)^T_col(k,m).
+    // This is achieved by swapping the inputs (B becomes the first matrix, A the second)
+    // and providing the correctly transformed operations and layouts.
 
-    cublasOperation_t opA = transa ? CUBLAS_OP_T : CUBLAS_OP_N;
-    cublasOperation_t opB = transb ? CUBLAS_OP_T : CUBLAS_OP_N;
-    CUBLAS_CHECK(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSA, &opA, sizeof(opA)));
-    CUBLAS_CHECK(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSB, &opB, sizeof(opB)));
+    // 1. Determine the operations for the swapped multiplication.
+    // To get op(M)^T: if the original op was N, the new op is T. If the original was T, the new op is N.
+    cublasOperation_t opA_swapped = transa ? CUBLAS_OP_N : CUBLAS_OP_T;
+    cublasOperation_t opB_swapped = transb ? CUBLAS_OP_N : CUBLAS_OP_T;
 
+    // 2. Create the Matmul Descriptor with the swapped & transformed operations.
+    CUBLAS_CHECK(cublasLtMatmulDescCreate(&matmulDesc, compute_type, scale_type));
+    CUBLAS_CHECK(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSA, &opB_swapped, sizeof(opB_swapped)));
+    CUBLAS_CHECK(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSB, &opA_swapped, sizeof(opA_swapped)));
+
+    // 3. Create the matrix layouts.
+    // These must describe the matrices AS THEY ARE STORED IN MEMORY (row-major).
+    // The input m, n, k define the shape of the OPERATION: C(m,n) = op(A)(m,k) * op(B)(k,n).
+    // From this, we deduce the stored shape.
+    // Stored A: if transa is false, it's (m,k). If true, it's (k,m).
+    // Stored B: if transb is false, it's (k,n). If true, it's (n,k).
+    // The leading dimension (ld) for a row-major matrix is its number of columns.
+    int rowsA = transa ? k : m;
+    int colsA = transa ? m : k;
+    int lda = colsA;
+
+    int rowsB = transb ? n : k;
+    int colsB = transb ? k : n;
+    int ldb = colsB;
+
+    int ldc = n; // C is always stored as m x n, so its ld is n.
+
+    // Layout for A (describes the physical matrix in memory)
+    CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&Adesc, cuda_dtype, rowsA, colsA, lda));
+    // Layout for B (describes the physical matrix in memory)
+    CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&Bdesc, cuda_dtype, rowsB, colsB, ldb));
+    // Layout for C. The col-major result of B^T A^T is (n, m). This fits perfectly
+    // into a row-major C of (m,n), so we describe the result matrix as (n,m)
+    // with a leading dimension of n (ldc).
+    CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&Cdesc, cuda_dtype, n, m, ldc));
+
+    // 4. Configure Epilogue (Bias Addition)
     cublasLtEpilogue_t epilogue = CUBLASLT_EPILOGUE_DEFAULT;
     if (d_bias != nullptr)
     {
         epilogue = CUBLASLT_EPILOGUE_BIAS;
-        void *non_const_bias = const_cast<void *>(static_cast<const void *>(d_bias));
-        CUBLAS_CHECK(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &non_const_bias, sizeof(non_const_bias)));
+        void *d_bias_nonconst = const_cast<void *>(static_cast<const void *>(d_bias));
+        CUBLAS_CHECK(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &d_bias_nonconst, sizeof(d_bias_nonconst)));
     }
     CUBLAS_CHECK(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_EPILOGUE, &epilogue, sizeof(epilogue)));
 
+    // --- Algorithm Heuristics ---
     CUBLAS_CHECK(cublasLtMatmulPreferenceCreate(&preference));
     CUBLAS_CHECK(cublasLtMatmulPreferenceSetAttribute(preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspaceSize, sizeof(workspaceSize)));
 
-    uint32_t alignA = getAlignment(d_A), alignB = getAlignment(d_B), alignC = getAlignment(d_C);
-    CUBLAS_CHECK(cublasLtMatmulPreferenceSetAttribute(preference, CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_A_BYTES, &alignA, sizeof(alignA)));
-    CUBLAS_CHECK(cublasLtMatmulPreferenceSetAttribute(preference, CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_B_BYTES, &alignB, sizeof(alignB)));
-    CUBLAS_CHECK(cublasLtMatmulPreferenceSetAttribute(preference, CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_C_BYTES, &alignC, sizeof(alignC)));
-
     int returnedResults = 0;
     cublasLtMatmulHeuristicResult_t heuristicResult = {};
-    CUBLAS_CHECK(cublasLtMatmulAlgoGetHeuristic(ltHandle, matmulDesc, Adesc, Bdesc, Cdesc, Cdesc, preference, 1, &heuristicResult, &returnedResults));
+
+    // Note the order of descriptors: Bdesc, Adesc, Cdesc
+    CUBLAS_CHECK(cublasLtMatmulAlgoGetHeuristic(ltHandle, matmulDesc, Bdesc, Adesc, Cdesc, Cdesc, preference, 1, &heuristicResult, &returnedResults));
 
     if (returnedResults == 0)
     {
@@ -276,16 +340,28 @@ void gemm_cublasLt(cublasLtHandle_t ltHandle,
     }
     else
     {
-        CUBLAS_CHECK(cublasLtMatmul(ltHandle, matmulDesc, &alpha, d_A, Adesc, d_B, Bdesc, &beta,
-                                    d_C, Cdesc, d_C, Cdesc,
+        // 5. Execute the Matmul
+        // Note the order of pointers: d_B, d_A, d_C
+        CUBLAS_CHECK(cublasLtMatmul(ltHandle, matmulDesc, &alpha,
+                                    d_B, Bdesc, // First matrix is B
+                                    d_A, Adesc, // Second matrix is A
+                                    &beta,
+                                    d_C, Cdesc,
+                                    d_C, Cdesc, // D is the same as C for this operation
                                     &heuristicResult.algo, d_workspace, workspaceSize, stream));
     }
 
-    cublasLtMatmulPreferenceDestroy(preference);
-    cublasLtMatmulDescDestroy(matmulDesc);
-    cublasLtMatrixLayoutDestroy(Adesc);
-    cublasLtMatrixLayoutDestroy(Bdesc);
-    cublasLtMatrixLayoutDestroy(Cdesc);
+    // --- Cleanup ---
+    if (preference)
+        CUBLAS_CHECK(cublasLtMatmulPreferenceDestroy(preference));
+    if (Cdesc)
+        CUBLAS_CHECK(cublasLtMatrixLayoutDestroy(Cdesc));
+    if (Bdesc)
+        CUBLAS_CHECK(cublasLtMatrixLayoutDestroy(Bdesc));
+    if (Adesc)
+        CUBLAS_CHECK(cublasLtMatrixLayoutDestroy(Adesc));
+    if (matmulDesc)
+        CUBLAS_CHECK(cublasLtMatmulDescDestroy(matmulDesc));
 }
 
 template void gemm_cublasLt(cublasLtHandle_t,
@@ -309,3 +385,30 @@ template void gemm_cublasLt(cublasLtHandle_t,
                             thrust::device_vector<char> &,
                             bool,
                             bool);
+
+void multiply_bf16_cublas(cublasHandle_t handle,
+                          const __nv_bfloat16 *A, const __nv_bfloat16 *B, __nv_bfloat16 *C,
+                          int m, int n, int k, bool transa, bool transb)
+{
+
+    // Use FP32 for accumulation to preserve precision.
+    float alpha = 1.0f;
+    float beta = 0.0f;
+
+    cublasOperation_t opA = transa ? CUBLAS_OP_T : CUBLAS_OP_N;
+    cublasOperation_t opB = transb ? CUBLAS_OP_T : CUBLAS_OP_N;
+
+    CUBLAS_CHECK(cublasGemmEx(handle,
+                              opB,
+                              opA,
+                              n,
+                              m,
+                              k,
+                              &alpha,
+                              B, CUDA_R_16BF, n,
+                              A, CUDA_R_16BF, k,
+                              &beta,
+                              C, CUDA_R_16BF, n,
+                              CUDA_R_32F,
+                              CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+}

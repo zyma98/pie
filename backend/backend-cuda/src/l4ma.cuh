@@ -159,6 +159,74 @@ public:
                  cublasLtHandle_t ltHandle,
                  cudaStream_t stream);
 
+    void simple_forward(const thrust::device_vector<T> &input)
+    {
+        // Only project Q, K, V using gemm_cublasLt
+        int batch = input.size() / config_.hidden_size;
+        int hs = config_.hidden_size;
+        int nq = config_.num_attention_heads;
+        int nkv = config_.num_key_value_heads;
+        int hd = config_.head_dim();
+
+        // Print batch, hs, nq, ...
+        std::cout << "Batch: " << batch << ", HS: " << hs
+                  << ", NQ: " << nq << ", NKV: " << nkv
+                  << ", HD: " << hd << std::endl;
+
+        // Allocate output buffers for Q, K, V
+        thrust::device_vector<T> q_proj(batch * nq * hd);
+        thrust::device_vector<T> k_proj(batch * nkv * hd);
+        thrust::device_vector<T> v_proj(batch * nkv * hd);
+        thrust::device_vector<char> workspace(1024 * 1024 * 128);
+
+        // No bias for projections
+        const thrust::device_vector<T> *no_bias = nullptr;
+        cublasLtHandle_t ltHandle;
+        cublasLtCreate(&ltHandle);
+        cudaStream_t stream = 0; // Default stream
+
+        compute_bfloat16_mean(input);
+
+        // Q projection: [batch, nq*hd] = [batch, hs] x [hs, nq*hd]^T
+        // gemm_cublasLt2<T>(ltHandle, stream,
+        //                   thrust::raw_pointer_cast(input.data()),
+        //                   thrust::raw_pointer_cast(q_proj_weights_.data()),
+        //                   thrust::raw_pointer_cast(q_proj.data()),
+        //                   batch, nq * hd, hs, false, true, false);
+
+        cublasHandle_t handle;
+        CUBLAS_CHECK(cublasCreate(&handle));
+
+        multiply_bf16_cublas(handle,
+                             thrust::raw_pointer_cast(input.data()),
+                             thrust::raw_pointer_cast(q_proj_weights_.data()),
+                             thrust::raw_pointer_cast(q_proj.data()),
+                             batch, nq * hd, hs, false, true);
+
+        compute_bfloat16_mean(q_proj);
+        
+        gemm_cublasLt2<__nv_bfloat16>(
+                    ltHandle, stream,
+                    thrust::raw_pointer_cast(input.data()),
+                    thrust::raw_pointer_cast(q_proj_weights_.data()),
+                    thrust::raw_pointer_cast(q_proj.data()),
+                    batch, nq * hd, hs, false, true);
+
+
+        // gemm_cublasLt<__nv_bfloat16>(
+        //     ltHandle, stream,
+        //     input,
+        //     q_proj_weights_,
+        //     no_bias,
+        //     q_proj,
+        //     batch, nq * hd, hs, workspace,
+        //     false, false);
+
+        compute_bfloat16_mean(q_proj);
+
+        cublasLtDestroy(ltHandle);
+    }
+
 private:
     L4maConfig config_;
     thrust::device_vector<T> q_proj_weights_, k_proj_weights_, v_proj_weights_, o_proj_weights_;
@@ -193,13 +261,9 @@ public:
     {
         thrust::device_vector<T> out1(input.size());
 
-        uint32_t batch_size = static_cast<uint32_t>(input.size()) / config_.hidden_size;
+        uint32_t batch_size = input.size() / config_.hidden_size;
         uint32_t stride = config_.hidden_size;
         uint32_t d = config_.hidden_size;
-
-        // print stride
-        std::cout << "input.size(): " << input.size() << std::endl;
-        config_.print();
 
         flashinfer::norm::RMSNorm<T>(
             const_cast<T *>(thrust::raw_pointer_cast(input.data())),
@@ -207,7 +271,9 @@ public:
             thrust::raw_pointer_cast(out1.data()),
             batch_size, d, stride, stride, config_.rms_norm_eps);
 
-        compute_bfloat16_mean(out1);
+        // compute_bfloat16_mean(out1);
+
+        self_attn_.simple_forward(out1);
     }
 
 private:

@@ -3,12 +3,14 @@
 #include <thrust/device_vector.h>
 #include <cublasLt.h>
 #include <cuda_runtime.h>
+#include <cublas_v2.h>
+
 #include <stdexcept>
 #include <cstdint>
 #include <cstdio>
 
 // A simple CUDA error-checking macro for robust code.
-#define CHECK_CUDA(call)                                                                               \
+#define CUDA_CHECK(call)                                                                               \
     do                                                                                                 \
     {                                                                                                  \
         cudaError_t err = call;                                                                        \
@@ -17,6 +19,19 @@
             fprintf(stderr, "CUDA Error: %s at %s:%d\n", cudaGetErrorString(err), __FILE__, __LINE__); \
             throw std::runtime_error(cudaGetErrorString(err));                                         \
         }                                                                                              \
+    } while (0)
+
+// Simple macro for checking CUBLAS API calls
+#define CUBLAS_CHECK(status)                                    \
+    do                                                          \
+    {                                                           \
+        cublasStatus_t err = (status);                          \
+        if (err != CUBLAS_STATUS_SUCCESS)                       \
+        {                                                       \
+            fprintf(stderr, "cuBLAS error at %s:%d, code=%d\n", \
+                    __FILE__, __LINE__, err);                   \
+            exit(EXIT_FAILURE);                                 \
+        }                                                       \
     } while (0)
 
 // Forward declare the datatypes from CUDA headers
@@ -45,6 +60,10 @@ void embed(
     cudaStream_t stream);
 
 template <typename T>
+void gemm_cublasLt2(cublasLtHandle_t ltHandle, cudaStream_t stream, const T *A, const T *B, T *C,
+                    int m, int n, int k, bool transa, bool transb);
+
+template <typename T>
 void gemm_cublasLt(cublasLtHandle_t ltHandle,
                    cudaStream_t stream,
                    const thrust::device_vector<T> &A,
@@ -55,3 +74,7 @@ void gemm_cublasLt(cublasLtHandle_t ltHandle,
                    thrust::device_vector<char> &workspace,
                    bool transa,
                    bool transb);
+
+void multiply_bf16_cublas(cublasHandle_t handle,
+                          const __nv_bfloat16 *A, const __nv_bfloat16 *B, __nv_bfloat16 *C,
+                          int m, int n, int k, bool transa, bool transb);
