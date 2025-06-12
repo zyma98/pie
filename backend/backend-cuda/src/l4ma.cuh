@@ -14,6 +14,8 @@
 #include <optional>
 #include <unordered_map>
 #include "flashinfer/norm.cuh"
+#include "flashinfer/pos_enc.cuh"
+
 // Forward Declarations
 struct L4maConfig;
 template <typename T>
@@ -168,11 +170,6 @@ public:
         int nkv = config_.num_key_value_heads;
         int hd = config_.head_dim();
 
-        // Print batch, hs, nq, ...
-        std::cout << "Batch: " << batch << ", HS: " << hs
-                  << ", NQ: " << nq << ", NKV: " << nkv
-                  << ", HD: " << hd << std::endl;
-
         // Allocate output buffers for Q, K, V
         thrust::device_vector<T> q_proj(batch * nq * hd);
         thrust::device_vector<T> k_proj(batch * nkv * hd);
@@ -223,7 +220,6 @@ public:
             batch, nq * hd, hs, workspace,
             false, true);
 
-
         gemm_cublasLt<__nv_bfloat16>(
             ltHandle, stream,
             input,
@@ -242,6 +238,56 @@ public:
             batch, nkv * hd, hs, workspace,
             false, true);
 
+        thrust::device_vector<uint32_t> indices(batch);
+
+        // fill in 0..batch to indices
+        thrust::transform(
+            thrust::make_counting_iterator<uint32_t>(0),
+            thrust::make_counting_iterator<uint32_t>(batch),
+            indices.begin(),
+            thrust::identity<uint32_t>());
+
+        // cudaError_t BatchQKApplyLlama31RotaryPosIds(
+        //     DType* q, DType* k, DType* q_rope, DType* k_rope, IdType* pos_ids, uint32_t nnz,
+        //     uint32_t num_qo_heads, uint32_t num_kv_heads, uint32_t rotary_dim, uint32_t head_dim,
+        //     size_t q_stride_n, size_t q_stride_h, size_t k_stride_n, size_t k_stride_h,
+        //     size_t q_rope_stride_n, size_t q_rope_stride_h, size_t k_rope_stride_n, size_t k_rope_stride_h,
+        //     bool interleave, float rope_scale, float rope_theta, float low_freq_factor,
+        //     float high_freq_factor, float old_context_length, cudaStream_t stream = nullptr) {
+
+        flashinfer::BatchQKApplyLlama31RotaryPosIds(
+            const_cast<T *>(thrust::raw_pointer_cast(q_proj.data())), // q
+            const_cast<T *>(thrust::raw_pointer_cast(k_proj.data())), // k
+            thrust::raw_pointer_cast(q_proj.data()),                  // q_rope (not available)
+            thrust::raw_pointer_cast(k_proj.data()),                  // k_rope (not available)
+            thrust::raw_pointer_cast(indices.data()),                 // pos_ids (uint32_t*)
+            batch,                                                    // nnz (assuming batch size for now)
+            nq,                                                       // num_qo_heads
+            nkv,                                                      // num_kv_heads
+            config_.head_dim(),                                       // rotary_dim
+            config_.head_dim(),                                       // head_dim
+            nq * hd,                                                  // q_stride_n
+            hd,                                                       // q_stride_h
+            nkv * hd,                                                 // k_stride_n
+            hd,
+            ///----                                                      // k_stride_h
+            // q_rope_stride_n, q_rope_stride_h, k_rope_stride_n, k_rope_stride_h (not available)
+            nq * hd,
+            hd,
+            nkv * hd,
+            hd,
+            ///
+            false, // interleave
+            8.0f,  // rope_scale
+            5e5f,  // rope_theta
+            1.0f,  // low_freq_factor
+            4.0f,  // high_freq_factor
+            8192,  // old_context_length
+            stream // cudaStream_t
+        );
+
+        compute_bfloat16_mean(q_proj);
+        compute_bfloat16_mean(k_proj);
 
         cublasLtDestroy(ltHandle);
     }
