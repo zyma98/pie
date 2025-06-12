@@ -27,7 +27,7 @@ use crate::l4m::L4m;
 use crate::messaging::{PubSub, PushPull};
 use crate::ping::Ping;
 use crate::runtime::Runtime;
-use crate::backend_discovery::discover_backend_for_model;
+use crate::backend_discovery::{discover_backend_for_model, start_periodic_cache_updates};
 use crate::server::Server;
 use crate::service::Controller;
 use clap::{Arg, Command};
@@ -67,14 +67,14 @@ async fn main() -> anyhow::Result<()> {
 
     // Create log file with current date
     let current_date = chrono::Utc::now().format("%Y-%m-%d").to_string();
-    let log_filename = format!("engine-9123-{}.log", current_date);
+    let log_filename = format!("engine-{}.log", current_date);
 
     // Initialize tracing subscriber to write to file
     let file_appender = tracing_appender::rolling::never("logs", &log_filename);
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env().add_directive("pie_rt=debug".parse().unwrap()))
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env().add_directive("pie_rt=info".parse().unwrap()))
         .with_target(true)
         .with_thread_ids(true)
         .with_file(true)
@@ -192,6 +192,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Install all services
     ctrl.install();
+
+    // Start periodic cache updates for detecting new backend registrations
+    start_periodic_cache_updates();
 
     // TODO: Add periodic stats printing for connected backends when they are connected
     // This should be done dynamically based on which backends are actually connected
