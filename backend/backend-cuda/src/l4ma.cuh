@@ -177,7 +177,7 @@ public:
         thrust::device_vector<T> q_proj(batch * nq * hd);
         thrust::device_vector<T> k_proj(batch * nkv * hd);
         thrust::device_vector<T> v_proj(batch * nkv * hd);
-        thrust::device_vector<char> workspace(1024 * 1024 * 128);
+        thrust::device_vector<char> workspace(1024 * 1024 * 4);
 
         // No bias for projections
         const thrust::device_vector<T> *no_bias = nullptr;
@@ -199,11 +199,11 @@ public:
 
         // multiply_bf16_cublas(handle,
         //                      thrust::raw_pointer_cast(input.data()),
-        //                      thrust::raw_pointer_cast(q_proj_weights_.data()),
-        //                      thrust::raw_pointer_cast(q_proj.data()),
-        //                      batch, nq * hd, hs, false, true);
+        //                      thrust::raw_pointer_cast(k_proj_weights_.data()),
+        //                      thrust::raw_pointer_cast(k_proj.data()),
+        //                      batch, nkv * hd, hs, false, true);
 
-        // compute_bfloat16_mean(q_proj);
+        // compute_bfloat16_mean(k_proj);
 
         // gemm_cublasLt2<__nv_bfloat16>(
         //     ltHandle, stream,
@@ -223,7 +223,25 @@ public:
             batch, nq * hd, hs, workspace,
             false, true);
 
-        compute_bfloat16_mean(q_proj);
+
+        gemm_cublasLt<__nv_bfloat16>(
+            ltHandle, stream,
+            input,
+            k_proj_weights_,
+            no_bias,
+            k_proj,
+            batch, nkv * hd, hs, workspace,
+            false, true);
+
+        gemm_cublasLt<__nv_bfloat16>(
+            ltHandle, stream,
+            input,
+            v_proj_weights_,
+            no_bias,
+            v_proj,
+            batch, nkv * hd, hs, workspace,
+            false, true);
+
 
         cublasLtDestroy(ltHandle);
     }

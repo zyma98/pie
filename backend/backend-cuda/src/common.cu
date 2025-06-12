@@ -288,25 +288,23 @@ void gemm_cublasLt(cublasLtHandle_t ltHandle,
     CUBLAS_CHECK(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSA, &opB_swapped, sizeof(opB_swapped)));
     CUBLAS_CHECK(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSB, &opA_swapped, sizeof(opA_swapped)));
 
-    // 3. Create the matrix layouts.
-    // These must describe the matrices AS THEY ARE STORED IN MEMORY (row-major).
-    // The input m, n, k define the shape of the OPERATION: C(m,n) = op(A)(m,k) * op(B)(k,n).
-    // From this, we deduce the stored shape.
-    // Stored A: if transa is false, it's (m,k). If true, it's (k,m).
-    // Stored B: if transb is false, it's (k,n). If true, it's (n,k).
-    // The leading dimension (ld) for a row-major matrix is its number of columns.
-    int rowsA = transa ? k : m;
-    int colsA = transa ? m : k;
-    int lda = colsA;
+    if (transb)
+    {
+        CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&Adesc, cuda_dtype, k, n, k));
+    }
+    else
+    {
+        CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&Adesc, cuda_dtype, n, k, n));
+    }
 
-    int rowsB = transb ? n : k;
-    int colsB = transb ? k : n;
-    int ldb = colsB;
-
-    int ldc = n; // C is always stored as m x n, so its ld is n.
-
-    CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&Adesc, cuda_dtype, n, k, n));
-    CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&Bdesc, cuda_dtype, k, m, k));
+    if (transa)
+    {
+        CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&Bdesc, cuda_dtype, m, k, m));
+    }
+    else
+    {
+        CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&Bdesc, cuda_dtype, k, m, k));
+    }
     CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&Cdesc, cuda_dtype, n, m, n));
 
     // 4. Configure Epilogue (Bias Addition)
@@ -393,6 +391,10 @@ void multiply_bf16_cublas(cublasHandle_t handle,
     cublasOperation_t opA = transa ? CUBLAS_OP_T : CUBLAS_OP_N;
     cublasOperation_t opB = transb ? CUBLAS_OP_T : CUBLAS_OP_N;
 
+    int lda = transa ? m : k; // Leading dimension
+    int ldb = transb ? k : n; // Leading dimension
+    int ldc = n;              // Leading dimension for C
+
     CUBLAS_CHECK(cublasGemmEx(handle,
                               opB,
                               opA,
@@ -400,10 +402,10 @@ void multiply_bf16_cublas(cublasHandle_t handle,
                               m,
                               k,
                               &alpha,
-                              B, CUDA_R_16BF, n,
-                              A, CUDA_R_16BF, k,
+                              B, CUDA_R_16BF, ldb,
+                              A, CUDA_R_16BF, lda,
                               &beta,
-                              C, CUDA_R_16BF, n,
+                              C, CUDA_R_16BF, ldc,
                               CUDA_R_32F,
                               CUBLAS_GEMM_DEFAULT_TENSOR_OP));
 }
