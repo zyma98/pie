@@ -197,30 +197,31 @@ public:
         cublasHandle_t handle;
         CUBLAS_CHECK(cublasCreate(&handle));
 
-        multiply_bf16_cublas(handle,
-                             thrust::raw_pointer_cast(input.data()),
-                             thrust::raw_pointer_cast(q_proj_weights_.data()),
-                             thrust::raw_pointer_cast(q_proj.data()),
-                             batch, nq * hd, hs, false, true);
+        // multiply_bf16_cublas(handle,
+        //                      thrust::raw_pointer_cast(input.data()),
+        //                      thrust::raw_pointer_cast(q_proj_weights_.data()),
+        //                      thrust::raw_pointer_cast(q_proj.data()),
+        //                      batch, nq * hd, hs, false, true);
 
-        compute_bfloat16_mean(q_proj);
-        
-        gemm_cublasLt2<__nv_bfloat16>(
-                    ltHandle, stream,
-                    thrust::raw_pointer_cast(input.data()),
-                    thrust::raw_pointer_cast(q_proj_weights_.data()),
-                    thrust::raw_pointer_cast(q_proj.data()),
-                    batch, nq * hd, hs, false, true);
+        // compute_bfloat16_mean(q_proj);
 
-
-        // gemm_cublasLt<__nv_bfloat16>(
+        // gemm_cublasLt2<__nv_bfloat16>(
         //     ltHandle, stream,
-        //     input,
-        //     q_proj_weights_,
-        //     no_bias,
-        //     q_proj,
-        //     batch, nq * hd, hs, workspace,
-        //     false, false);
+        //     thrust::raw_pointer_cast(input.data()),
+        //     thrust::raw_pointer_cast(q_proj_weights_.data()),
+        //     thrust::raw_pointer_cast(q_proj.data()),
+        //     batch, nq * hd, hs, false, true);
+
+        // compute_bfloat16_mean(q_proj);
+
+        gemm_cublasLt<__nv_bfloat16>(
+            ltHandle, stream,
+            input,
+            q_proj_weights_,
+            no_bias,
+            q_proj,
+            batch, nq * hd, hs, workspace,
+            false, true);
 
         compute_bfloat16_mean(q_proj);
 

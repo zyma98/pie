@@ -280,8 +280,8 @@ void gemm_cublasLt(cublasLtHandle_t ltHandle,
 
     // 1. Determine the operations for the swapped multiplication.
     // To get op(M)^T: if the original op was N, the new op is T. If the original was T, the new op is N.
-    cublasOperation_t opA_swapped = transa ? CUBLAS_OP_N : CUBLAS_OP_T;
-    cublasOperation_t opB_swapped = transb ? CUBLAS_OP_N : CUBLAS_OP_T;
+    cublasOperation_t opA_swapped = transa ? CUBLAS_OP_T : CUBLAS_OP_N;
+    cublasOperation_t opB_swapped = transb ? CUBLAS_OP_T : CUBLAS_OP_N;
 
     // 2. Create the Matmul Descriptor with the swapped & transformed operations.
     CUBLAS_CHECK(cublasLtMatmulDescCreate(&matmulDesc, compute_type, scale_type));
@@ -305,14 +305,9 @@ void gemm_cublasLt(cublasLtHandle_t ltHandle,
 
     int ldc = n; // C is always stored as m x n, so its ld is n.
 
-    // Layout for A (describes the physical matrix in memory)
-    CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&Adesc, cuda_dtype, rowsA, colsA, lda));
-    // Layout for B (describes the physical matrix in memory)
-    CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&Bdesc, cuda_dtype, rowsB, colsB, ldb));
-    // Layout for C. The col-major result of B^T A^T is (n, m). This fits perfectly
-    // into a row-major C of (m,n), so we describe the result matrix as (n,m)
-    // with a leading dimension of n (ldc).
-    CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&Cdesc, cuda_dtype, n, m, ldc));
+    CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&Adesc, cuda_dtype, n, k, n));
+    CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&Bdesc, cuda_dtype, k, m, k));
+    CUBLAS_CHECK(cublasLtMatrixLayoutCreate(&Cdesc, cuda_dtype, n, m, n));
 
     // 4. Configure Epilogue (Bias Addition)
     cublasLtEpilogue_t epilogue = CUBLASLT_EPILOGUE_DEFAULT;
@@ -332,7 +327,7 @@ void gemm_cublasLt(cublasLtHandle_t ltHandle,
     cublasLtMatmulHeuristicResult_t heuristicResult = {};
 
     // Note the order of descriptors: Bdesc, Adesc, Cdesc
-    CUBLAS_CHECK(cublasLtMatmulAlgoGetHeuristic(ltHandle, matmulDesc, Bdesc, Adesc, Cdesc, Cdesc, preference, 1, &heuristicResult, &returnedResults));
+    CUBLAS_CHECK(cublasLtMatmulAlgoGetHeuristic(ltHandle, matmulDesc, Adesc, Bdesc, Cdesc, Cdesc, preference, 1, &heuristicResult, &returnedResults));
 
     if (returnedResults == 0)
     {
@@ -343,8 +338,8 @@ void gemm_cublasLt(cublasLtHandle_t ltHandle,
         // 5. Execute the Matmul
         // Note the order of pointers: d_B, d_A, d_C
         CUBLAS_CHECK(cublasLtMatmul(ltHandle, matmulDesc, &alpha,
-                                    d_B, Bdesc, // First matrix is B
-                                    d_A, Adesc, // Second matrix is A
+                                    d_B, Adesc, // First matrix is B
+                                    d_A, Bdesc, // Second matrix is A
                                     &beta,
                                     d_C, Cdesc,
                                     d_C, Cdesc, // D is the same as C for this operation
