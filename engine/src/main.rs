@@ -57,8 +57,26 @@ async fn check_model_available(model_name: &str, engine_manager_endpoint: &str) 
     }
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+// Add manual Tokio runtime for main
+fn main() -> anyhow::Result<()> {
+    // Build the main Tokio runtime
+    let rt_main = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("Failed to build main Tokio runtime")?;
+    // Build a separate Tokio runtime for management
+    let rt_mgmt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("Failed to build management Tokio runtime")?;
+    // Run management_main on its own runtime
+    rt_mgmt.block_on(management_main())?;
+    // Run the async_main on the main runtime
+    rt_main.block_on(async_main())
+}
+
+// Remove the Tokio macro and rename main
+async fn async_main() -> anyhow::Result<()> {
     // Create log directory if it doesn't exist
     std::fs::create_dir_all("logs").unwrap_or(());
 
@@ -199,5 +217,12 @@ async fn main() -> anyhow::Result<()> {
     // Wait forever - applications will be loaded via WebSocket API when requested
     tokio::signal::ctrl_c().await?;
 
+    Ok(())
+}
+
+// New management entrypoint
+async fn management_main() -> anyhow::Result<()> {
+    // TODO: add management logic here
+    tracing::info!("Management runtime started");
     Ok(())
 }
