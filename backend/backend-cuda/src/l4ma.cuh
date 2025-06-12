@@ -15,6 +15,7 @@
 #include <unordered_map>
 #include "flashinfer/norm.cuh"
 #include "flashinfer/pos_enc.cuh"
+#include "flashinfer/page.cuh"
 
 // Forward Declarations
 struct L4maConfig;
@@ -288,6 +289,30 @@ public:
 
         compute_bfloat16_mean(q_proj);
         compute_bfloat16_mean(k_proj);
+
+        // kv_page_indices (the array of page_ids)
+        // kv_page_indptr (for batching independent reqs). [0, len(cumulative kv_page_indices)]
+        // kv_last_page_lens (size of last pages)
+
+        // qo indptr
+        int page_size = 32;
+        int num_pages = 256;
+
+        thrust::device_vector<T> k_data(num_pages * nkv * page_size * hd);
+        thrust::device_vector<T> v_data(num_pages * nkv * page_size * hd);
+
+        std::vector<int32_t> kv_indicies_host{0, 1, 2};
+        std::vector<int32_t> kv_indptr_host{0, 3};
+        std::vector<int32_t> kv_last_page_len_host;
+        thrust::device_vector<int32_t> kv_indptr(kv_indptr_host);
+        thrust::device_vector<int32_t> kv_indices(kv_indicies_host);
+        thrust::device_vector<int32_t> kv_last_page_len(kv_last_page_len_host);
+
+        flashinfer::paged_kv_t<T, int32_t> paged_kv(
+            nkv, page_size, hd, batch, flashinfer::QKVLayout::kNHD,
+            thrust::raw_pointer_cast(k_data.data()), thrust::raw_pointer_cast(v_data.data()),
+            thrust::raw_pointer_cast(kv_indices.data()), thrust::raw_pointer_cast(kv_indptr.data()),
+            thrust::raw_pointer_cast(kv_last_page_len.data()));
 
         cublasLtDestroy(ltHandle);
     }
