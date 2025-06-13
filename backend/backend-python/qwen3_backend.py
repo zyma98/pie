@@ -37,7 +37,7 @@ class Qwen3BackendAgent(BaseBackendAgent):
                  backend_host: str, backend_api_port: int):
         # Supported models for Qwen3 backend (can be expanded)
         supported_models = [
-            "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B"
+            model_name
         ]
 
         super().__init__(

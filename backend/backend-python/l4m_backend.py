@@ -33,11 +33,8 @@ class LlamaBackendAgent(BaseBackendAgent):
 
     def __init__(self, model_name: str, ipc_endpoint: str, management_service_url: str,
                  backend_host: str, backend_api_port: int):
-        # Supported models for Llama backend (can be expanded)
-        supported_models = [
-            "meta-llama/Llama-3.1-8B-Instruct",
-            "meta-llama/Llama-3.2-8B-Instruct",
-        ]
+        # Only support the model that was passed when running this script
+        supported_models = [model_name]
 
         super().__init__(
             management_service_url=management_service_url,
