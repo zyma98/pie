@@ -14,6 +14,7 @@ mod runtime;
 mod server;
 mod tokenizer;
 mod utils;
+mod types;
 
 //
 use anyhow::Context;

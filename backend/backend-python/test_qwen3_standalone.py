@@ -20,7 +20,7 @@ def test_qwen3_backend_standalone():
     
     # Backend configuration - use the model that's actually cached locally
     model_name = "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B"  # Use the locally cached model
-    ipc_endpoint = "ipc:///tmp/symphony-ipc-test"
+    ipc_endpoint = "ipc:///tmp/pie-ipc-test"
     management_service_url = "http://localhost:9000"  # This may not exist yet
     backend_host = "127.0.0.1"
     backend_api_port = 8083  # Use a different port to avoid conflicts

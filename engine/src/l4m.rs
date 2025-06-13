@@ -6,7 +6,7 @@ use crate::service::{Service, ServiceError};
 use crate::tokenizer::BytePairEncoder;
 use crate::utils::IdPool;
 use crate::{backend, batching, runtime, service, tokenizer};
-use backend_management_rs::path_utils::expand_home_dir_str;
+use crate::utils::expand_home_dir_str;
 use dashmap::DashMap;
 use prost::Message;
 use rand::Rng;
@@ -494,7 +494,7 @@ impl L4m {
         let tokenizer = tokenizer.expect(
             format!(
                 "Failed to load tokenizer from paths: {:?}\nModel name: {}\n
-                 Download a model with: symphony-cli install-model MODEL_NAME",
+                 Download a model with: pie-cli model install MODEL_NAME",
                 [symphony_model_paths.to_vec(), tokenizer_paths.to_vec()].concat(), info.model_name
             ).as_str()
         );

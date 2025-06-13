@@ -1,14 +1,14 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::Debug;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, RwLock, OnceLock};
 use thiserror::Error;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::task;
 
 // Common driver routines
 
-static SERVICE_DISPATCHER: OnceLock<Arc<Mutex<ServiceDispatcher>>> = OnceLock::new();
+static SERVICE_DISPATCHER: OnceLock<Arc<RwLock<ServiceDispatcher>>> = OnceLock::new();
 
 pub fn dispatch<C>(service_id: usize, cmd: C) -> Result<(), ServiceError>
 where
@@ -17,7 +17,7 @@ where
     SERVICE_DISPATCHER
         .get()
         .expect("Service not initialized")
-        .lock()
+        .read()
         .unwrap()
         .dispatch(service_id, cmd)
 }
@@ -26,7 +26,7 @@ pub fn get_service_id(name: &str) -> Option<usize> {
     SERVICE_DISPATCHER
         .get()
         .expect("Service not found")
-        .lock()
+        .read()
         .unwrap()
         .get_service_id(name)
 }
@@ -38,7 +38,7 @@ where
     SERVICE_DISPATCHER
         .get()
         .expect("Service not initialized")
-        .lock()
+        .write()
         .unwrap()
         .add_service(name, driver)
 }
@@ -47,7 +47,7 @@ pub fn remove_service(name: &str) -> Result<(), ServiceError> {
     SERVICE_DISPATCHER
         .get()
         .expect("Service not initialized")
-        .lock()
+        .write()
         .unwrap()
         .remove_service(name)
 }
@@ -57,7 +57,7 @@ pub fn has_service(name: &str) -> bool {
         .get()
         .map(|dispatcher| {
             dispatcher
-                .lock()
+                .read()
                 .unwrap()
                 .has_service(name)
         })
@@ -123,7 +123,7 @@ impl Controller {
     }
 
     pub fn install(self) {
-        let dispatcher = Arc::new(Mutex::new(ServiceDispatcher {
+        let dispatcher = Arc::new(RwLock::new(ServiceDispatcher {
             maps: self.maps,
             channels: self.channels,
         }));

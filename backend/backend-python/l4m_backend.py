@@ -324,7 +324,7 @@ class LlamaBackendAgent(BaseBackendAgent):
 def main_run():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Llama Backend Server with Management Agent')
-    parser.add_argument('--ipc-endpoint', type=str, default='ipc:///tmp/symphony-ipc',
+    parser.add_argument('--ipc-endpoint', type=str, default='ipc:///tmp/pie-ipc',
                        help='IPC endpoint to bind to')
     parser.add_argument('--model-name', type=str, required=True,
                        help='Model name to load (e.g., meta-llama/Llama-3.1-8B-Instruct)')

@@ -314,7 +314,7 @@ class Qwen3BackendAgent(BaseBackendAgent):
 def main_run():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Qwen3 Backend Server with Management Agent')
-    parser.add_argument('--ipc-endpoint', type=str, default='ipc:///tmp/symphony-ipc',
+    parser.add_argument('--ipc-endpoint', type=str, default='ipc:///tmp/pie-ipc',
                        help='IPC endpoint to bind to')
     parser.add_argument('--model-name', type=str, required=True,
                        help='Model name to load (e.g., deepseek-ai/DeepSeek-R1-0528-Qwen3-8B, Qwen/Qwen3-8B-Instruct)')

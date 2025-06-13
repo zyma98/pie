@@ -45,9 +45,9 @@ impl TestContext {
         }
     },
     "endpoints": {
-        "client_handshake": "ipc:///tmp/symphony-ipc",
-        "cli_management": "ipc:///tmp/symphony-cli",
-        "management_service": "ipc:///tmp/symphony-cli"
+        "client_handshake": "ipc:///tmp/pie-ipc",
+        "cli_management": "ipc:///tmp/pie-cli",
+        "management_service": "ipc:///tmp/pie-cli"
     },
     "logging": {
         "level": "INFO",
@@ -350,8 +350,8 @@ async fn test_unified_config_loading() {
         }
     },
     "endpoints": {
-        "client_handshake": "ipc:///tmp/symphony-ipc",
-        "cli_management": "ipc:///tmp/symphony-cli",
+        "client_handshake": "ipc:///tmp/pie-ipc",
+        "cli_management": "ipc:///tmp/pie-cli",
         "management_service": "http://127.0.0.1:8080"
     },
     "logging": {

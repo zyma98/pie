@@ -51,7 +51,7 @@ pub enum BackendCommands {
         base_port: u16,
 
         /// IPC endpoint for ZMQ data plane communication
-        #[arg(long, default_value = "ipc:///tmp/symphony-ipc")]
+        #[arg(long, default_value = "ipc:///tmp/pie-ipc")]
         ipc_endpoint: String,
 
         /// Additional arguments for the backend

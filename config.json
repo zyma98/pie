@@ -17,9 +17,9 @@
     }
   },
   "endpoints": {
-    "client_handshake": "ipc:///tmp/symphony-ipc",
-    "cli_management": "ipc:///tmp/symphony-cli",
-    "management_service": "ipc:///tmp/symphony-cli"
+    "client_handshake": "ipc:///tmp/pie-ipc",
+    "cli_management": "ipc:///tmp/pie-cli",
+    "management_service": "ipc:///tmp/pie-cli"
   },
   "logging": {
     "level": "INFO",
