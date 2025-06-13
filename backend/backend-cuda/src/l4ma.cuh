@@ -302,12 +302,15 @@ public:
         thrust::device_vector<T> k_data(num_pages * nkv * page_size * hd);
         thrust::device_vector<T> v_data(num_pages * nkv * page_size * hd);
 
-        std::vector<int32_t> kv_indicies_host{0, 1, 2};
-        std::vector<int32_t> kv_indptr_host{0, 3};
+        std::vector<int32_t> kv_indicies_host{0};
+        std::vector<int32_t> kv_indptr_host({0, 1});
         std::vector<int32_t> kv_last_page_len_host;
         thrust::device_vector<int32_t> kv_indptr(kv_indptr_host);
         thrust::device_vector<int32_t> kv_indices(kv_indicies_host);
         thrust::device_vector<int32_t> kv_last_page_len(kv_last_page_len_host);
+
+        std::vector<int32_t> qo_indptr_h{0, 32};
+        thrust::device_vector<int32_t> qo_indptr_d(qo_indptr_h);
 
         flashinfer::paged_kv_t<T, int32_t> paged_kv(
             nkv, page_size, hd, batch, flashinfer::QKVLayout::kNHD,
@@ -315,16 +318,34 @@ public:
             thrust::raw_pointer_cast(kv_indices.data()), thrust::raw_pointer_cast(kv_indptr.data()),
             thrust::raw_pointer_cast(kv_last_page_len.data()));
 
-        flashinfer::BatchDecodeHandler handler;
-        size_t float_workspace_size_in_bytes = 32 * 1024 * 1024;
+        flashinfer::BatchPrefillHandler handler;
+        size_t float_workspace_size_in_bytes = 128 * 1024 * 1024;
         thrust::device_vector<char> float_buffer(float_workspace_size_in_bytes);
         size_t int_workspace_size_in_bytes = 8 * 1024 * 1024;
         thrust::device_vector<char> int_buffer(int_workspace_size_in_bytes);
 
-        flashinfer::BatchDecodeHandlerPlan<T, T, T, int32_t, 64, flashinfer::PosEncodingMode::kNone, 4>(
-            &handler, (void *)thrust::raw_pointer_cast(float_buffer.data()), float_workspace_size_in_bytes,
+        handler.Plan<T, int32_t>(
+            (void *)thrust::raw_pointer_cast(float_buffer.data()), float_workspace_size_in_bytes,
             (void *)thrust::raw_pointer_cast(int_buffer.data()), int_workspace_size_in_bytes,
-            kv_indptr_host.data(), kv_last_page_len_host.data(), batch, nq, nkv, page_size);
+            qo_indptr_h.data(), kv_indptr_host.data(), /*total_num_rows=*/32, /*batch=*/1,
+            nq, nkv, config_.head_dim(), page_size);
+
+        // cudaError_t status = flashinfer::BatchPrefillWithPagedKVCacheWrapper<T, T, T, int32_t, 64, flashinfer::MaskMode::kNone, flashinfer::PosEncodingMode::kNone, false, >(
+        //     &handler, thrust::raw_pointer_cast(q_proj.data()), thrust::raw_pointer_cast(qo_indptr_d.data()),
+        //     /*q_rope_offset=*/nullptr, paged_kv, thrust::raw_pointer_cast(o.data()),
+        //     /*lse=*/nullptr, num_qo_heads,
+        //     /*causal=*/false, pos_encoding_mode);
+
+        // flashinfer::BatchDecodeHandler handler;
+        // size_t float_workspace_size_in_bytes = 32 * 1024 * 1024;
+        // thrust::device_vector<char> float_buffer(float_workspace_size_in_bytes);
+        // size_t int_workspace_size_in_bytes = 8 * 1024 * 1024;
+        // thrust::device_vector<char> int_buffer(int_workspace_size_in_bytes);
+
+        // flashinfer::BatchDecodeHandlerPlan<T, T, T, int32_t, 64, flashinfer::PosEncodingMode::kNone, 4>(
+        //     &handler, (void *)thrust::raw_pointer_cast(float_buffer.data()), float_workspace_size_in_bytes,
+        //     (void *)thrust::raw_pointer_cast(int_buffer.data()), int_workspace_size_in_bytes,
+        //     kv_indptr_host.data(), kv_last_page_len_host.data(), 2, nq, nkv, page_size);
 
         //   template <typename DTypeQ, typename DTypeKV, typename DTypeO, typename IdType, uint32_t HEAD_DIM, PosEncodingMode POS_ENCODING_MODE>
         //   cudaError_t BatchDecodeWithPagedKVCacheWrapper(
@@ -334,9 +355,9 @@ public:
         //       float rope_theta = 1e4, cudaStream_t stream = nullptr)
         //   {
 
-        cudaError_t status = flashinfer::BatchDecodeWithPagedKVCacheWrapper<T, T, T, int32_t, 64, flashinfer::PosEncodingMode::kNone>(
-            &handler, thrust::raw_pointer_cast(q_proj.data()), /*q_rope_offset=*/nullptr, paged_kv,
-            thrust::raw_pointer_cast(o_proj.data()), /*lse=*/nullptr, nq);
+        // cudaError_t status = flashinfer::BatchDecodeWithPagedKVCacheWrapper<T, T, T, int32_t, 64, flashinfer::PosEncodingMode::kNone>(
+        //     &handler, thrust::raw_pointer_cast(q_proj.data()), /*q_rope_offset=*/nullptr, paged_kv,
+        //     thrust::raw_pointer_cast(o_proj.data()), /*lse=*/nullptr, nq);
 
         cublasLtDestroy(ltHandle);
     }

@@ -62,7 +62,7 @@ add_executable(cuda_app
     src/l4ma.cu
     src/bpe.cpp
     src/common.cu
-    ${FLASHINFER_GENERATED_SOURCES}
+    #${FLASHINFER_GENERATED_SOURCES}
 )
 
 # 6. Set compiler flags and options for the target
@@ -86,8 +86,9 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcmodel=large")
 # CPM automatically handles include directories for its packages when you link them.
 # We just need to add our own 'include' directory and link the required libraries.
 target_include_directories(cuda_app PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${flashinfer_SOURCE_DIR}/include 
+   ${CMAKE_CURRENT_SOURCE_DIR}/include
+   ${flashinfer_SOURCE_DIR}/include 
+   ${flashinfer_SOURCE_DIR}/src/generated 
 )
 
 target_link_libraries(cuda_app PRIVATE
@@ -96,6 +97,8 @@ target_link_libraries(cuda_app PRIVATE
     yaml-cpp
     
     nlohmann_json::nlohmann_json
+    decode_kernels
+    prefill_kernels
     #flashinfer
     # Link against CUDA libraries provided by CMake's FindCUDA module
     CUDA::cublas

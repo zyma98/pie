@@ -1,4 +1,3 @@
-#pragma once
 /*
  * Copyright (c) 2024 by FlashInfer team.
  *
@@ -26,6 +25,43 @@
 #include "flashinfer/exception.h"
 #include "flashinfer/layout.cuh"
 
+#include "dispatch.inc"
+
+#define _DISPATCH_SWITCH(var_name, cond, ...)                                       \
+  switch (cond)                                                                     \
+  {                                                                                 \
+    __VA_ARGS__                                                                     \
+  default:                                                                          \
+    std::ostringstream oss;                                                         \
+    oss << __PRETTY_FUNCTION__ << " failed to dispatch " var_name " " << int(cond); \
+    FLASHINFER_ERROR(oss.str());                                                    \
+  }
+
+#define _DISPATCH_CASE(case_expr, case_var, ...) \
+  case case_expr:                                \
+  {                                              \
+    constexpr auto case_var = case_expr;         \
+    __VA_ARGS__                                  \
+    break;                                       \
+  }
+
+#define DISPATCH_group_size(expr, const_expr, ...) \
+  _DISPATCH_SWITCH("group_size", expr, _DISPATCH_CASES_group_size(const_expr, __VA_ARGS__))
+
+#define DISPATCH_head_dim(expr, const_expr, ...) \
+  _DISPATCH_SWITCH("head_dim", expr, _DISPATCH_CASES_head_dim(const_expr, __VA_ARGS__))
+
+#define DISPATCH_pos_encoding_mode(expr, const_expr, ...) \
+  _DISPATCH_SWITCH("positional encoding mode", expr,      \
+                   _DISPATCH_CASES_pos_encoding_mode(const_expr, __VA_ARGS__))
+
+#define DISPATCH_use_fp16_qk_reduction(expr, const_expr, ...) \
+  _DISPATCH_SWITCH("use_fp16_qk_reduction", expr,             \
+                   _DISPATCH_CASES_use_fp16_qk_reduction(const_expr, __VA_ARGS__))
+
+#define DISPATCH_mask_mode(expr, const_expr, ...) \
+  _DISPATCH_SWITCH("mask_mode", expr, _DISPATCH_CASES_mask_mode(const_expr, __VA_ARGS__))
+
 namespace flashinfer
 {
 
@@ -33,6 +69,10 @@ namespace flashinfer
             typename Params>
   cudaError_t BatchDecodeWithPagedKVCacheDispatched(Params params, typename Params::DTypeO *tmp_v,
                                                     float *tmp_s, cudaStream_t stream);
+
+  template <uint32_t HEAD_DIM_CKV, uint32_t HEAD_DIM_KPE, typename AttentionVariant, typename Params>
+  cudaError_t BatchDecodeWithPagedKVCacheDispatchedMLA(Params params, typename Params::DTypeO *tmp_v,
+                                                       float *tmp_s, cudaStream_t stream);
 
   class BatchDecodeHandler
   {
@@ -308,46 +348,257 @@ namespace flashinfer
     cudaStream_t stream_;
   };
 
-  template <typename DTypeQ, typename DTypeKV, typename DTypeO, typename IdType, uint32_t HEAD_DIM, MaskMode MASK_MODE, PosEncodingMode POS_ENCODING_MODE, bool USE_FP16_QK_REDUCTION, uint32_t CTA_TILE_Q>
+  template <uint32_t HEAD_DIM_QK, uint32_t HEAD_DIM_VO, PosEncodingMode POS_ENCODING_MODE,
+            bool USE_FP16_QK_REDUCTION, MaskMode MASK_MODE, typename AttentionVariant,
+            typename Params>
+  cudaError_t SinglePrefillWithKVCacheDispatched(Params params, typename Params::DTypeO *tmp,
+                                                 cudaStream_t stream);
+
+  template <typename DTypeIn, typename DTypeO>
+  cudaError_t SinglePrefillWithKVCacheCustomMask(
+      DTypeIn *q, DTypeIn *k, DTypeIn *v, uint8_t *custom_mask, DTypeO *o, DTypeO *tmp, float *lse,
+      uint32_t num_qo_heads, uint32_t num_kv_heads, uint32_t qo_len, uint32_t kv_len,
+      uint32_t head_dim, QKVLayout kv_layout = QKVLayout::kNHD,
+      PosEncodingMode pos_encoding_mode = PosEncodingMode::kNone, bool use_fp16_qk_reduction = false,
+      std::optional<float> maybe_sm_scale = std::nullopt, float rope_scale = 1.f,
+      float rope_theta = 1e4, cudaStream_t stream = nullptr)
+  {
+    const float sm_scale = maybe_sm_scale.value_or(1.f / std::sqrt(float(head_dim)));
+    auto [qo_stride_n, qo_stride_h, kv_stride_n, kv_stride_h] =
+        get_qkv_strides(kv_layout, kv_len, num_qo_heads, num_kv_heads, head_dim);
+    DISPATCH_use_fp16_qk_reduction(
+        use_fp16_qk_reduction, USE_FP16_QK_REDUCTION,
+        {DISPATCH_head_dim(
+            head_dim, HEAD_DIM, {DISPATCH_pos_encoding_mode(pos_encoding_mode, POS_ENCODING_MODE, {
+              using Params = SinglePrefillParams<DTypeIn, DTypeIn, DTypeO>;
+              using AttentionVariant = DefaultAttention<
+                  /*use_custom_mask=*/true, /*use_sliding_window=*/false,
+                  /*use_logits_soft_cap=*/false, /*use_alibi=*/false>;
+              Params params(q, k, v, custom_mask, o, lse,
+                            /*alibi_slopes=*/nullptr, num_qo_heads, num_kv_heads, qo_len, kv_len,
+                            qo_stride_n, qo_stride_h, kv_stride_n, kv_stride_h, head_dim,
+                            /*window_left=*/-1,
+                            /*logits_soft_cap=*/0.f, sm_scale, rope_scale, rope_theta);
+              return SinglePrefillWithKVCacheDispatched<HEAD_DIM, HEAD_DIM, POS_ENCODING_MODE,
+                                                        USE_FP16_QK_REDUCTION, MaskMode::kCustom,
+                                                        AttentionVariant>(params, tmp, stream);
+            })})});
+    return cudaSuccess;
+  }
+
+  /*!
+   * \brief FlashAttention prefill CUDA function for a single request.
+   * \tparam DTypeIn The data type of input
+   * \tparam DTypeO The data type of output
+   * \param q The query tensor.
+   * \param k The key tensor.
+   * \param v The value tensor.
+   * \param o The output tensor.
+   * \param tmp The temporary storage (only used for cooperative kernel).
+   * \param lse The logsumexp values.
+   * \param num_qo_heads The number of query and output heads.
+   * \param num_kv_heads The number of key and value heads.
+   * \param qo_len The length of query and output.
+   * \param kv_len The length of key and value.
+   * \param head_dim The dimension of each head.
+   * \param causal Whether to use causal attention.
+   * \param kv_layout The layout of input and output.
+   * \param pos_encoding_mode The positional encoding mode.
+   * \param use_fp16_qk_reduction Whether to allow accumulating q*k^T with fp16.
+   * \param rope_scale The scaling factor used in RoPE interpolation.
+   * \param rope_theta The theta used in RoPE.
+   * \param stream The cuda stream to execute the kernel on.
+   * \return status Indicates whether CUDA calls are successful
+   */
+  template <typename DTypeQ, typename DTypeKV, typename DTypeO>
+  cudaError_t SinglePrefillWithKVCache(DTypeQ *q, DTypeKV *k, DTypeKV *v, DTypeO *o, DTypeO *tmp,
+                                       float *lse, uint32_t num_qo_heads, uint32_t num_kv_heads,
+                                       uint32_t qo_len, uint32_t kv_len, uint32_t head_dim,
+                                       bool causal = true, QKVLayout kv_layout = QKVLayout::kNHD,
+                                       PosEncodingMode pos_encoding_mode = PosEncodingMode::kNone,
+                                       bool use_fp16_qk_reduction = false,
+                                       std::optional<float> maybe_sm_scale = std::nullopt,
+                                       float rope_scale = 1.f, float rope_theta = 1e4,
+                                       cudaStream_t stream = nullptr)
+  {
+    const float sm_scale = maybe_sm_scale.value_or(1.f / std::sqrt(float(head_dim)));
+    const MaskMode mask_mode = causal ? MaskMode::kCausal : MaskMode::kNone;
+    auto [qo_stride_n, qo_stride_h, kv_stride_n, kv_stride_h] =
+        get_qkv_strides(kv_layout, kv_len, num_qo_heads, num_kv_heads, head_dim);
+    DISPATCH_use_fp16_qk_reduction(
+        use_fp16_qk_reduction, USE_FP16_QK_REDUCTION,
+        {DISPATCH_mask_mode(
+            mask_mode, MASK_MODE,
+            {DISPATCH_head_dim(
+                head_dim, HEAD_DIM,
+                {DISPATCH_pos_encoding_mode(pos_encoding_mode, POS_ENCODING_MODE, {
+                  using Params = SinglePrefillParams<DTypeQ, DTypeKV, DTypeO>;
+                  using AttentionVariant = DefaultAttention<
+                      /*use_custom_mask=*/(MASK_MODE == MaskMode::kCustom),
+                      /*use_sliding_window=*/false,
+                      /*use_logits_soft_cap=*/false, /*use_alibi=*/false>;
+                  Params params(q, k, v, /*custom_mask=*/nullptr, o, lse,
+                                /*alibi_slopes=*/nullptr, num_qo_heads, num_kv_heads, qo_len, kv_len,
+                                qo_stride_n, qo_stride_h, kv_stride_n, kv_stride_h, head_dim,
+                                /*window_left=*/-1,
+                                /*logits_soft_cap=*/0.f, sm_scale, rope_scale, rope_theta);
+                  return SinglePrefillWithKVCacheDispatched<HEAD_DIM, HEAD_DIM, POS_ENCODING_MODE,
+                                                            USE_FP16_QK_REDUCTION, MASK_MODE,
+                                                            AttentionVariant, Params>(params, tmp,
+                                                                                      stream);
+                })})})});
+    return cudaSuccess;
+  }
+
+  template <typename DTypeQ, typename DTypeKV, typename DTypeO, typename IdType>
+  cudaError_t BatchPrefillWithRaggedKVCacheWrapper(
+      BatchPrefillHandler *handler, DTypeQ *q, IdType *qo_indptr, DTypeKV *k, DTypeKV *v,
+      IdType *kv_indptr, IdType *q_rope_offset, IdType *k_rope_offset, DTypeO *o, float *lse,
+      const uint32_t batch_size, const uint32_t num_qo_heads, const uint32_t num_kv_heads,
+      const uint32_t head_dim, bool causal = true, QKVLayout kv_layout = QKVLayout::kNHD,
+      PosEncodingMode pos_encoding_mode = PosEncodingMode::kNone, bool use_fp16_qk_reduction = false,
+      std::optional<float> maybe_sm_scale = std::nullopt, const float rope_scale = 1.f,
+      const float rope_theta = 1e4, cudaStream_t stream = nullptr)
+  {
+    const float sm_scale = maybe_sm_scale.value_or(1.f / std::sqrt(float(head_dim)));
+    const MaskMode mask_mode = causal ? MaskMode::kCausal : MaskMode::kNone;
+    auto [qo_stride_n, qo_stride_h, kv_stride_n, kv_stride_h] =
+        get_qkv_strides(kv_layout, 0, num_qo_heads, num_kv_heads, head_dim);
+    auto plan_info = handler->GetPlanInfo();
+    DISPATCH_head_dim(
+        head_dim, HEAD_DIM,
+        {DISPATCH_mask_mode(
+            mask_mode, MASK_MODE,
+            {DISPATCH_pos_encoding_mode(
+                pos_encoding_mode, POS_ENCODING_MODE,
+                {DISPATCH_use_fp16_qk_reduction(use_fp16_qk_reduction, USE_FP16_QK_REDUCTION, {
+                  using Params = BatchPrefillRaggedParams<DTypeQ, DTypeKV, DTypeO, IdType>;
+                  using AttentionVariant = DefaultAttention<
+                      /*use_custom_mask=*/(MASK_MODE == MaskMode::kCustom),
+                      /*use_sliding_window=*/false,
+                      /*use_logits_soft_cap=*/false, /*use_alibi=*/false>;
+                  Params params(q, k, v, /*custom_mask=*/nullptr, qo_indptr, kv_indptr,
+                                /*mask_indptr=*/nullptr, q_rope_offset, k_rope_offset, o, lse,
+                                /*alibi_slopes=*/nullptr, num_qo_heads, num_kv_heads, qo_stride_n,
+                                qo_stride_h, kv_stride_n, kv_stride_h, /*window_left=*/-1,
+                                /*logits_soft_cap=*/0.f, sm_scale, rope_scale, rope_theta);
+                  params.request_indices = handler->GetRequestIndices<IdType>();
+                  params.qo_tile_indices = handler->GetQOTileIndices<IdType>();
+                  params.kv_tile_indices = handler->GetKVTileIndices<IdType>();
+                  params.o_indptr = handler->GetOIndptr<IdType>();
+                  params.kv_chunk_size_ptr = handler->GetKVChunkSizePtr<IdType>();
+                  params.merge_indptr = handler->GetMergeIndptr<IdType>();
+                  params.block_valid_mask = handler->GetBlockValidMask();
+                  params.max_total_num_rows = plan_info.total_num_rows;
+                  params.total_num_rows = handler->GetTotalNumRows();
+                  params.padded_batch_size = plan_info.padded_batch_size;
+
+                  DISPATCH_CTA_TILE_Q(plan_info.cta_tile_q, CTA_TILE_Q, {
+                    BatchPrefillWithRaggedKVCacheDispatched<CTA_TILE_Q, HEAD_DIM, HEAD_DIM,
+                                                            POS_ENCODING_MODE, USE_FP16_QK_REDUCTION,
+                                                            MASK_MODE, AttentionVariant>(
+                        params, handler->GetTmpV<DTypeO>(), handler->GetTmpS(), stream);
+                  });
+                })})})});
+    return cudaSuccess;
+  }
+
+  template <typename DTypeQ, typename DTypeKV, typename DTypeO, typename IdType>
   cudaError_t BatchPrefillWithPagedKVCacheWrapper(
       BatchPrefillHandler *handler, DTypeQ *q, IdType *qo_indptr, IdType *q_rope_offset,
       paged_kv_t<DTypeKV, IdType> paged_kv, DTypeO *o, float *lse, uint32_t num_qo_heads,
-      std::optional<float> maybe_sm_scale = std::nullopt,
-      float rope_scale = 1.f, float rope_theta = 1e4, cudaStream_t stream = nullptr)
+      bool causal = true, PosEncodingMode pos_encoding_mode = PosEncodingMode::kNone,
+      bool use_fp16_qk_reduction = false, std::optional<float> maybe_sm_scale = std::nullopt,
+      float rope_scale = 1.f, float rope_theta = 1e4, cudaStream_t stream = nullptr,
+      uint32_t *maybe_prefix_len_ptr = nullptr, uint16_t *maybe_token_pos_in_items_ptr = nullptr,
+      uint32_t token_pos_in_items_len = nullptr, uint16_t *maybe_max_item_len_ptr = nullptr)
   {
     const float sm_scale = maybe_sm_scale.value_or(1.f / std::sqrt(float(paged_kv.head_dim)));
     const uint32_t num_kv_heads = paged_kv.num_heads;
     const uint32_t head_dim = paged_kv.head_dim;
+    MaskMode mask_mode = causal ? MaskMode::kCausal : MaskMode::kNone;
+    if (maybe_prefix_len_ptr != nullptr)
+      mask_mode = MaskMode::kMultiItemScoring;
     auto plan_info = handler->GetPlanInfo();
+    DISPATCH_head_dim(
+        head_dim, HEAD_DIM,
+        {DISPATCH_mask_mode(
+            mask_mode, MASK_MODE,
+            {DISPATCH_pos_encoding_mode(
+                pos_encoding_mode, POS_ENCODING_MODE,
+                {DISPATCH_use_fp16_qk_reduction(use_fp16_qk_reduction, USE_FP16_QK_REDUCTION, {
+                  using Params = BatchPrefillPagedParams<DTypeQ, DTypeKV, DTypeO, IdType>;
+                  using AttentionVariant = DefaultAttention<
+                      /*use_custom_mask=*/(MASK_MODE == MaskMode::kCustom),
+                      /*use_sliding_window=*/false,
+                      /*use_logits_soft_cap=*/false,
+                      /*use_alibi=*/false>;
+                  Params params(q, paged_kv, /*custom_mask=*/nullptr, qo_indptr,
+                                /*mask_indptr=*/nullptr, q_rope_offset, o, lse,
+                                /*alibi_slopes=*/nullptr, num_qo_heads,
+                                /*q_stride_n*/ num_qo_heads * HEAD_DIM, /*q_stride_h*/ HEAD_DIM,
+                                /*window_left=*/-1, /*logits_soft_cap=*/0.f, sm_scale, rope_scale,
+                                rope_theta);
+                  params.request_indices = handler->GetRequestIndices<IdType>();
+                  params.qo_tile_indices = handler->GetQOTileIndices<IdType>();
+                  params.kv_tile_indices = handler->GetKVTileIndices<IdType>();
+                  params.o_indptr = handler->GetOIndptr<IdType>();
+                  params.kv_chunk_size_ptr = handler->GetKVChunkSizePtr<IdType>();
+                  params.merge_indptr = handler->GetMergeIndptr<IdType>();
+                  params.block_valid_mask = handler->GetBlockValidMask();
+                  params.max_total_num_rows = plan_info.total_num_rows;
+                  params.total_num_rows = handler->GetTotalNumRows();
+                  params.padded_batch_size = plan_info.padded_batch_size;
+                  params.maybe_prefix_len_ptr = maybe_prefix_len_ptr;
+                  params.maybe_token_pos_in_items_ptr = maybe_token_pos_in_items_ptr;
+                  params.token_pos_in_items_len = token_pos_in_items_len;
+                  params.maybe_max_item_len_ptr = maybe_max_item_len_ptr;
+                  DISPATCH_CTA_TILE_Q(plan_info.cta_tile_q, CTA_TILE_Q, {
+                    return BatchPrefillWithPagedKVCacheDispatched<
+                        CTA_TILE_Q, HEAD_DIM, HEAD_DIM, POS_ENCODING_MODE, USE_FP16_QK_REDUCTION,
+                        MASK_MODE, AttentionVariant>(params, handler->GetTmpV<DTypeO>(),
+                                                     handler->GetTmpS(), stream);
+                  })
+                })})})});
+    return cudaSuccess;
+  }
 
-    using Params = BatchPrefillPagedParams<DTypeQ, DTypeKV, DTypeO, IdType>;
-    using AttentionVariant = DefaultAttention<
-        /*use_custom_mask=*/(MASK_MODE == MaskMode::kCustom),
-        /*use_sliding_window=*/false,
-        /*use_logits_soft_cap=*/false,
-        /*use_alibi=*/false>;
-    Params params(q, paged_kv, /*custom_mask=*/nullptr, qo_indptr,
-                  /*mask_indptr=*/nullptr, q_rope_offset, o, lse,
-                  /*alibi_slopes=*/nullptr, num_qo_heads,
-                  /*q_stride_n*/ num_qo_heads * HEAD_DIM, /*q_stride_h*/ HEAD_DIM,
-                  /*window_left=*/-1, /*logits_soft_cap=*/0.f, sm_scale, rope_scale,
-                  rope_theta);
-    params.request_indices = handler->GetRequestIndices<IdType>();
-    params.qo_tile_indices = handler->GetQOTileIndices<IdType>();
-    params.kv_tile_indices = handler->GetKVTileIndices<IdType>();
-    params.o_indptr = handler->GetOIndptr<IdType>();
-    params.kv_chunk_size_ptr = handler->GetKVChunkSizePtr<IdType>();
-    params.merge_indptr = handler->GetMergeIndptr<IdType>();
-    params.block_valid_mask = handler->GetBlockValidMask();
-    params.max_total_num_rows = plan_info.total_num_rows;
-    params.total_num_rows = handler->GetTotalNumRows();
-    params.padded_batch_size = plan_info.padded_batch_size;
+  template <uint32_t HEAD_DIM, PosEncodingMode POS_ENCODING_MODE, typename AttentionVariant,
+            typename Params>
+  cudaError_t SingleDecodeWithKVCacheDispatched(Params params, typename Params::DTypeO *tmp,
+                                                cudaStream_t stream);
 
-    return BatchPrefillWithPagedKVCacheDispatched<
-        CTA_TILE_Q, HEAD_DIM, HEAD_DIM, POS_ENCODING_MODE, USE_FP16_QK_REDUCTION,
-        MASK_MODE, AttentionVariant>(params, handler->GetTmpV<DTypeO>(),
-                                     handler->GetTmpS(), stream);
+  template <typename DTypeQ, typename DTypeKV, typename DTypeO>
+  cudaError_t SingleDecodeWithKVCache(DTypeQ *q, DTypeKV *k, DTypeKV *v, DTypeO *o, DTypeO *tmp,
+                                      uint32_t num_qo_heads, uint32_t num_kv_heads, uint32_t seq_len,
+                                      uint32_t head_dim, QKVLayout kv_layout = QKVLayout::kNHD,
+                                      PosEncodingMode pos_encoding_mode = PosEncodingMode::kNone,
+                                      std::optional<float> maybe_sm_scale = std::nullopt,
+                                      float rope_scale = 1.f, float rope_theta = 1e4,
+                                      cudaStream_t stream = nullptr)
+  {
+    float sm_scale = maybe_sm_scale.value_or(1.f / std::sqrt(float(head_dim)));
+    if (num_qo_heads % num_kv_heads != 0)
+    {
+      std::ostringstream err_msg;
+      err_msg << "num_qo_heads " << num_qo_heads << " is not a multiple of num_kv_heads "
+              << num_kv_heads;
+      FLASHINFER_ERROR(err_msg.str());
+    }
 
+    DISPATCH_head_dim(
+        head_dim, HEAD_DIM, {DISPATCH_pos_encoding_mode(pos_encoding_mode, POS_ENCODING_MODE, {
+          using Params = SingleDecodeParams<DTypeQ, DTypeKV, DTypeO>;
+          using AttentionVariant = DefaultAttention<
+              /*use_custom_mask=*/false, /*use_sliding_window=*/false,
+              /*use_logits_soft_cap=*/false, /*use_alibi=*/false>;
+          Params params(q, k, v, o, /*alibi_slopes=*/nullptr, seq_len, num_qo_heads, num_kv_heads,
+                        kv_layout, head_dim, /*window_left=*/-1, /*logits_soft_cap=*/0.f, sm_scale,
+                        rope_scale, rope_theta);
+
+          SingleDecodeWithKVCacheDispatched<HEAD_DIM, POS_ENCODING_MODE, AttentionVariant>(
+              params, tmp, stream);
+        })});
     return cudaSuccess;
   }
 
@@ -369,10 +620,11 @@ namespace flashinfer
    * \param rope_theta The theta of rope.
    * \param stream The CUDA stream.
    */
-  template <typename DTypeQ, typename DTypeKV, typename DTypeO, typename IdType, uint32_t HEAD_DIM, PosEncodingMode POS_ENCODING_MODE>
+  template <typename DTypeQ, typename DTypeKV, typename DTypeO, typename IdType>
   cudaError_t BatchDecodeWithPagedKVCacheWrapper(
       BatchDecodeHandler *handler, DTypeQ *q, IdType *q_rope_offset,
       paged_kv_t<DTypeKV, IdType> paged_kv, DTypeO *o, float *lse, uint32_t num_qo_heads,
+      PosEncodingMode pos_encoding_mode = PosEncodingMode::kNone,
       std::optional<float> maybe_sm_scale = std::nullopt, float rope_scale = 1.f,
       float rope_theta = 1e4, cudaStream_t stream = nullptr)
   {
@@ -386,34 +638,37 @@ namespace flashinfer
       FLASHINFER_ERROR(err_msg.str());
     }
 
-    using Params = BatchDecodeParams<DTypeQ, DTypeKV, DTypeO, IdType>;
-    using AttentionVariant = DefaultAttention<
-        /*use_custom_mask=*/false, /*use_sliding_window=*/false,
-        /*use_logits_soft_cap=*/false, /*use_alibi=*/false>;
-    Params params(q, q_rope_offset, paged_kv, o, lse, /*alibi_slopes=*/nullptr, num_qo_heads,
-                  /*q_stride_n*/ num_qo_heads * HEAD_DIM, /*q_stride_h*/ HEAD_DIM,
-                  /*window_left=*/-1, /*logits_soft_cap=*/0.f, sm_scale, rope_scale,
-                  rope_theta);
-    params.request_indices = handler->GetRequestIndices<IdType>();
-    params.kv_tile_indices = handler->GetKVTileIndices<IdType>();
-    params.o_indptr = handler->GetOIndptr<IdType>();
-    params.kv_chunk_size_ptr = handler->GetKVChunkSizePtr<IdType>();
-    params.block_valid_mask = handler->GetBlockValidMask();
-    params.padded_batch_size = handler->GetPlanInfo().padded_batch_size;
+    DISPATCH_head_dim(
+        paged_kv.head_dim, HEAD_DIM,
+        {DISPATCH_pos_encoding_mode(pos_encoding_mode, POS_ENCODING_MODE, {
+          using Params = BatchDecodeParams<DTypeQ, DTypeKV, DTypeO, IdType>;
+          using AttentionVariant = DefaultAttention<
+              /*use_custom_mask=*/false, /*use_sliding_window=*/false,
+              /*use_logits_soft_cap=*/false, /*use_alibi=*/false>;
+          Params params(q, q_rope_offset, paged_kv, o, lse, /*alibi_slopes=*/nullptr, num_qo_heads,
+                        /*q_stride_n*/ num_qo_heads * HEAD_DIM, /*q_stride_h*/ HEAD_DIM,
+                        /*window_left=*/-1, /*logits_soft_cap=*/0.f, sm_scale, rope_scale,
+                        rope_theta);
+          params.request_indices = handler->GetRequestIndices<IdType>();
+          params.kv_tile_indices = handler->GetKVTileIndices<IdType>();
+          params.o_indptr = handler->GetOIndptr<IdType>();
+          params.kv_chunk_size_ptr = handler->GetKVChunkSizePtr<IdType>();
+          params.block_valid_mask = handler->GetBlockValidMask();
+          params.padded_batch_size = handler->GetPlanInfo().padded_batch_size;
 
-    return BatchDecodeWithPagedKVCacheDispatched<HEAD_DIM, POS_ENCODING_MODE, AttentionVariant>(
-        params, handler->GetTmpV<DTypeO>(), handler->GetTmpS(), stream);
-
+          return BatchDecodeWithPagedKVCacheDispatched<HEAD_DIM, POS_ENCODING_MODE, AttentionVariant>(
+              params, handler->GetTmpV<DTypeO>(), handler->GetTmpS(), stream);
+        })});
     return cudaSuccess;
   }
 
-  template <typename DTypeQ, typename DTypeKV, typename DTypeO, typename IdType, uint32_t HEAD_DIM, PosEncodingMode POS_ENCODING_MODE, uint32_t GROUP_SIZE>
+  template <typename DTypeQ, typename DTypeKV, typename DTypeO, typename IdType>
   cudaError_t BatchDecodeHandlerPlan(BatchDecodeHandler *handler, void *float_buffer,
                                      size_t float_workspace_size_in_bytes, void *int_buffer,
                                      size_t int_workspace_size_in_bytes, IdType *indptr_h,
                                      IdType *last_page_len_h, uint32_t batch_size,
-                                     uint32_t num_qo_heads, uint32_t num_kv_heads,
-                                     uint32_t page_size)
+                                     uint32_t num_qo_heads, uint32_t num_kv_heads, uint32_t head_dim,
+                                     uint32_t page_size, PosEncodingMode pos_encoding_mode)
   {
     if (num_qo_heads % num_kv_heads != 0)
     {
@@ -422,11 +677,63 @@ namespace flashinfer
               << num_kv_heads;
       FLASHINFER_ERROR(err_msg.str());
     }
+    DISPATCH_head_dim(head_dim, HEAD_DIM, {
+      DISPATCH_pos_encoding_mode(pos_encoding_mode, POS_ENCODING_MODE, {
+        DISPATCH_GQA_GROUP_SIZE(num_qo_heads / num_kv_heads, GROUP_SIZE, {
+          return handler->PlanDispatched<GROUP_SIZE, HEAD_DIM, POS_ENCODING_MODE, DTypeQ, DTypeKV,
+                                         DTypeO, IdType>(
+              float_buffer, float_workspace_size_in_bytes, int_buffer, int_workspace_size_in_bytes,
+              indptr_h, last_page_len_h, batch_size, num_qo_heads, page_size);
+        });
+      });
+    });
+  }
 
-    return handler->PlanDispatched<GROUP_SIZE, HEAD_DIM, POS_ENCODING_MODE, DTypeQ, DTypeKV,
-                                   DTypeO, IdType>(
-        float_buffer, float_workspace_size_in_bytes, int_buffer, int_workspace_size_in_bytes,
-        indptr_h, last_page_len_h, batch_size, num_qo_heads, page_size);
+  template <typename DTypeQ, typename DTypeKV, typename DTypeO, typename IdType>
+  cudaError_t BatchDecodeWithPagedKVCacheWrapperMLA(
+      BatchDecodeHandler *handler, DTypeQ *q_nope, DTypeQ *q_pe, IdType *q_rope_offset,
+      paged_kv_mla_t<DTypeKV, IdType> paged_kv, DTypeO *o, float *lse, uint32_t num_qo_heads,
+      float sm_scale, float rope_scale = 1.f, float rope_theta = 1e4, cudaStream_t stream = nullptr)
+  {
+    DISPATCH_head_dim(paged_kv.head_dim_ckv, HEAD_DIM_CKV, {
+      // fixme: head_dim_ckv(kv_lora_rank) is 8 times the size of head_dim_kpe(qk_rope_head_dim) for
+      // all MLA model (DeepSeek-V2-Lite, DeepSeek-V2.5, MiniCPM3) at the time Oct.2024
+      constexpr auto HEAD_DIM_KPE = HEAD_DIM_CKV / 8;
+      using Params = BatchDecodeParamsMLA<DTypeQ, DTypeKV, DTypeO, IdType>;
+      using AttentionVariant = DefaultAttention<
+          /*use_custom_mask=*/false, /*use_sliding_window=*/false,
+          /*use_logits_soft_cap=*/false, /*use_alibi=*/false>;
+      Params params(q_nope, q_pe, q_rope_offset, paged_kv, o, lse, num_qo_heads,
+                    /*window_left=*/-1, /*logits_soft_cap=*/0.f, sm_scale, rope_scale, rope_theta);
+      params.request_indices = handler->GetRequestIndices<IdType>();
+      params.kv_tile_indices = handler->GetKVTileIndices<IdType>();
+      params.o_indptr = handler->GetOIndptr<IdType>();
+      params.kv_chunk_size_ptr = handler->GetKVChunkSizePtr<IdType>();
+      params.block_valid_mask = handler->GetBlockValidMask();
+      params.padded_batch_size = handler->GetPlanInfo().padded_batch_size;
 
-  } // namespace flashinfer
-}
+      return BatchDecodeWithPagedKVCacheDispatchedMLA<HEAD_DIM_CKV, HEAD_DIM_KPE, AttentionVariant>(
+          params, handler->GetTmpV<DTypeO>(), handler->GetTmpS(), stream);
+    });
+    return cudaSuccess;
+  }
+
+  template <typename DTypeQ, typename DTypeKV, typename DTypeO, typename IdType>
+  cudaError_t BatchDecodeHandlerPlanMLA(BatchDecodeHandler *handler, void *float_buffer,
+                                        size_t float_workspace_size_in_bytes, void *int_buffer,
+                                        size_t int_workspace_size_in_bytes, IdType *indptr_h,
+                                        IdType *last_page_len_h, uint32_t batch_size,
+                                        uint32_t num_qo_heads, uint32_t head_dim_ckv,
+                                        uint32_t page_size)
+  {
+    DISPATCH_head_dim(head_dim_ckv, HEAD_DIM_CKV, {
+      // fixme: head_dim_ckv(kv_lora_rank) is 8 times the size of head_dim_kpe(qk_rope_head_dim) for
+      // all MLA model (DeepSeek-V2-Lite, DeepSeek-V2.5, MiniCPM3) at the time Oct.2024
+      constexpr auto HEAD_DIM_KPE = HEAD_DIM_CKV / 8;
+      return handler->PlanDispatchedMLA<HEAD_DIM_CKV, HEAD_DIM_KPE, DTypeQ, DTypeKV, DTypeO, IdType>(
+          float_buffer, float_workspace_size_in_bytes, int_buffer, int_workspace_size_in_bytes,
+          indptr_h, last_page_len_h, batch_size, num_qo_heads, page_size);
+    });
+  }
+
+} // namespace flashinfer
