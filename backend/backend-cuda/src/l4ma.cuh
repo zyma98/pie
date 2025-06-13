@@ -304,7 +304,7 @@ public:
 
         std::vector<int32_t> kv_indicies_host{0};
         std::vector<int32_t> kv_indptr_host({0, 1});
-        std::vector<int32_t> kv_last_page_len_host;
+        std::vector<int32_t> kv_last_page_len_host{32};
         thrust::device_vector<int32_t> kv_indptr(kv_indptr_host);
         thrust::device_vector<int32_t> kv_indices(kv_indicies_host);
         thrust::device_vector<int32_t> kv_last_page_len(kv_last_page_len_host);
@@ -324,17 +324,41 @@ public:
         size_t int_workspace_size_in_bytes = 8 * 1024 * 1024;
         thrust::device_vector<char> int_buffer(int_workspace_size_in_bytes);
 
+        //             template <typename DType, typename IdType>
+        // cudaError_t AppendPagedKVCache(paged_kv_t<DType, IdType> paged_kv, DType* append_key,
+        //                                DType* append_value, IdType* batch_indices, IdType* positions,
+        //                                uint32_t nnz, size_t append_k_stride_n, size_t append_k_stride_h,
+        //                                size_t append_v_stride_n, size_t append_v_stride_h,
+        //                                cudaStream_t stream = nullptr) {
+
+        std::vector<int32_t> batch_indices_host{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+        std::vector<int32_t> positions_host{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+                                            16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31};
+        thrust::device_vector<int32_t> batch_indices(batch_indices_host);
+        thrust::device_vector<int32_t> positions(positions_host);
+
+        // populate the kv cache.
+        flashinfer::AppendPagedKVCache<T, int32_t>(
+            paged_kv,
+            thrust::raw_pointer_cast(k_proj.data()), // append_key
+            thrust::raw_pointer_cast(v_proj.data()), // append_value
+            thrust::raw_pointer_cast(batch_indices.data()),
+            thrust::raw_pointer_cast(positions.data()),
+            32,
+            nkv * hd, hd,
+            nkv * hd, hd);
+
         handler.Plan<T, int32_t>(
             (void *)thrust::raw_pointer_cast(float_buffer.data()), float_workspace_size_in_bytes,
             (void *)thrust::raw_pointer_cast(int_buffer.data()), int_workspace_size_in_bytes,
             qo_indptr_h.data(), kv_indptr_host.data(), /*total_num_rows=*/32, /*batch=*/1,
             nq, nkv, config_.head_dim(), page_size);
 
-        // cudaError_t status = flashinfer::BatchPrefillWithPagedKVCacheWrapper<T, T, T, int32_t, 64, flashinfer::MaskMode::kNone, flashinfer::PosEncodingMode::kNone, false, >(
-        //     &handler, thrust::raw_pointer_cast(q_proj.data()), thrust::raw_pointer_cast(qo_indptr_d.data()),
-        //     /*q_rope_offset=*/nullptr, paged_kv, thrust::raw_pointer_cast(o.data()),
-        //     /*lse=*/nullptr, num_qo_heads,
-        //     /*causal=*/false, pos_encoding_mode);
+        cudaError_t status = flashinfer::BatchPrefillWithPagedKVCacheWrapper<T, T, T, int32_t>(
+            &handler, thrust::raw_pointer_cast(q_proj.data()), thrust::raw_pointer_cast(qo_indptr_d.data()),
+            /*q_rope_offset=*/nullptr, paged_kv, thrust::raw_pointer_cast(o_proj.data()),
+            /*lse=*/nullptr, nq,
+            /*causal=*/false, flashinfer::PosEncodingMode::kNone);
 
         // flashinfer::BatchDecodeHandler handler;
         // size_t float_workspace_size_in_bytes = 32 * 1024 * 1024;
