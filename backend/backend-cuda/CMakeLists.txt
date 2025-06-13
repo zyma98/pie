@@ -28,13 +28,13 @@ include(cmake/CPM.cmake)
 # This replaces manual submodule management.
 CPMAddPackage(
     URI "gh:flashinfer-ai/flashinfer@0.2.6"
-    OPTIONS "FLASHINFER_ENABLE_FP8 OFF" "FLASHINFER_ENABLE_FP8_E4M3 OFF" "FLASHINFER_ENABLE_FP8_E5M2 OFF"
-)
+    OPTIONS "FLASHINFER_ENABLE_FP8 OFF" "FLASHINFER_ENABLE_FP8_E4M3 OFF" "FLASHINFER_ENABLE_FP8_E5M2 OFF" "FLASHINFER_GEN_HEAD_DIMS 64" "FLASHINFER_GEN_POS_ENCODING_MODES 0" "FLASHINFER_GEN_MASK_MODES 0" 
+) 
 
-CPMAddPackage(
-    URI "gh:NVIDIA/cuembed#main@0.1.0"
-    OPTIONS "BUILD_TESTS OFF" "BUILD_BENCHMARKS OFF"
-)
+# CPMAddPackage(
+#     URI "gh:NVIDIA/cuembed#main@0.1.0"
+#     OPTIONS "BUILD_TESTS OFF" "BUILD_BENCHMARKS OFF"
+# )
 
 CPMAddPackage(
     URI "gh:zeromq/cppzmq@4.10.0"
@@ -50,6 +50,11 @@ CPMAddPackage(
     OPTIONS "YAML_CPP_BUILD_TESTS OFF"
 )
 
+
+file(GLOB_RECURSE FLASHINFER_GENERATED_SOURCES
+     "${flashinfer_SOURCE_DIR}/src/generated/*.cu"
+)
+
 # 5. Define the main executable target
 # Add all your source files here.
 add_executable(cuda_app
@@ -57,6 +62,7 @@ add_executable(cuda_app
     src/l4ma.cu
     src/bpe.cpp
     src/common.cu
+    ${FLASHINFER_GENERATED_SOURCES}
 )
 
 # 6. Set compiler flags and options for the target
@@ -69,9 +75,12 @@ target_compile_options(cuda_app PRIVATE
         --extended-lambda
         -g # Enable host debug symbols
         -G # Enable device-side debug symbols
-        -gencode=arch=compute_89,code=sm_89
+        #-gencode=arch=compute_89,code=sm_89
     >
 )
+
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--no-relax")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcmodel=large")
 
 # 7. Link libraries and include directories
 # CPM automatically handles include directories for its packages when you link them.
@@ -79,7 +88,6 @@ target_compile_options(cuda_app PRIVATE
 target_include_directories(cuda_app PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${flashinfer_SOURCE_DIR}/include 
-    ${cuembed_SOURCE_DIR}
 )
 
 target_link_libraries(cuda_app PRIVATE
@@ -88,7 +96,7 @@ target_link_libraries(cuda_app PRIVATE
     yaml-cpp
     
     nlohmann_json::nlohmann_json
-
+    #flashinfer
     # Link against CUDA libraries provided by CMake's FindCUDA module
     CUDA::cublas
     CUDA::cublasLt

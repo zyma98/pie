@@ -175,6 +175,7 @@ public:
         thrust::device_vector<T> q_proj(batch * nq * hd);
         thrust::device_vector<T> k_proj(batch * nkv * hd);
         thrust::device_vector<T> v_proj(batch * nkv * hd);
+        thrust::device_vector<T> o_proj(batch * nkv * hd);
         thrust::device_vector<char> workspace(1024 * 1024 * 4);
 
         // No bias for projections
@@ -313,6 +314,29 @@ public:
             thrust::raw_pointer_cast(k_data.data()), thrust::raw_pointer_cast(v_data.data()),
             thrust::raw_pointer_cast(kv_indices.data()), thrust::raw_pointer_cast(kv_indptr.data()),
             thrust::raw_pointer_cast(kv_last_page_len.data()));
+
+        flashinfer::BatchDecodeHandler handler;
+        size_t float_workspace_size_in_bytes = 32 * 1024 * 1024;
+        thrust::device_vector<char> float_buffer(float_workspace_size_in_bytes);
+        size_t int_workspace_size_in_bytes = 8 * 1024 * 1024;
+        thrust::device_vector<char> int_buffer(int_workspace_size_in_bytes);
+
+        flashinfer::BatchDecodeHandlerPlan<T, T, T, int32_t, 64, flashinfer::PosEncodingMode::kNone, 4>(
+            &handler, (void *)thrust::raw_pointer_cast(float_buffer.data()), float_workspace_size_in_bytes,
+            (void *)thrust::raw_pointer_cast(int_buffer.data()), int_workspace_size_in_bytes,
+            kv_indptr_host.data(), kv_last_page_len_host.data(), batch, nq, nkv, page_size);
+
+        //   template <typename DTypeQ, typename DTypeKV, typename DTypeO, typename IdType, uint32_t HEAD_DIM, PosEncodingMode POS_ENCODING_MODE>
+        //   cudaError_t BatchDecodeWithPagedKVCacheWrapper(
+        //       BatchDecodeHandler *handler, DTypeQ *q, IdType *q_rope_offset,
+        //       paged_kv_t<DTypeKV, IdType> paged_kv, DTypeO *o, float *lse, uint32_t num_qo_heads,
+        //       std::optional<float> maybe_sm_scale = std::nullopt, float rope_scale = 1.f,
+        //       float rope_theta = 1e4, cudaStream_t stream = nullptr)
+        //   {
+
+        cudaError_t status = flashinfer::BatchDecodeWithPagedKVCacheWrapper<T, T, T, int32_t, 64, flashinfer::PosEncodingMode::kNone>(
+            &handler, thrust::raw_pointer_cast(q_proj.data()), /*q_rope_offset=*/nullptr, paged_kv,
+            thrust::raw_pointer_cast(o_proj.data()), /*lse=*/nullptr, nq);
 
         cublasLtDestroy(ltHandle);
     }
