@@ -338,7 +338,7 @@ where
         for name in names {
             // Remove the (name, id) pair from the namespace.
             if let Some(id) = table.remove(name) {
-                
+
                 //println!("attempting to free, type: {:?}, id: {:?}", ty, id);
                 // Determine if the object should be freed.
                 let should_free = if ty.is_sharable() {
@@ -368,7 +368,7 @@ where
                     let _ = self.id_pool.get_mut(&ty).unwrap().release(id);
                         freed_ids.push(id);
                 }
-            } 
+            }
         }
 
         // cleanup the namespace table if it is empty
