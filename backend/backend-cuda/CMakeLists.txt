@@ -50,6 +50,10 @@ CPMAddPackage(
     OPTIONS "YAML_CPP_BUILD_TESTS OFF"
 )
 
+CPMAddPackage(
+    URI "gh:CLIUtils/CLI11@2.5.0"
+)
+
 
 file(GLOB_RECURSE FLASHINFER_GENERATED_SOURCES
      "${flashinfer_SOURCE_DIR}/src/generated/*.cu"
@@ -57,7 +61,7 @@ file(GLOB_RECURSE FLASHINFER_GENERATED_SOURCES
 
 # 5. Define the main executable target
 # Add all your source files here.
-add_executable(cuda_app
+add_executable(pie_cuda_be
     src/main.cu
     src/l4ma.cu
     src/bpe.cpp
@@ -68,7 +72,7 @@ add_executable(cuda_app
 # 6. Set compiler flags and options for the target
 # These flags are applied specifically to 'cuda_app'.
 # This mirrors the 'cxxflags' from your ninja file.
-target_compile_options(cuda_app PRIVATE
+target_compile_options(pie_cuda_be PRIVATE
     $<$<COMPILE_LANGUAGE:CUDA>:
         -Xcompiler=-Wall
         -Xcompiler=-Wextra
@@ -85,13 +89,13 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcmodel=large")
 # 7. Link libraries and include directories
 # CPM automatically handles include directories for its packages when you link them.
 # We just need to add our own 'include' directory and link the required libraries.
-target_include_directories(cuda_app PRIVATE
+target_include_directories(pie_cuda_be PRIVATE
    ${CMAKE_CURRENT_SOURCE_DIR}/include
    ${flashinfer_SOURCE_DIR}/include 
    ${flashinfer_SOURCE_DIR}/src/generated 
 )
 
-target_link_libraries(cuda_app PRIVATE
+target_link_libraries(pie_cuda_be PRIVATE
     # Link against targets provided by CPM packages
     cppzmq
     yaml-cpp
@@ -99,6 +103,7 @@ target_link_libraries(cuda_app PRIVATE
     nlohmann_json::nlohmann_json
     decode_kernels
     prefill_kernels
+    CLI11::CLI11
     #flashinfer
     # Link against CUDA libraries provided by CMake's FindCUDA module
     CUDA::cublas
@@ -109,10 +114,10 @@ target_link_libraries(cuda_app PRIVATE
 # This allows you to build and run the application with a single command.
 # e.g., 'ninja run' or 'make run'
 add_custom_target(run
-    COMMAND $<TARGET_FILE:cuda_app>
-    DEPENDS cuda_app
+    COMMAND $<TARGET_FILE:pie_cuda_be>
+    DEPENDS pie_cuda_be
     WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}
-    COMMENT "Running cuda_app..."
+    COMMENT "Running pie_cuda_be..."
 )
 
 # --- End of CMakeLists.txt ---
