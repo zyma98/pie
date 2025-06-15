@@ -4,11 +4,6 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 pub type Rank = u32;
 
-
-
-
-
-
 // The code below is copied from the tiktoken.
 // https://github.com/openai/tiktoken/blob/main/src/lib.rs
 
@@ -192,7 +187,7 @@ impl BytePairEncoder {
     }
 
     fn new(
-        encoder: HashMap<Vec<u8>, Rank>,
+        decoder: HashMap<Rank, Vec<u8>>,
         special_tokens_encoder: HashMap<String, Rank>,
         pattern: &str,
     ) -> Self {
@@ -206,8 +201,8 @@ impl BytePairEncoder {
             Regex::new(&parts.join("|")).unwrap()
         };
 
-        let decoder: HashMap<Rank, Vec<u8>> =
-            encoder.iter().map(|(k, v)| (*v, k.clone())).collect();
+        let encoder: HashMap<Vec<u8>, Rank> =
+            decoder.iter().map(|(k, v)| (v.clone(), *k)).collect();
 
         assert_eq!(
             encoder.len(),
@@ -252,7 +247,7 @@ impl BytePairEncoder {
     }
 }
 
-fn load_merge_rules(path: &str) -> Result<HashMap<Vec<u8>, Rank>, Box<dyn std::error::Error>> {
+pub fn load_merge_rules(path: &str) -> Result<HashMap<Rank, Vec<u8>>, Box<dyn std::error::Error>> {
     // Read the entire file as a UTF-8 string
     let contents = fs::read_to_string(path)?;
 
@@ -291,12 +286,11 @@ fn load_merge_rules(path: &str) -> Result<HashMap<Vec<u8>, Rank>, Box<dyn std::e
             .map_err(|e| format!("Error parsing rank at line {}: {}", line_number, e))?;
 
         // Insert into the HashMap
-        ret.insert(decoded_token, rank);
+        ret.insert(rank, decoded_token);
     }
 
     Ok(ret)
 }
-
 
 pub fn empty_tokenizer() -> BytePairEncoder {
     // Create an empty encoder with no merge rules and no special tokens

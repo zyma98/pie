@@ -3,7 +3,7 @@ use crate::batching::{Batchable, Batcher, BatchingStrategy};
 use crate::instance::Id as InstanceId;
 use crate::object::{IdRepr, ObjectManager, ObjectType, group_consecutive_ids};
 use crate::service::{Service, ServiceError};
-use crate::tokenizer::{BytePairEncoder, empty_tokenizer, llama3_tokenizer};
+use crate::tokenizer::{BytePairEncoder, empty_tokenizer, llama3_tokenizer, load_merge_rules};
 use crate::utils::IdPool;
 use crate::{backend, batching, runtime, service, tokenizer};
 use dashmap::DashMap;
@@ -1071,12 +1071,17 @@ impl ExportedBlocks {
 #[derive(Clone)]
 pub struct Simulator {
     protocols: Vec<String>,
+    tokenizer_merge_table: HashMap<u32, Vec<u8>>
 }
 
 impl Simulator {
     pub fn new() -> Self {
+        let tokenizer_merge_table =
+            load_merge_rules("asset/model-test.vocab").expect("Failed to load tokenizer vocab");
+
         Self {
             protocols: vec!["l4m".to_string()],
+            tokenizer_merge_table
         }
     }
 }
@@ -1119,6 +1124,11 @@ impl backend::Simulate for Simulator {
                     num_available_blocks: 1000000,
                     num_available_embeddings: 1000000,
                     num_available_distributions: 100000,
+                    tokenizer: Some(pb_bindings::Tokenizer {
+                        merge_table: self.tokenizer_merge_table.clone(),
+                        special_tokens: HashMap::new(),
+                        split_regex: "".to_string(),
+                    }),
                 }),
             ),
             _ => None,
