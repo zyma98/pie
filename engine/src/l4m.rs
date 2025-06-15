@@ -1116,6 +1116,7 @@ impl backend::Simulate for Simulator {
                 ))
             }
 
+
             pb_bindings::request::Command::GetInfo(_) => Some(
                 pb_bindings::response::Command::GetInfo(pb_bindings::GetInfoResponse {
                     version: "0.1.0".to_string(),
@@ -1126,8 +1127,14 @@ impl backend::Simulate for Simulator {
                     num_available_distributions: 100000,
                     tokenizer: Some(pb_bindings::Tokenizer {
                         merge_table: self.tokenizer_merge_table.clone(),
-                        special_tokens: HashMap::new(),
-                        split_regex: "".to_string(),
+                        special_tokens: HashMap::from([
+                            (128000, "<|begin_of_text|>".to_string()),
+                            (128001, "<|end_of_text|>".to_string()),
+                            (128006, "<|start_header_id|>".to_string()),
+                            (128007, "<|end_header_id|>".to_string()),
+                            (128009, "<|eot_id|>".to_string())
+                        ]),
+                        split_regex: r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+".to_string(),
                     }),
                 }),
             ),
