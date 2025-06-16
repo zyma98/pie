@@ -19,7 +19,7 @@ mod utils;
 use anyhow::Context;
 use std::path::{Path, PathBuf};
 
-use crate::auth::init_secret;
+use crate::auth::{create_jwt, init_secret};
 use crate::messaging::{PubSub, PushPull};
 use crate::ping::Ping;
 use crate::runtime::Runtime;
@@ -218,7 +218,14 @@ async fn start(config: Config) -> anyhow::Result<()> {
         e
     })?;
 
-    init_secret(&config.auth_secret);
+    if config.enable_auth {
+        tracing::info!("Authentication is enabled.");
+        init_secret(&config.auth_secret);
+        let token = create_jwt("default", auth::Role::User)?;
+        tracing::info!("Use this token to authenticate: {}", token);
+    } else {
+        tracing::info!("Authentication is disabled.");
+    }
 
     // Set up core services
     let runtime = Runtime::new(&config.cache_dir);
