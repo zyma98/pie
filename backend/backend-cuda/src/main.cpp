@@ -9,11 +9,16 @@
 #include <stdexcept>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <condition_variable>
 
 #include <CLI/CLI.hpp>
 #include <toml++/toml.hpp>
-#include "zmq.hpp"
-#include "zmq_addon.hpp"
+#include <zmq.hpp>
+#include <zmq_addon.hpp>
+#include <ixwebsocket/IXWebSocket.h>
+#include <ixwebsocket/IXConnectionState.h>
+#include <msgpack.hpp>
 
 #include "utils.hpp" // For base64_decode and get_user_cache_dir
 #include "config.hpp"
@@ -145,19 +150,147 @@ std::filesystem::path get_cache_dir(const std::optional<std::string>& cli_path, 
     return utils::get_user_cache_dir() / "pie";
 }
 
+/**
+ * @brief Registers this service with the central controller using ixwebsocket.
+ *
+ * This corrected version uses the asynchronous, callback-based API provided by the library.
+ * It uses a state machine within the callback and a condition_variable to wait
+ * for the registration process to complete.
+ */
+void register_with_controller(const AppConfig& config, const std::string& service_endpoint) {
+    std::cout << "[Registration Thread] Attempting registration with the controller..." << std::endl;
 
+    // --- State machine and synchronization setup ---
+    enum class RegistrationState {
+        Connecting,
+        AwaitingAuthResponse,
+        AwaitingRegisterResponse,
+        Succeeded,
+        Failed
+    };
 
+    RegistrationState state = RegistrationState::Connecting;
+    std::mutex mtx;
+    std::condition_variable cv;
+    bool process_finished = false;
+    std::string error_reason;
 
+    // 1. Setup the WebSocket client
+    ix::WebSocket webSocket;
+    const std::string url = "ws://" + config.controller_host + ":" + std::to_string(config.controller_port);
+    webSocket.setUrl(url);
 
-// Registers this service with the central controller.
-// NOTE: This is a placeholder. A real implementation would require a WebSocket
-// and MessagePack library.
-void register_with_controller(const AppConfig& config, const std::string& service_endpoint)
-{
-    std::cout << "[Registration Thread] Attempting to register with controller at "
-              << config.controller_host << ":" << config.controller_port << std::endl;
-    
-    // PSEUDOCODE for registration logic
+    // 2. Define the callback for handling all WebSocket events
+    webSocket.setOnMessageCallback(
+        [&](const ix::WebSocketMessagePtr& msg) {
+            std::unique_lock<std::mutex> lock(mtx);
+
+            switch (msg->type) {
+                case ix::WebSocketMessageType::Open:
+                    std::cout << "[Registration Thread] Connection established. Sending authentication request..." << std::endl;
+                    {
+                        // Now that we are open, send the authentication request
+                        msgpack::sbuffer sbuf;
+                        msgpack::packer<msgpack::sbuffer> packer(sbuf);
+                        packer.pack_map(3);
+                        packer.pack("type"); packer.pack("authenticate");
+                        packer.pack("corr_id"); packer.pack(0);
+                        packer.pack("token"); packer.pack(config.auth_token);
+                        webSocket.sendBinary(std::string(sbuf.data(), sbuf.size()));
+                        state = RegistrationState::AwaitingAuthResponse;
+                    }
+                    break;
+
+                case ix::WebSocketMessageType::Message:
+                    if (state == RegistrationState::AwaitingAuthResponse) {
+                        std::cout << "[Registration Thread] Received authentication response." << std::endl;
+                        try {
+                            msgpack::object_handle oh = msgpack::unpack(msg->str.data(), msg->str.size());
+                            std::map<std::string, msgpack::object> response;
+                            oh.get().convert(response);
+
+                            if (response["successful"].as<bool>()) {
+                                std::cout << "[Registration Thread] Authentication successful. Sending registration request..." << std::endl;
+                                // Auth succeeded, now send registration request
+                                msgpack::sbuffer sbuf;
+                                msgpack::packer<msgpack::sbuffer> packer(sbuf);
+                                packer.pack_map(5);
+                                packer.pack("type"); packer.pack("attach_remote_service");
+                                packer.pack("corr_id"); packer.pack(0);
+                                packer.pack("endpoint"); packer.pack(service_endpoint);
+                                packer.pack("service_name"); packer.pack(config.model_name);
+                                packer.pack("service_type"); packer.pack("l4m");
+                                webSocket.sendBinary(std::string(sbuf.data(), sbuf.size()));
+                                state = RegistrationState::AwaitingRegisterResponse;
+                            } else {
+                                error_reason = "Authentication failed by controller: " + (response.count("result") ? response["result"].as<std::string>() : "reason unknown");
+                                state = RegistrationState::Failed;
+                                process_finished = true;
+                            }
+                        } catch (const std::exception& e) {
+                            error_reason = "Failed to parse auth response: " + std::string(e.what());
+                            state = RegistrationState::Failed;
+                            process_finished = true;
+                        }
+                    } else if (state == RegistrationState::AwaitingRegisterResponse) {
+                        std::cout << "[Registration Thread] Received registration response." << std::endl;
+                         try {
+                            msgpack::object_handle oh = msgpack::unpack(msg->str.data(), msg->str.size());
+                            std::map<std::string, msgpack::object> response;
+                            oh.get().convert(response);
+
+                            if (response["successful"].as<bool>()) {
+                                std::cout << "[Registration Thread] Successfully registered with the controller." << std::endl;
+                                state = RegistrationState::Succeeded;
+                            } else {
+                                error_reason = "Controller could not attach backend: " + (response.count("result") ? response["result"].as<std::string>() : "reason unknown");
+                                state = RegistrationState::Failed;
+                            }
+                        } catch (const std::exception& e) {
+                            error_reason = "Failed to parse registration response: " + std::string(e.what());
+                            state = RegistrationState::Failed;
+                        }
+                        process_finished = true;
+                    }
+                    break;
+
+                case ix::WebSocketMessageType::Error:
+                    error_reason = "Connection error: " + msg->errorInfo.reason;
+                    state = RegistrationState::Failed;
+                    process_finished = true;
+                    break;
+
+                case ix::WebSocketMessageType::Close:
+                    if (state != RegistrationState::Succeeded) {
+                         error_reason = "Connection closed unexpectedly. Code: " + std::to_string(msg->closeInfo.code);
+                         state = RegistrationState::Failed;
+                    }
+                    process_finished = true;
+                    break;
+
+                default:
+                    break;
+            }
+
+            if (process_finished) {
+                cv.notify_one();
+            }
+        });
+
+    // 3. Start the WebSocket client's background thread
+    webSocket.start();
+
+    // 4. Wait until the registration process is finished (or fails)
+    {
+        std::unique_lock<std::mutex> lock(mtx);
+        cv.wait(lock, [&] { return process_finished; });
+    }
+    webSocket.stop();
+
+    // 5. Check the final state and log any errors
+    if (state == RegistrationState::Failed) {
+        std::cerr << "[Registration Thread] Registration process failed: " << error_reason << std::endl;
+    }
 }
 
 
