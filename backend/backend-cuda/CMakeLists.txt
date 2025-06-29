@@ -15,10 +15,9 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
-set(CMAKE_CUDA_ARCHITECTURES "89")
+set(CMAKE_CUDA_ARCHITECTURES "86")
 
 find_package(CUDAToolkit REQUIRED)
- 
 
 # 3. Include CPM.cmake for package management
 # This downloads the CPM script if it's not already present.
@@ -40,6 +39,14 @@ CPMAddPackage(
 
 CPMAddPackage(
     URI "gh:zeromq/cppzmq@4.10.0"
+)
+
+CPMAddPackage(
+    URI "gh:PJK/libcbor@0.12.0"
+)
+
+CPMAddPackage(
+    URI "gh:facebook/zstd@1.5.7"
 )
 
 CPMAddPackage(
@@ -91,6 +98,9 @@ protobuf_generate(
 
 add_executable(pie_cuda_be
     src/main.cpp
+    src/ztensor.cpp
+    src/gpt.cu
+    src/server.cu
     #src/l4ma.cu
     #src/bpe.cpp
     #src/common.cu
@@ -125,7 +135,8 @@ target_link_libraries(pie_cuda_be PRIVATE
     cppzmq
     CLI11::CLI11
     tomlplusplus::tomlplusplus
-
+    zstd
+    libcbor::libcbor
     # protobuf bindings
     pie_protobuf
 
