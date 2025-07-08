@@ -214,18 +214,17 @@ void L4maAttention<T>::forward(
     flashinfer::BatchPrefillHandler& prefill_handler
 ) {
 
-    const int batch = hidden_states.size() / config_.hidden_size;
+    const int batch_size = hidden_states.size() / config_.hidden_size;
     const int hidden_size = config_.hidden_size;
-    const int head_dim = config_.head_size;
-    const int num_q_heads = config_.num_query_heads;
-    const int num_kv_heads = config_.num_key_value_heads;
+    const int head_size = config_.head_size;
+    const int num_query_heads = config_.num_query_heads;
+    const int num_key_value_heads = config_.num_key_value_heads;
     
-    size_t q_size = (size_t)batch * num_q_heads * head_dim;
-    size_t k_size = (size_t)batch * num_kv_heads * head_dim;
-    size_t v_size = (size_t)batch * num_kv_heads * head_dim;
+    size_t q_size = (size_t)batch_size * num_query_heads * head_size;
+    size_t k_size = (size_t)batch_size * num_key_value_heads * head_size;
+    size_t v_size = (size_t)batch_size * num_key_value_heads * head_size;
 
     if(temp_buffer.size() < q_size + k_size + v_size) {
-        // panic if the temp buffer is too small
         throw std::runtime_error("Temporary buffer size is too small for Q, K, V projections.");
     }
 
@@ -235,9 +234,9 @@ void L4maAttention<T>::forward(
     thrust::device_vector<T> v_proj(thrust::device_pointer_cast(k_proj.data().get() + k_size), thrust::device_pointer_cast(k_proj.data().get() + k_size + v_size));
     
     // 1. Q, K, V projections
-    gemm_cublasLt<T>(ltHandle, stream, hidden_states, q_proj_weights_, config_.use_qkv_bias ? &q_proj_bias_ : nullptr, q_proj, batch, num_q_heads * head_dim, hidden_size, workspace, false, true);
-    gemm_cublasLt<T>(ltHandle, stream, hidden_states, k_proj_weights_, config_.use_qkv_bias ? &k_proj_bias_ : nullptr, k_proj, batch, num_kv_heads * head_dim, hidden_size, workspace, false, true);
-    gemm_cublasLt<T>(ltHandle, stream, hidden_states, v_proj_weights_, config_.use_qkv_bias ? &v_proj_bias_ : nullptr, v_proj, batch, num_kv_heads * head_dim, hidden_size, workspace, false, true);
+    gemm_cublasLt<T>(ltHandle, stream, hidden_states, q_proj_weights_, config_.use_qkv_bias ? &q_proj_bias_ : nullptr, q_proj, batch_size, num_query_heads * head_size, hidden_size, workspace, false, true);
+    gemm_cublasLt<T>(ltHandle, stream, hidden_states, k_proj_weights_, config_.use_qkv_bias ? &k_proj_bias_ : nullptr, k_proj, batch_size, num_key_value_heads * head_size, hidden_size, workspace, false, true);
+    gemm_cublasLt<T>(ltHandle, stream, hidden_states, v_proj_weights_, config_.use_qkv_bias ? &v_proj_bias_ : nullptr, v_proj, batch_size, num_key_value_heads * head_size, hidden_size, workspace, false, true);
 
     // 2. Apply RoPE (in-place)
     flashinfer::BatchQKApplyLlama31RotaryPosIds(
@@ -246,21 +245,21 @@ void L4maAttention<T>::forward(
         thrust::raw_pointer_cast(q_proj.data()),                  // q_rope (not available)
         thrust::raw_pointer_cast(k_proj.data()),                  // k_rope (not available)
         thrust::raw_pointer_cast(position_ids.data()),                 // pos_ids (uint32_t*)
-        batch,                                                    // nnz (assuming batch size for now)
-        num_q_heads,                                                       // num_qo_heads
-        num_kv_heads,                                                      // num_kv_heads
-        head_dim,                                       // rotary_dim
-        head_dim,                                       // head_dim
-        num_q_heads * head_dim,                                                  // q_stride_n
-        head_dim,                                       // q_stride_h
-        num_kv_heads * head_dim,                                                 // k_stride_n
-        head_dim,
+        batch_size,                                                    // nnz (assuming batch size for now)
+        num_query_heads,                                                       // num_qo_heads
+        num_key_value_heads,                                                      // num_kv_heads
+        head_size,                                       // rotary_dim
+        head_size,                                       // head_dim
+        num_query_heads * head_size,                                                  // q_stride_n
+        head_size,                                       // q_stride_h
+        num_key_value_heads * head_size,                                                 // k_stride_n
+        head_size,
         ///----                                                      // k_stride_h
         // q_rope_stride_n, q_rope_stride_h, k_rope_stride_n, k_rope_stride_h (not available)
-        num_q_heads * head_dim,
-        head_dim,
-        num_kv_heads * head_dim,
-        head_dim,
+        num_query_heads * head_size,
+        head_size,
+        num_key_value_heads * head_size,
+        head_size,
         ///----                                                      
         false, // interleave
         8.0f,  // rope_scale
