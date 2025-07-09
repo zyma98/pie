@@ -15,9 +15,6 @@ typedef struct cublasLtContext* cublasLtHandle_t;
 typedef struct CUstream_st* cudaStream_t;
 
 
-
-
-
 /**
  * @brief Base class for all model components (modules).
  */
@@ -203,20 +200,28 @@ class L4maForCausalLM : public Module<T> {
 public:
     explicit L4maForCausalLM(const L4maConfig& config);
 
-    void forward(thrust::device_vector<float>& logits,
-                 const thrust::device_vector<uint32_t>& input_ids,
-                 const thrust::device_vector<uint32_t>& position_ids,
-                 thrust::device_vector<int32_t>& kv_page_indices,
-                 thrust::device_vector<int32_t>& kv_page_indptr,
-                 thrust::device_vector<int32_t>& kv_last_page_lens,
-                 thrust::device_vector<int32_t>& qo_indptr,
-                 int batch_size,
-                 cudaStream_t stream,
-                 thrust::device_vector<char>& workspace
+    void forward(
+                thrust::device_vector<T>& logits, 
+                const thrust::device_vector<uint32_t>& input_ids,
+                const thrust::device_vector<uint32_t>& position_ids,
+                thrust::device_vector<int32_t>& kv_page_indices,
+                thrust::device_vector<int32_t>& kv_page_indptr,
+                thrust::device_vector<int32_t>& kv_last_page_lens,
+                thrust::device_vector<int32_t>& qo_indptr,
+                int batch_size,
+                cudaStream_t stream,
+                thrust::device_vector<char>& workspace
                 );
 
     std::map<std::string, thrust::device_vector<T>*> get_parameters() override;
     void create_kv_device_vectors(int max_kv_num);
+    
+    // Getter for KV cache device vectors
+    std::pair<thrust::device_vector<T>*, thrust::device_vector<T>*> get_kv_cache_device_vectors();
+    
+    // LM Head
+    void lm_head(thrust::device_vector<__nv_bfloat16>& logits, const thrust::device_vector<__nv_bfloat16>& hidden_states);
+
 
 private:
     L4maConfig config_;
@@ -225,5 +230,10 @@ private:
 
     thrust::device_vector<T> kv_cache_k_;
     thrust::device_vector<T> kv_cache_v_;
+    
+    cublasLtHandle_t cublaslt_handle_;
+    cudaStream_t stream_;
+    thrust::device_vector<char> workspace_;
+    flashinfer::BatchPrefillHandler* prefill_handler_;
 
 };

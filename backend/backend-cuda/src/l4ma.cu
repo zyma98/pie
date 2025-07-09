@@ -454,7 +454,7 @@ void L4maModel<T>::forward(
 
 template <typename T>
 void L4maForCausalLM<T>::forward(
-    thrust::device_vector<float>& logits, 
+    thrust::device_vector<T>& logits, 
     const thrust::device_vector<uint32_t>& input_ids,
     const thrust::device_vector<uint32_t>& position_ids,
     thrust::device_vector<int32_t>& kv_page_indices,
