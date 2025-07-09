@@ -1,7 +1,7 @@
 #include "model.hpp"
 
 // All implementation-specific headers are safely included here
-#include "gpt.cuh"
+#include "l4ma.cuh"
 #include "ztensor.hpp"
 
 #include <iostream>
@@ -160,6 +160,9 @@ Model::Model(const AppConfig& config,const ModelMetadata& out_metadata)
     // Load the model and store it in the implementation object
     pimpl->model = load_model_internal<__nv_bfloat16>(config, out_metadata);
     std::cout << "Model loaded successfully and is resident on the GPU." << std::endl;
+
+    // initialize kv cache
+    pimpl->model->create_kv_device_vectors(config.max_num_kv_pages);
 }
 
 Model::~Model() = default;
