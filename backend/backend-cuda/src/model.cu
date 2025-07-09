@@ -159,20 +159,20 @@ void Model::ModelImpl::handle_fill_block(const std::vector<Model::FillBlockComma
     std::cout << "  [ModelImpl] handle_fill_block called with " << commands.size() << " items." << std::endl;
 
     // --- Data Preparation ---
-    // std::vector<int32_t> kv_page_indices_host;
-    // std::vector<int32_t> kv_page_indptr_host = {0};
-    // std::vector<int32_t> kv_last_page_lens_host;
-    // std::vector<int32_t> qo_indptr_host = {0};
-    // std::vector<bool> custom_masks_host;
+    std::vector<int32_t> kv_page_indices_host;
+    std::vector<int32_t> kv_page_indptr_host = {0};
+    std::vector<int32_t> kv_last_page_lens_host;
+    std::vector<int32_t> qo_indptr_host = {0};
+    std::vector<bool> custom_masks_host;
 
-    // std::vector<int32_t> new_token_ids_host;
-    // std::vector<int32_t> new_position_ids_host;
+    std::vector<int32_t> new_token_ids_host;
+    std::vector<int32_t> new_position_ids_host;
 
-    // struct OutputEmbedPostproc {
-    //     size_t idx;
-    //     uint32_t vec_id;
-    // };
-    // std::vector<OutputEmbedPostproc> output_embed_postproc;
+    struct OutputEmbedPostproc {
+        size_t idx;
+        uint32_t vec_id;
+    };
+    std::vector<OutputEmbedPostproc> output_embed_postproc;
 
     // for (const auto& cmd : commands) {
     //     kv_page_indices_host.insert(kv_page_indices_host.end(), cmd.context_block_ids.begin(), cmd.context_block_ids.end());
@@ -334,7 +334,7 @@ Model::Model(const AppConfig& config,const ModelMetadata& out_metadata)
     pimpl->model->create_kv_device_vectors(config.max_num_kv_pages);
 
     // Initialize state
-    //pimpl->kv_page_size = pimpl->model->get_kv_page_size();
+    pimpl->kv_page_size = config.kv_page_size;
     pimpl->dist_size = config.dist_size;
     pimpl->embed_storage_p1.resize(config.max_num_embeds * config.dist_size);
     pimpl->embed_storage_p2.resize(config.max_num_embeds * config.dist_size);
