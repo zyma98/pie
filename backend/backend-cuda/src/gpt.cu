@@ -453,12 +453,19 @@ void L4maForCausalLM<T>::forward(
     thrust::device_vector<char>& workspace
     ) {
     
+    const int head_size = config_.head_size;
+    const int num_query_heads = config_.num_query_heads;
+    const int num_key_value_heads = config_.num_key_value_heads;
+    const int page_size = 64;
 
     flashinfer::BatchPrefillHandler handler;
     size_t float_workspace_size_in_bytes = 128 * 1024 * 1024;
     thrust::device_vector<char> float_buffer(float_workspace_size_in_bytes);
     size_t int_workspace_size_in_bytes = 8 * 1024 * 1024;
     thrust::device_vector<char> int_buffer(int_workspace_size_in_bytes);
+
+    std::vector<int32_t> qo_indptr_h{0, 32};
+    std::vector<int32_t> kv_indptr_host({0, 1});
 
     handler.Plan<T, int32_t>(
         (void *)thrust::raw_pointer_cast(float_buffer.data()), float_workspace_size_in_bytes,
@@ -467,7 +474,10 @@ void L4maForCausalLM<T>::forward(
         kv_indptr_host.data(),
          /*total_num_rows=*/32, 
          /*batch=*/1,
-        nq, nkv, config_.head_dim(), page_size);
+        num_query_heads,
+        num_key_value_heads,
+        head_size,
+        page_size);
 
 }
 
