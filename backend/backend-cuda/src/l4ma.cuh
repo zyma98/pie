@@ -26,7 +26,7 @@ public:
     /**
      * @brief Retrieves pointers to the internally managed parameters.
      */
-    virtual std::map<std::string, thrust::device_vector<T>*> get_parameters() = 0;
+    virtual std::map<std::string, std::shared_ptr<thrust::device_vector<T>>> get_parameters() = 0;
 };
 
 /**
@@ -42,11 +42,11 @@ public:
                  int num_tokens,
                  cudaStream_t stream);
 
-    std::map<std::string, thrust::device_vector<T>*> get_parameters() override;
+    std::map<std::string, std::shared_ptr<thrust::device_vector<T>>> get_parameters() override;
 
 private:
     L4maConfig config_;
-    thrust::device_vector<T> weight_;
+    std::shared_ptr<thrust::device_vector<T>> weight_;
 };
 
 /**
@@ -65,13 +65,13 @@ public:
                  cudaStream_t stream,
                  thrust::device_vector<char>& workspace_buffer_float);
 
-    std::map<std::string, thrust::device_vector<T>*> get_parameters() override;
+    std::map<std::string, std::shared_ptr<thrust::device_vector<T>>> get_parameters() override;
 
 private:
     L4maConfig config_;
-    thrust::device_vector<T> gate_proj_weights_;
-    thrust::device_vector<T> up_proj_weights_;
-    thrust::device_vector<T> down_proj_weights_;
+    std::shared_ptr<thrust::device_vector<T>> gate_proj_weights_;
+    std::shared_ptr<thrust::device_vector<T>> up_proj_weights_;
+    std::shared_ptr<thrust::device_vector<T>> down_proj_weights_;
 };
 
 /**
@@ -103,17 +103,17 @@ public:
                  thrust::device_vector<int32_t>& kv_positions
                 );
 
-    std::map<std::string, thrust::device_vector<T>*> get_parameters() override;
+    std::map<std::string, std::shared_ptr<thrust::device_vector<T>>> get_parameters() override;
 
 private:
     L4maConfig config_;
-    thrust::device_vector<T> q_proj_weights_;
-    thrust::device_vector<T> k_proj_weights_;
-    thrust::device_vector<T> v_proj_weights_;
-    thrust::device_vector<T> o_proj_weights_;
-    thrust::device_vector<T> q_proj_bias_;
-    thrust::device_vector<T> k_proj_bias_;
-    thrust::device_vector<T> v_proj_bias_;
+    std::shared_ptr<thrust::device_vector<T>> q_proj_weights_;
+    std::shared_ptr<thrust::device_vector<T>> k_proj_weights_;
+    std::shared_ptr<thrust::device_vector<T>> v_proj_weights_;
+    std::shared_ptr<thrust::device_vector<T>> o_proj_weights_;
+    std::shared_ptr<thrust::device_vector<T>> q_proj_bias_;
+    std::shared_ptr<thrust::device_vector<T>> k_proj_bias_;
+    std::shared_ptr<thrust::device_vector<T>> v_proj_bias_;
 };
 
 /**
@@ -125,7 +125,7 @@ public:
     explicit L4maDecoderLayer(const L4maConfig& config);
 
     void forward(thrust::device_vector<T>& hidden_states, // In-place
-                 const thrust::device_vector<uint32_t>& position_ids,
+                 const thrust::device_vector<int32_t>& position_ids,
                  thrust::device_vector<T>& kv_cache_k,
                  thrust::device_vector<T>& kv_cache_v,
                  thrust::device_vector<int32_t>& kv_page_indices,
@@ -144,7 +144,7 @@ public:
                  thrust::device_vector<int32_t>& kv_positions
                 );
 
-    std::map<std::string, thrust::device_vector<T>*> get_parameters() override;
+    std::map<std::string, std::shared_ptr<thrust::device_vector<T>>> get_parameters() override;
 
 private:
     L4maConfig config_;
@@ -166,7 +166,7 @@ public:
 
     void forward(thrust::device_vector<T>& hidden_states,
                  const thrust::device_vector<uint32_t>& input_ids,
-                 const thrust::device_vector<uint32_t>& position_ids,
+                 const thrust::device_vector<int32_t>& position_ids,
                  thrust::device_vector<T>& kv_cache_k,
                  thrust::device_vector<T>& kv_cache_v,
                  thrust::device_vector<int32_t>& kv_page_indices,
@@ -184,14 +184,11 @@ public:
                  thrust::device_vector<int32_t>& kv_positions
                 );
 
-    std::map<std::string, thrust::device_vector<T>*> get_parameters() override;
-    
-    // Getter to allow weight tying for lm_head
-    const thrust::device_vector<T>& get_embed_tokens_weight() const;
+    std::map<std::string, std::shared_ptr<thrust::device_vector<T>>> get_parameters() override;
 
 private:
     L4maConfig config_;
-    thrust::device_vector<T> embed_tokens_weight_;
+    std::shared_ptr<thrust::device_vector<T>> embed_tokens_weight_;
     std::vector<L4maDecoderLayer<T>> layers_;
     RMSNorm<T> norm_;
     thrust::device_vector<T> temp_bwd_buffer_;
@@ -208,11 +205,13 @@ public:
     void forward(
                 thrust::device_vector<T>& logits, 
                 const thrust::device_vector<uint32_t>& input_ids,
-                const thrust::device_vector<uint32_t>& position_ids,
+                const thrust::device_vector<int32_t>& position_ids,
                 thrust::device_vector<int32_t>& kv_page_indices,
                 thrust::device_vector<int32_t>& kv_page_indptr,
+                std::vector<int32_t>& kv_page_indptr_host,
                 thrust::device_vector<int32_t>& kv_last_page_lens,
                 thrust::device_vector<int32_t>& qo_indptr,
+                std::vector<int32_t>& qo_indptr_host,
                 thrust::device_vector<uint8_t>& custom_mask,
                 thrust::device_vector<int32_t>& mask_indptr,
                 cudaStream_t stream,
@@ -223,7 +222,7 @@ public:
                 thrust::device_vector<int32_t>& kv_positions
                 );
 
-    std::map<std::string, thrust::device_vector<T>*> get_parameters() override;
+    std::map<std::string, std::shared_ptr<thrust::device_vector<T>>> get_parameters() override;
     void create_kv_device_vectors(int max_kv_num);
     
     // Getter for KV cache device vectors
@@ -241,7 +240,7 @@ private:
     cublasLtHandle_t cublaslt_handle_;
 
     L4maModel<T> model_;
-    thrust::device_vector<T> lm_head_weight_;
+    std::shared_ptr<thrust::device_vector<T>> lm_head_weight_;
 
     thrust::device_vector<T> kv_cache_k_;
     thrust::device_vector<T> kv_cache_v_;
