@@ -433,7 +433,6 @@ void L4maModel<T>::forward(
     thrust::device_vector<int32_t>& qo_indptr,
     thrust::device_vector<uint8_t>& custom_mask,
     thrust::device_vector<int32_t>& mask_indptr,
-    int batch_size,
     cudaStream_t stream,
     thrust::device_vector<char>& workspace,
     flashinfer::BatchPrefillHandler& prefill_handler,
@@ -471,9 +470,10 @@ void L4maForCausalLM<T>::forward(
     thrust::device_vector<int32_t>& qo_indptr,
     thrust::device_vector<uint8_t>& custom_mask,
     thrust::device_vector<int32_t>& mask_indptr,
-    int batch_size,
     cudaStream_t stream,
-    thrust::device_vector<char>& workspace
+    thrust::device_vector<char>& workspace,
+    thrust::device_vector<int32_t>& kv_batch_indices,
+    thrust::device_vector<int32_t>& kv_positions
     ) {
     
     const int head_size = config_.head_size;
