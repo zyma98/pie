@@ -3,7 +3,7 @@
 // All implementation-specific headers are safely included here
 #include "l4ma.cuh"
 #include "ztensor.hpp"
-
+#include "common.cuh"
 #include <iostream>
 #include <set>
 #include <memory>
@@ -23,7 +23,7 @@ struct Block {
     std::vector<bool> occupancy;
 
     Block() = default; // Default constructor
-    Block(size_t kv_page_size)
+    Block(int32_t kv_page_size)
         : position_ids(kv_page_size, 0), occupancy(kv_page_size, false) {}
 };
 
@@ -47,8 +47,8 @@ struct Model::ModelImpl {
     thrust::device_vector<int32_t> embed_storage_p2;
 
     // Configuration
-    size_t kv_page_size;
-    int dist_size;
+    int32_t kv_page_size;
+    int32_t dist_size;
 
 
     // --- Handler method declarations added to ModelImpl ---
@@ -268,8 +268,15 @@ void Model::ModelImpl::handle_fill_block(const std::vector<Model::FillBlockComma
     if (num_total_new_tokens == 0) return; // Nothing to do
 
     thrust::device_vector<__nv_bfloat16> logits(num_total_new_tokens * model->get_config().vocab_size);
-    thrust::device_vector<char> workspace(128 * 1024 * 1024); // Placeholder size
+    
+
+    // using the numbers from flashinfer repo
+    thrust::device_vector<char> workspace_buffer_float(128 * 1024 * 1024);
+    thrust::device_vector<char> workspace_buffer_int(8 * 1024 * 1024);
+
     cudaStream_t stream = 0; // Use default stream
+
+    
 
     // --- Model Forward Pass ---
     model->forward(
@@ -283,12 +290,13 @@ void Model::ModelImpl::handle_fill_block(const std::vector<Model::FillBlockComma
         custom_mask,
         mask_indptr,
         stream,
-        workspace,
+        workspace_buffer_float,
+        workspace_buffer_int,
+        kv_page_size,
         kv_batch_indices,
         kv_positions
     );
 
-    // --- Post-processing: Softmax, Top-K, and Scatter to storage ---
     if (!output_embed_postproc.empty()) {
         std::vector<size_t> logit_indices_host;
         std::vector<uint32_t> dest_embed_ids_host;
@@ -301,12 +309,7 @@ void Model::ModelImpl::handle_fill_block(const std::vector<Model::FillBlockComma
         thrust::device_vector<size_t> logit_indices_dev = logit_indices_host;
         thrust::device_vector<uint32_t> dest_embed_ids_dev = dest_embed_ids_host;
 
-        // In a complete implementation, the following function would be a custom CUDA kernel
-        // or a series of library calls (e.g., from CUB or cuDNN) that performs a gather
-        // of the specified logit rows, applies softmax, finds the top-k values/indices,
-        // and scatters the results into the final embed_storage buffers.
-        /*
-        softmax_topk_scatter(
+        topk_scatter(
             logits,
             logit_indices_dev,
             dest_embed_ids_dev,
@@ -316,7 +319,7 @@ void Model::ModelImpl::handle_fill_block(const std::vector<Model::FillBlockComma
             embed_storage_p2,
             stream
         );
-        */
+       
     }
 
 }

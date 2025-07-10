@@ -63,7 +63,7 @@ public:
                  thrust::device_vector<T>& temp_buffer,
                  cublasLtHandle_t ltHandle,
                  cudaStream_t stream,
-                 thrust::device_vector<char>& workspace);
+                 thrust::device_vector<char>& workspace_buffer_float);
 
     std::map<std::string, thrust::device_vector<T>*> get_parameters() override;
 
@@ -96,7 +96,7 @@ public:
                  thrust::device_vector<T>& temp_buffer,
                  cublasLtHandle_t ltHandle,
                  cudaStream_t stream,
-                 thrust::device_vector<char>& workspace,
+                 thrust::device_vector<char>& workspace_buffer_float,
                  flashinfer::BatchPrefillHandler& prefill_handler,
                  const int32_t page_size,
                  thrust::device_vector<int32_t>& kv_batch_indices,
@@ -137,7 +137,7 @@ public:
                  thrust::device_vector<T>& temp_buffer,
                  cublasLtHandle_t ltHandle,
                  cudaStream_t stream,
-                 thrust::device_vector<char>& workspace,
+                 thrust::device_vector<char>& workspace_buffer_float,
                  flashinfer::BatchPrefillHandler& prefill_handler,
                  const int32_t page_size,
                  thrust::device_vector<int32_t>& kv_batch_indices,
@@ -175,8 +175,9 @@ public:
                  thrust::device_vector<int32_t>& qo_indptr,
                  thrust::device_vector<uint8_t>& custom_mask,
                  thrust::device_vector<int32_t>& mask_indptr,
+                 cublasLtHandle_t ltHandle,
                  cudaStream_t stream,
-                 thrust::device_vector<char>& workspace,
+                 thrust::device_vector<char>& workspace_buffer_float,
                  flashinfer::BatchPrefillHandler& prefill_handler,
                  const int32_t page_size,
                  thrust::device_vector<int32_t>& kv_batch_indices,
@@ -190,7 +191,6 @@ public:
 
 private:
     L4maConfig config_;
-    cublasLtHandle_t cublaslt_handle_;
     thrust::device_vector<T> embed_tokens_weight_;
     std::vector<L4maDecoderLayer<T>> layers_;
     RMSNorm<T> norm_;
@@ -216,7 +216,9 @@ public:
                 thrust::device_vector<uint8_t>& custom_mask,
                 thrust::device_vector<int32_t>& mask_indptr,
                 cudaStream_t stream,
-                thrust::device_vector<char>& workspace,
+                thrust::device_vector<char>& workspace_buffer_float,
+                thrust::device_vector<char>& workspace_buffer_int,
+                const int32_t page_size,
                 thrust::device_vector<int32_t>& kv_batch_indices,
                 thrust::device_vector<int32_t>& kv_positions
                 );
@@ -236,13 +238,14 @@ public:
 
 private:
     L4maConfig config_;
+    cublasLtHandle_t cublaslt_handle_;
+
     L4maModel<T> model_;
     thrust::device_vector<T> lm_head_weight_;
 
     thrust::device_vector<T> kv_cache_k_;
     thrust::device_vector<T> kv_cache_v_;
     
-    cublasLtHandle_t cublaslt_handle_;
     cudaStream_t stream_;
     thrust::device_vector<char> workspace_;
     flashinfer::BatchPrefillHandler* prefill_handler_;
