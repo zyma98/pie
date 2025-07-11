@@ -51,12 +51,26 @@ class L4maAttention(nn.Module):
             kv_last_page_lens: torch.Tensor,
             qo_indptr: torch.Tensor,
     ) -> torch.Tensor:
+        
+        
+        # print the mean of qkv matirces
+        # q_mean = self.q_proj.weight.mean().item()
+        # k_mean = self.k_proj.weight.mean().item()
+        # v_mean = self.v_proj.weight.mean().item()
+        # print(f"Q Mean: {q_mean}, K Mean: {k_mean}, V Mean: {v_mean}")
+        
         n, _ = hidden_states.size()
         page_size = kv_cache_at_layer[0].shape[2]
 
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
+
+        # print the mean of qkv matirces
+        # q_mean = query_states.mean().item()
+        # k_mean = key_states.mean().item()
+        # v_mean = value_states.mean().item()
+        # print(f"Q Mean: {q_mean}, K Mean: {k_mean}, V Mean: {v_mean}")
 
         query_states = query_states.view(n, self.config.num_query_heads, self.config.head_size)
         key_states = key_states.view(n, self.config.num_key_value_heads, self.config.head_size)
@@ -65,11 +79,18 @@ class L4maAttention(nn.Module):
         # print(position_ids)
         ops.apply_llama31_rope_pos_ids_inplace(q=query_states, k=key_states, pos_ids=position_ids)
 
+        # print the mean of qkv matirces after applying rope
+        # q_mean = query_states.mean().item()
+        # k_mean = key_states.mean().item()
+        # print(f"Q Mean after rope: {q_mean}, K Mean after rope: {k_mean}")
+
         batch_indices, positions = ops.get_batch_indices_positions(
             append_indptr=qo_indptr,
             seq_lens=ops.get_seq_lens(kv_page_indptr, kv_last_page_lens, page_size),
             nnz=n
         )
+        
+        #print(f"batch_indices: {batch_indices}, positions: {positions}")
 
         ops.append_paged_kv_cache(
             append_key=key_states,
@@ -85,8 +106,15 @@ class L4maAttention(nn.Module):
 
         attn_output = wrapper.run(query_states, kv_cache_at_layer[self.layer_idx])
         attn_output = attn_output.reshape(n, -1)
-
+        
+        print(f"mean of attn_output: {attn_output.mean().item()}")
+        print(attn_output.flatten()[:8])  # Print first 10 elements for debugging
+        print(attn_output.shape)
         attn_output = self.o_proj(attn_output)
+        
+        print(f"mean of attn_output after o_proj: {attn_output.mean().item()}")
+        print(attn_output.flatten()[:8])  # Print first 10 elements for debugging
+        print(attn_output.shape)
         return attn_output
 
 
@@ -171,6 +199,9 @@ class L4maModel(nn.Module):
     ) -> torch.Tensor:
         # attention_mask = proc_mask(attention_mask, batch.dtype())
         hidden_states = input_embeds
+        
+        #print(f"mean of input_embeds: {hidden_states.mean().item()}")
+        
         page_size = kv_cache_at_layer[0].shape[2]
 
         # check if its decoding (qo_indptr is )

@@ -204,6 +204,8 @@ class Driver:
                 tgt_block_idx = token_offset // self.kv_page_size
                 tgt_block_offset = token_offset % self.kv_page_size
 
+                print(f"Debug - input_embeds[{i}] = {input_embeds[i]}, token_offset = {token_offset}, tgt_block_idx = {tgt_block_idx}, tgt_block_offset = {tgt_block_offset}")
+
                 tgt_block_id = ctx_block_ids[tgt_block_idx]
 
                 tgt_block = self.blocks[tgt_block_id]
@@ -234,6 +236,8 @@ class Driver:
             ctx_pos_ids = np.hstack([self.blocks[ctx_id].position_ids for ctx_id in ctx_block_ids])[:total_sequence_length]  # int
             ctx_occupancy = np.hstack([self.blocks[ctx_id].occupancy for ctx_id in ctx_block_ids])[:total_sequence_length]  # bool
 
+            #print(f"ctx_pos_ids: {ctx_pos_ids}, ctx_occupancy: {ctx_occupancy}")
+        
             # Build the causal and valid masks
             casual_mask = ctx_pos_ids[None, :] <= inp_pos_ids[:, None]
             valid_mask = np.logical_and(ctx_occupancy[None, :], inp_occupancy[:, None])
@@ -245,6 +249,14 @@ class Driver:
 
         # concat all masks
         custom_mask = np.concatenate(custom_masks)
+
+
+        # print all inputs
+        # print('kv_page_indices', kv_page_indices)
+        # print('kv_page_indptr', kv_page_indptr)
+        # print('kv_last_page_lens', kv_last_page_lens)
+        # print('qo_indptr', qo_indptr)
+        #print('custom_mask', custom_mask)
 
         pt_new_token_ids = torch.as_tensor(new_token_ids, device=self.device, dtype=torch.int32)
         pt_new_position_ids = torch.as_tensor(new_position_ids, device=self.device, dtype=torch.int32)
