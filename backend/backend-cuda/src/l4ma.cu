@@ -12,6 +12,10 @@
 #include "flashinfer/pos_enc.cuh"
 #include "flashinfer/page.cuh"
 #include "flashinfer/activation.cuh"
+#include "flashinfer/vec_dtypes.cuh"
+#include "flashinfer/utils.cuh"
+#include "flashinfer/math.cuh"
+
 #include "flashinfer_ops.cuh"
 
 
@@ -26,30 +30,93 @@ __global__ void add_residual_kernel(T* x, const T* residual, int n) {
     }
 }
 
-__device__ __forceinline__ float silu(const float &val) { return val / (1.0f + __expf(-val)); }
 
+__device__ __forceinline__ float silu(const float &val) {
+    return val / (1.0f + __expf(-val));
+}
+
+template <typename T, float (*Activation)(const float&)>
+__global__ void act_and_mul_kernel(
+    T* __restrict__ out,
+    const T* __restrict__ input1,
+    const T* __restrict__ input2,
+    const int d
+) {
+    // Each thread processes one element at a time, with vectorization
+    constexpr uint32_t vec_size = 16 / sizeof(T);
+
+    // The block index corresponds to the token index in the batch
+    const int64_t token_idx = blockIdx.x;
+    // The thread index within the block
+    const int64_t thread_idx = threadIdx.x;
+    // The total number of threads in the block
+    const int64_t stride = blockDim.x;
+
+    // Calculate the base offset for the current token for each input
+    const int64_t token_offset = token_idx * d;
+
+    // Main loop for vectorized processing
+    // Each thread processes multiple elements in a strided pattern
+    #pragma unroll 1
+    for (uint32_t idx = thread_idx; idx < d / vec_size; idx += stride) {
+        flashinfer::vec_t<float, vec_size> x_vec, y_vec, out_vec;
+
+        // Load data from the two separate input tensors
+        x_vec.cast_load(input1 + token_offset + idx * vec_size);
+        y_vec.cast_load(input2 + token_offset + idx * vec_size);
+
+        // Apply activation to the first vector and multiply element-wise
+        #pragma unroll
+        for (uint32_t i = 0; i < vec_size; ++i) {
+            out_vec[i] = Activation(x_vec[i]) * y_vec[i];
+        }
+
+        // Store the result back to the output tensor
+        out_vec.cast_store(out + token_offset + idx * vec_size);
+    }
+
+    // Handle remaining elements that don't fit into a full vector
+    const int64_t remaining_offset = (d / vec_size) * vec_size;
+    #pragma unroll 1
+    for (int64_t idx = thread_idx + remaining_offset; idx < d; idx += stride) {
+        // Load single elements from each input tensor
+        float x = static_cast<float>(__ldg(input1 + token_offset + idx));
+        float y = static_cast<float>(__ldg(input2 + token_offset + idx));
+        // Compute and store the result
+        out[token_offset + idx] = static_cast<T>(Activation(x) * y);
+    }
+}
+
+
+
+// Host-side function to launch the silu_and_mul kernel
 template <typename T>
 void silu_and_mul(
-    T *out_ptr,
-    const T *in_ptr,
-    int num_tokens,
-    int d_half,
-    cudaStream_t stream)
-{
-    uint32_t vec_size = 16 / sizeof(T);
-    cudaLaunchConfig_t config;
-    config.gridDim = num_tokens;
-    config.blockDim = std::min(d_half / vec_size, 256U);
-    config.dynamicSmemBytes = 0;
-    config.stream = stream;
-    cudaLaunchAttribute attrs[1];
-    attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
-    config.numAttrs = 1;
-    config.attrs = attrs;
+    T* out_ptr,
+    const T* in1_ptr, // Pointer to the first input tensor
+    const T* in2_ptr, // Pointer to the second input tensor
+    int num_tokens,   // Batch size or number of tokens
+    int d,            // The hidden dimension size
+    cudaStream_t stream
+) {
+    // Vector size depends on the data type (e.g., 8 for half, 4 for float)
+    constexpr uint32_t vec_size = 16 / sizeof(T);
+    
+    // Each block processes one token
+    dim3 grid_dim(num_tokens);
+    // Number of threads per block, capped at 256 for efficiency
+    // We choose a block size that is a power of two and related to the problem size
+    uint32_t block_dim = std::min(static_cast<uint32_t>(d / vec_size), 256U);
+    if (block_dim == 0) { // Ensure at least one thread block if d is small
+        block_dim = std::min(static_cast<uint32_t>(d), 256U);
+    }
 
-    auto kernel = flashinfer::activation::act_and_mul_kernel<T, silu>;
-    cudaLaunchKernelEx(&config, kernel, out_ptr, in_ptr, d_half);
+    // Launch the kernel with a standard execution configuration
+    act_and_mul_kernel<T, silu><<<grid_dim, block_dim, 0, stream>>>(
+        out_ptr, in1_ptr, in2_ptr, d
+    );
 }
+
 
 // --- Constructor Implementations (Unchanged) ---
 template <typename T>
@@ -278,13 +345,22 @@ void L4maMlp<T>::forward(
     gemm_cublasLt<T>(ltHandle, stream, x, gate_proj_weights_.data(), nullptr, gate_proj_out.data(), num_tokens, intermediate_size, hidden_size, cublas_workspace.data(), cublas_workspace_size, false, true);
 
     // print the mean of gate_proj_out_ptr and up_proj_out_ptr for debugging
-    std::cout << "Gate mean: " << gate_proj_out.mean() << ", Up mean: " << up_proj_out.mean() << std::endl;
+    //std::cout << "Gate mean: " << gate_proj_out.mean() << ", Up mean: " << up_proj_out.mean() << std::endl;
 
     // 3. SwiGLU activation (gate * silu(up))
     // We can reuse the gate_proj_out_ptr buffer for the output of SwiGLU
-    silu_and_mul<T>(up_proj_out.data(), up_proj_out.data(), num_tokens, intermediate_size, stream);
+    //silu_and_mul<T>(up_proj_out.data(), up_proj_out.data(), num_tokens, intermediate_size, stream);
 
-    std::cout << "SwiGLU output mean: " << up_proj_out.mean() << std::endl;
+    silu_and_mul<T>(
+        up_proj_out.data(), 
+        gate_proj_out.data(), 
+        up_proj_out.data(), 
+        num_tokens, 
+        intermediate_size, 
+        stream
+    );
+
+    //std::cout << "SwiGLU output mean: " << up_proj_out.mean() << std::endl;
 
     // 4. Down projection
     gemm_cublasLt<T>(ltHandle, stream, up_proj_out.data(), down_proj_weights_.data(), nullptr, output, num_tokens, hidden_size, intermediate_size, cublas_workspace.data(), cublas_workspace_size, false, true);

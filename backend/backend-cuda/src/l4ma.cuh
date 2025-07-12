@@ -213,8 +213,7 @@ class L4maForCausalLM : public Module<T> {
 public:
     explicit L4maForCausalLM(const L4maConfig& config);
 
-    // REFACTORED: The StackAllocator is created inside this function, so it
-    // takes the raw workspace pointer. Changed to void* for generality.
+
     void forward(StackAllocator& allocator,
                  T* output,
                  const thrust::device_vector<uint32_t>& input_ids,
@@ -237,8 +236,6 @@ public:
     void create_kv_device_vectors(int max_kv_num);
     size_t get_workspace_size(int max_num_tokens) const;
 
-    // Unchanged methods
-    std::pair<thrust::device_vector<T>*, thrust::device_vector<T>*> get_kv_cache_device_vectors();
     L4maConfig& get_config() { return config_; }
 
 private:
