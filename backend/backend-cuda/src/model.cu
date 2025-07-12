@@ -191,7 +191,7 @@ void Model::ModelImpl::handle_fill_block(const std::vector<Model::FillBlockComma
 
         for (int32_t i = 0; i < num_new_tokens; ++i) {
             kv_batch_indices_host.push_back(batch_idx);
-            kv_positions_host.push_back(total_ctx_tokens - cmd.last_block_len + i);
+            kv_positions_host.push_back(total_ctx_tokens - num_new_tokens + i);
         }
 
         std::vector<uint32_t> inp_pos_ids_for_mask;

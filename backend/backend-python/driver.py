@@ -250,11 +250,11 @@ class Driver:
 
 
         # print all inputs
-        # print('kv_page_indices', kv_page_indices)
-        # print('kv_page_indptr', kv_page_indptr)
-        # print('kv_last_page_lens', kv_last_page_lens)
-        # print('qo_indptr', qo_indptr)
-        # print('custom_mask', custom_mask)
+        print('kv_page_indices', kv_page_indices)
+        print('kv_page_indptr', kv_page_indptr)
+        print('kv_last_page_lens', kv_last_page_lens)
+        print('qo_indptr', qo_indptr)
+        print('custom_mask', custom_mask)
 
         pt_new_token_ids = torch.as_tensor(new_token_ids, device=self.device, dtype=torch.int32)
         pt_new_position_ids = torch.as_tensor(new_position_ids, device=self.device, dtype=torch.int32)

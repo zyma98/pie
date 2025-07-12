@@ -100,6 +100,10 @@ class L4maAttention(nn.Module):
             nnz=n
         )
         
+        if self.layer_idx == 0:
+            print(f"batch_indices: {batch_indices}, positions: {positions}")
+            print(f"kv_page_indices: {kv_page_indices}, kv_page_indptr: {kv_page_indptr}, kv_last_page_lens: {kv_last_page_lens}")
+        
         #print(f"batch_indices: {batch_indices}, positions: {positions}")
 
         ops.append_paged_kv_cache(
