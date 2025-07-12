@@ -28,11 +28,11 @@ class L4maMlp(nn.Module):
         gate_proj = self.gate_proj(x)
         up_proj = self.up_proj(x)
         
-        print(f"gate mean: {gate_proj.mean().item()}, up_proj mean: {up_proj.mean().item()}")
+        #print(f"gate mean: {gate_proj.mean().item()}, up_proj mean: {up_proj.mean().item()}")
         
         interim = self.act_fn(gate_proj) * up_proj
         
-        print(f"interim shape: {interim.shape}, mean: {interim.mean().item()}")
+        #print(f"interim shape: {interim.shape}, mean: {interim.mean().item()}")
         
         down_proj = self.down_proj(interim)
         return down_proj
@@ -264,6 +264,8 @@ class L4maModel(nn.Module):
                 kv_last_page_lens=kv_last_page_lens,
                 qo_indptr=qo_indptr,
             )
+            # print(f"mean: {layer_outputs.mean().item()}")
+            # print(layer_outputs.flatten()[:10].tolist())
 
             hidden_states = layer_outputs
 

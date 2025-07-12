@@ -13,8 +13,6 @@
 #include "flashinfer/page.cuh"
 #include "flashinfer/activation.cuh"
 #include "flashinfer/vec_dtypes.cuh"
-#include "flashinfer/utils.cuh"
-#include "flashinfer/math.cuh"
 
 #include "flashinfer_ops.cuh"
 
@@ -656,11 +654,16 @@ void L4maModel<T>::forward(
                       kv_page_indices, kv_page_indptr, kv_last_page_lens,
                       qo_indptr, custom_mask, mask_indptr, ltHandle, stream,
                       prefill_handler, page_size, kv_batch_indices, kv_positions);
+
+        //std::cout << "layer [" << i << "] :" << working_hidden_buffer.mean() << std::endl;
+        //working_hidden_buffer.print(0, 10);
+
     }
 
     // Final norm reads from the working buffer and writes to the final output buffer.
     norm_.forward(final_norm_output, working_hidden_buffer.data(), num_tokens, stream);
     
+
     // Deallocate the working buffer.
     allocator.deallocate(working_hidden_buffer);
 }
@@ -668,7 +671,7 @@ void L4maModel<T>::forward(
 template <typename T>
 void L4maForCausalLM<T>::forward(
     StackAllocator& allocator,
-    T* output,
+    Tensor<T>& output,
     const thrust::device_vector<uint32_t>& input_ids,
     const thrust::device_vector<int32_t>& position_ids,
     thrust::device_vector<int32_t>& kv_page_indices,
@@ -720,6 +723,8 @@ void L4maForCausalLM<T>::forward(
         kv_batch_indices, kv_positions
     );
 
+
+
     Tensor<uint8_t> lm_head_workspace = allocator.allocate<uint8_t>(lm_head_workspace_bytes);
     
     gemm_cublasLt<T>(
@@ -727,7 +732,7 @@ void L4maForCausalLM<T>::forward(
         hidden_states.data(),
         model_.get_embed_tokens_weight().data(),
         nullptr,
-        output,
+        output.data(),
         num_tokens, config_.vocab_size, config_.hidden_size,
         lm_head_workspace.data(), lm_head_workspace_bytes, false, true
     );

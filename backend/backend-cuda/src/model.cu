@@ -209,12 +209,12 @@ void Model::ModelImpl::handle_fill_block(const std::vector<Model::FillBlockComma
                 uint32_t tgt_block_idx = token_abs_pos / kv_page_size;
                 uint32_t tgt_block_offset = token_abs_pos % kv_page_size;
 
-                // print tgt_block_idx and tgt_block_offset for debugging
-                std::cout << "Processing token: " << embed.token_id 
-                          << ", position: " << embed.position_id 
-                          << ", token_abs_pos: " << token_abs_pos
-                          << ", target block index: " << tgt_block_idx 
-                          << ", target block offset: " << tgt_block_offset << std::endl;
+                // // print tgt_block_idx and tgt_block_offset for debugging
+                // std::cout << "Processing token: " << embed.token_id 
+                //           << ", position: " << embed.position_id 
+                //           << ", token_abs_pos: " << token_abs_pos
+                //           << ", target block index: " << tgt_block_idx 
+                //           << ", target block offset: " << tgt_block_offset << std::endl;
 
                 if (tgt_block_idx < cmd.context_block_ids.size()) {
                     uint32_t tgt_block_id = cmd.context_block_ids[tgt_block_idx];
@@ -246,16 +246,16 @@ void Model::ModelImpl::handle_fill_block(const std::vector<Model::FillBlockComma
                 ctx_occupancy.insert(ctx_occupancy.end(), block.occupancy.begin(), block.occupancy.begin() + len_to_copy);
             }
 
-            // print all ctx_pos_ids and ctx_occupancy for debugging
-            std::cout << "ctx_pos_ids: ";
-            for (const auto& pos_id : ctx_pos_ids) {
-                std::cout << pos_id << " ";
-            }
-            std::cout << "\nctx_occupancy: ";
-            for (const auto& occ : ctx_occupancy) {
-                std::cout << (occ ? 1 : 0) << " ";
-            }
-            std::cout << std::endl;
+            // // print all ctx_pos_ids and ctx_occupancy for debugging
+            // std::cout << "ctx_pos_ids: ";
+            // for (const auto& pos_id : ctx_pos_ids) {
+            //     std::cout << pos_id << " ";
+            // }
+            // std::cout << "\nctx_occupancy: ";
+            // for (const auto& occ : ctx_occupancy) {
+            //     std::cout << (occ ? 1 : 0) << " ";
+            // }
+            // std::cout << std::endl;
 
 
             for (uint32_t inp_pos_id : inp_pos_ids_for_mask) {
@@ -330,7 +330,7 @@ void Model::ModelImpl::handle_fill_block(const std::vector<Model::FillBlockComma
     size_t num_total_new_tokens = new_token_ids.size();
     if (num_total_new_tokens == 0) return;
 
-    thrust::device_vector<__nv_bfloat16> logits(num_total_new_tokens * model->get_config().vocab_size);
+    Tensor<__nv_bfloat16> logits(num_total_new_tokens * model->get_config().vocab_size);
     
     size_t workspace_size_bytes = model->get_workspace_size(num_total_new_tokens);
 
@@ -339,9 +339,12 @@ void Model::ModelImpl::handle_fill_block(const std::vector<Model::FillBlockComma
     cudaStream_t stream = 0;
 
     // --- Model Forward Pass ---
+
+    // start measuring time
+    auto start_time = std::chrono::high_resolution_clock::now();
     model->forward(
         allocator,
-        thrust::raw_pointer_cast(logits.data()),
+        logits,
         new_token_ids,
         new_position_ids,
         kv_page_indices,
@@ -358,6 +361,13 @@ void Model::ModelImpl::handle_fill_block(const std::vector<Model::FillBlockComma
         kv_positions
     );
 
+    // end measuring time
+    cudaDeviceSynchronize(); // Ensure all operations are complete before measuring time
+    auto end_time = std::chrono::high_resolution_clock::now();
+
+    std::chrono::duration<double, std::milli> elapsed = end_time - start_time;
+    std::cout << "Model forward pass completed in " << elapsed.count() << " ms." << std::endl;
+
     // --- Post-processing ---
     if (!output_embed_postproc.empty()) {
         std::vector<size_t> logit_indices_host;
@@ -370,9 +380,11 @@ void Model::ModelImpl::handle_fill_block(const std::vector<Model::FillBlockComma
         }
         thrust::device_vector<size_t> logit_indices_dev = logit_indices_host;
         thrust::device_vector<uint32_t> dest_embed_ids_dev = dest_embed_ids_host;
+        
+        std::cout << "logit mean: " << logits.mean() << std::endl;
 
         topk_scatter(
-            logits,
+            logits.data(),
             logit_indices_dev,
             dest_embed_ids_dev,
             model->get_config().vocab_size,

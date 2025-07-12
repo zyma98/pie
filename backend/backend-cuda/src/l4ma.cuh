@@ -215,7 +215,7 @@ public:
 
 
     void forward(StackAllocator& allocator,
-                 T* output,
+                 Tensor<T>& output,
                  const thrust::device_vector<uint32_t>& input_ids,
                  const thrust::device_vector<int32_t>& position_ids,
                  thrust::device_vector<int32_t>& kv_page_indices,
