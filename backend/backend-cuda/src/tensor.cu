@@ -60,6 +60,26 @@ Tensor<T>::Tensor(const Tensor<T>& other, size_t offset)
 }
 
 template <typename T>
+Tensor<T>::Tensor(std::shared_ptr<T> data, size_t size, size_t offset)
+    : data_(std::move(data)), size_(size), offset_(offset) {}
+
+
+
+template <typename T>
+Tensor<T>::Tensor(const ByteTensor& byte_buffer, size_t byte_offset, size_t count) {
+    if (byte_offset + count * sizeof(T) > byte_buffer.size() * sizeof(uint8_t)) {
+        throw std::out_of_range("Reinterpreting view is out of bounds of the source byte buffer.");
+    }
+    
+    // This now works because of the corrected 'friend' declaration.
+    T* typed_ptr = reinterpret_cast<T*>(byte_buffer.data() + byte_offset);
+    this->data_ = std::shared_ptr<T>(byte_buffer.data_, typed_ptr);
+    this->size_ = count;
+    this->offset_ = 0;
+}
+
+
+template <typename T>
 size_t Tensor<T>::size() const { return size_; }
 
 template <typename T>
