@@ -24,7 +24,16 @@ class L4maMlp(nn.Module):
         self.act_fn = nn.SiLU()
 
     def forward(self, x):
-        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        
+        gate_proj = self.gate_proj(x)
+        up_proj = self.up_proj(x)
+        
+        
+        interim = self.act_fn(gate_proj) * up_proj
+        
+        print(f"interim shape: {interim.shape}, mean: {interim.mean().item()}")
+        
+        down_proj = self.down_proj(interim)
         return down_proj
 
 
@@ -107,14 +116,15 @@ class L4maAttention(nn.Module):
         attn_output = wrapper.run(query_states, kv_cache_at_layer[self.layer_idx])
         attn_output = attn_output.reshape(n, -1)
         
-        print(f"mean of attn_output: {attn_output.mean().item()}")
-        print(attn_output.flatten()[:8])  # Print first 10 elements for debugging
-        print(attn_output.shape)
+        # for i in range(4):
+        #     tgt = attn_output[i]
+        #     print(f"attn_output[{i}]: {tgt.mean().item()}")
+        #     print(f"attn_output[{i}]: {tgt[:8].tolist()})")
+        
         attn_output = self.o_proj(attn_output)
         
-        print(f"mean of attn_output after o_proj: {attn_output.mean().item()}")
-        print(attn_output.flatten()[:8])  # Print first 10 elements for debugging
-        print(attn_output.shape)
+        # print(f"attn_output shape: {attn_output.shape}, mean: {attn_output.mean().item()}")
+       
         return attn_output
 
 
@@ -154,13 +164,21 @@ class L4maDecoderLayer(nn.Module):
             kv_last_page_lens=kv_last_page_lens,
             qo_indptr=qo_indptr,
         )
+        
 
         hidden_states = residual + hidden_states
 
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
+        
+
+        
         hidden_states = self.mlp(hidden_states)
+        
+        #print(f"post_attention_layernorm shape after self-attention: {hidden_states.shape}, mean: {hidden_states.mean().item()}")
+
+        
         hidden_states = residual + hidden_states
 
         return hidden_states

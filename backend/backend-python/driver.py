@@ -204,8 +204,6 @@ class Driver:
                 tgt_block_idx = token_offset // self.kv_page_size
                 tgt_block_offset = token_offset % self.kv_page_size
 
-                print(f"Debug - input_embeds[{i}] = {input_embeds[i]}, token_offset = {token_offset}, tgt_block_idx = {tgt_block_idx}, tgt_block_offset = {tgt_block_offset}")
-
                 tgt_block_id = ctx_block_ids[tgt_block_idx]
 
                 tgt_block = self.blocks[tgt_block_id]
@@ -256,7 +254,7 @@ class Driver:
         # print('kv_page_indptr', kv_page_indptr)
         # print('kv_last_page_lens', kv_last_page_lens)
         # print('qo_indptr', qo_indptr)
-        #print('custom_mask', custom_mask)
+        # print('custom_mask', custom_mask)
 
         pt_new_token_ids = torch.as_tensor(new_token_ids, device=self.device, dtype=torch.int32)
         pt_new_position_ids = torch.as_tensor(new_position_ids, device=self.device, dtype=torch.int32)

@@ -165,7 +165,7 @@ void Model::ModelImpl::handle_fill_block(const std::vector<Model::FillBlockComma
     std::vector<int32_t> kv_page_indptr_host = {0};
     std::vector<int32_t> kv_last_page_lens_host;
     std::vector<int32_t> qo_indptr_host = {0};
-    std::vector<uint8_t> custom_masks_host;
+    std::vector<bool> custom_masks_host;
     std::vector<int32_t> mask_indptr_host = {0};
     std::vector<int32_t> kv_batch_indices_host;
     std::vector<int32_t> kv_positions_host;
@@ -265,7 +265,7 @@ void Model::ModelImpl::handle_fill_block(const std::vector<Model::FillBlockComma
                 for (size_t j = 0; j < total_ctx_tokens; ++j) {
                     bool causal_mask = ctx_pos_ids[j] <= inp_pos_id;
                     bool valid_mask = ctx_occupancy[j];
-                    custom_masks_host.push_back((causal_mask && valid_mask) ? 1 : 0);
+                    custom_masks_host.push_back(causal_mask && valid_mask);
                 }
             }
         }
@@ -313,15 +313,16 @@ void Model::ModelImpl::handle_fill_block(const std::vector<Model::FillBlockComma
     for (const auto& pos : kv_positions_host) {
         std::cout << pos << " ";
     }
+    std::cout << std::endl;
 
-
+    std::vector<uint8_t> packed_mask_host = packbits_little(custom_masks_host);
 
     // --- Copy data to device ---
     thrust::device_vector<int32_t> kv_page_indices = kv_page_indices_host;
     thrust::device_vector<int32_t> kv_page_indptr = kv_page_indptr_host;
     thrust::device_vector<int32_t> kv_last_page_lens = kv_last_page_lens_host;
     thrust::device_vector<int32_t> qo_indptr = qo_indptr_host;
-    thrust::device_vector<uint8_t> custom_mask = custom_masks_host;
+    thrust::device_vector<uint8_t> custom_mask = packed_mask_host;
     thrust::device_vector<int32_t> mask_indptr = mask_indptr_host;
     thrust::device_vector<uint32_t> new_token_ids = new_token_ids_host;
     thrust::device_vector<int32_t> new_position_ids = new_position_ids_host;
