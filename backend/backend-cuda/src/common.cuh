@@ -4,10 +4,11 @@
 #include <cublasLt.h>
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
-#include "flashinfer_ops.cuh"
 #include <stdexcept>
 #include <cstdint>
 #include <cstdio>
+#include <vector>
+#include <cmath>
 
 // A simple CUDA error-checking macro for robust code.
 #define CUDA_CHECK(call)                                                                               \
@@ -53,28 +54,69 @@ struct __nv_bfloat16;
  */
 template <typename T>
 void embed(
-    const thrust::device_vector<T> &embedding,
-    const thrust::device_vector<uint32_t> &indices,
-    thrust::device_vector<T> *result,
+    const T* embedding,
+    size_t embedding_num_rows,
+    const uint32_t* indices,
+    size_t num_indices,
+    T* result,
     int embed_width,
     cudaStream_t stream);
 
-template <typename T>
-void gemm_cublasLt2(cublasLtHandle_t ltHandle, cudaStream_t stream, const T *A, const T *B, T *C,
-                    int m, int n, int k, bool transa, bool transb);
+
+/**
+ * @brief Performs top-k selection on specified rows of a logit tensor and scatters the results.
+ * @tparam T The data type of the logits (e.g., __nv_bfloat16 or float).
+ * @param logits The flattened device vector containing all batched logits.
+ * @param logit_indices_dev A device vector of indices specifying which rows of `logits` to process.
+ * @param dest_embed_ids_dev A device vector specifying the destination slot in storage for each row's result.
+ * @param vocab_size The number of columns in the logit tensor (the vocabulary size).
+ * @param k The number of top elements to select. Must be <= MAX_K.
+ * @param topk_probs_storage Output device vector for storing top-k probabilities/scores.
+ * @param topk_tokens_storage Output device vector for storing top-k token IDs.
+ * @param stream The CUDA stream for the operation.
+ */
+template<typename T>
+void topk_scatter(
+    T* logits,
+    const thrust::device_vector<size_t>& logit_indices_dev,
+    const thrust::device_vector<uint32_t>& dest_embed_ids_dev,
+    size_t vocab_size,
+    size_t k,
+    thrust::device_vector<T>& topk_probs_storage,
+    thrust::device_vector<int32_t>& topk_tokens_storage,
+    cudaStream_t stream);
+
+// template <typename T>
+// void gemm_cublasLt2(cublasLtHandle_t ltHandle, cudaStream_t stream, const T *A, const T *B, T *C,
+//                     int m, int n, int k, bool transa, bool transb);
+
+// template <typename T>
+// void gemm_cublasLt(cublasLtHandle_t ltHandle,
+//                    cudaStream_t stream,
+//                    const thrust::device_vector<T> &A,
+//                    const thrust::device_vector<T> &B,
+//                    const thrust::device_vector<T> *bias,
+//                    thrust::device_vector<T> &C,
+//                    int m, int n, int k,
+//                    thrust::device_vector<char> &workspace,
+//                    bool transa,
+//                    bool transb);
 
 template <typename T>
 void gemm_cublasLt(cublasLtHandle_t ltHandle,
                    cudaStream_t stream,
-                   const thrust::device_vector<T> &A,
-                   const thrust::device_vector<T> &B,
-                   const thrust::device_vector<T> *bias,
-                   thrust::device_vector<T> &C,
+                   const T *d_A,
+                   const T *d_B,
+                   const T *d_bias,
+                   T *d_C,
                    int m, int n, int k,
-                   thrust::device_vector<char> &workspace,
+                   void *d_workspace,
+                   size_t workspaceSize,
                    bool transa,
                    bool transb);
 
 void multiply_bf16_cublas(cublasHandle_t handle,
                           const __nv_bfloat16 *A, const __nv_bfloat16 *B, __nv_bfloat16 *C,
                           int m, int n, int k, bool transa, bool transb);
+
+std::vector<uint8_t> packbits_little(const std::vector<bool>& data);

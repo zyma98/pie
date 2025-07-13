@@ -234,6 +234,8 @@ class Driver:
             ctx_pos_ids = np.hstack([self.blocks[ctx_id].position_ids for ctx_id in ctx_block_ids])[:total_sequence_length]  # int
             ctx_occupancy = np.hstack([self.blocks[ctx_id].occupancy for ctx_id in ctx_block_ids])[:total_sequence_length]  # bool
 
+            #print(f"ctx_pos_ids: {ctx_pos_ids}, ctx_occupancy: {ctx_occupancy}")
+        
             # Build the causal and valid masks
             casual_mask = ctx_pos_ids[None, :] <= inp_pos_ids[:, None]
             valid_mask = np.logical_and(ctx_occupancy[None, :], inp_occupancy[:, None])
@@ -245,6 +247,14 @@ class Driver:
 
         # concat all masks
         custom_mask = np.concatenate(custom_masks)
+
+
+        # print all inputs
+        print('kv_page_indices', kv_page_indices)
+        print('kv_page_indptr', kv_page_indptr)
+        print('kv_last_page_lens', kv_last_page_lens)
+        print('qo_indptr', qo_indptr)
+        print('custom_mask', custom_mask)
 
         pt_new_token_ids = torch.as_tensor(new_token_ids, device=self.device, dtype=torch.int32)
         pt_new_position_ids = torch.as_tensor(new_position_ids, device=self.device, dtype=torch.int32)
@@ -266,6 +276,9 @@ class Driver:
         # print('custom_mask', custom_masks)
 
         with torch.cuda.device(self.device):
+            
+            start_time = time.time()
+            
             output_embeds = self.lm.model.forward(
                 input_embeds=input_embeds,
                 position_ids=pt_new_position_ids,
@@ -275,12 +288,19 @@ class Driver:
                 kv_last_page_lens=pt_kv_last_page_lens,
                 qo_indptr=pt_qo_indptr,
                 custom_mask=pt_custom_mask,
-                single_token_inference_mode=single_token_inference_mode,
+                single_token_inference_mode=False#single_token_inference_mode,
             )
+            #print(f"output_embeds mean: {output_embeds.mean().item()}")
 
             # precompute the dists
             logits = self.lm.lm_head(output_embeds)
+            
+            torch.cuda.synchronize()
+            elapsed_time = (time.time() - start_time) * 1000
+            #print(f"forward pass elapsed time {elapsed_time:.2f}ms size {output_embeds.shape}")
             # topk
+            
+            #print(f"logits mean: {logits.mean().item()}")
             condensed = torch.topk(logits, k=self.dist_size, sorted=True)
 
         # print(logits.shape)
