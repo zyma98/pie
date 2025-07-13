@@ -269,48 +269,48 @@ void Model::ModelImpl::handle_fill_block(const std::vector<Model::FillBlockComma
         batch_idx++;
     }
 
-    // print all host vectors for debugging
-    std::cout << "kv_page_indices_host: ";
-    for (const auto& idx : kv_page_indices_host) {
-        std::cout << idx << " ";
-    }
-    std::cout << "\nkv_page_indptr_host: ";
-    for (const auto& idx : kv_page_indptr_host) {
-        std::cout << idx << " ";
-    }
-    std::cout << "\nkv_last_page_lens_host: ";
-    for (const auto& len : kv_last_page_lens_host) {
-        std::cout << len << " ";
-    }
-    std::cout << "\nqo_indptr_host: ";
-    for (const auto& idx : qo_indptr_host) {
-        std::cout << idx << " ";
-    }
-    std::cout << "\ncustom_masks_host: ";
-    for (const auto& mask : custom_masks_host) {
-        std::cout << static_cast<int>(mask) << " ";
-    }
-    std::cout << "\nmask_indptr_host: ";
-    for (const auto& idx : mask_indptr_host) {
-        std::cout << idx << " ";
-    }
-    std::cout << "\nnew_token_ids_host: ";
-    for (const auto& token_id : new_token_ids_host) {
-        std::cout << token_id << " ";
-    }
-    std::cout << "\nnew_position_ids_host: ";
-    for (const auto& pos_id : new_position_ids_host) {
-        std::cout << pos_id << " ";
-    }
-    std::cout << "\nkv_batch_indices_host: ";
-    for (const auto& batch_idx : kv_batch_indices_host) {
-        std::cout << batch_idx << " ";
-    }
-    std::cout << "\nkv_positions_host: ";
-    for (const auto& pos : kv_positions_host) {
-        std::cout << pos << " ";
-    }
-    std::cout << std::endl;
+    // // print all host vectors for debugging
+    // std::cout << "kv_page_indices_host: ";
+    // for (const auto& idx : kv_page_indices_host) {
+    //     std::cout << idx << " ";
+    // }
+    // std::cout << "\nkv_page_indptr_host: ";
+    // for (const auto& idx : kv_page_indptr_host) {
+    //     std::cout << idx << " ";
+    // }
+    // std::cout << "\nkv_last_page_lens_host: ";
+    // for (const auto& len : kv_last_page_lens_host) {
+    //     std::cout << len << " ";
+    // }
+    // std::cout << "\nqo_indptr_host: ";
+    // for (const auto& idx : qo_indptr_host) {
+    //     std::cout << idx << " ";
+    // }
+    // std::cout << "\ncustom_masks_host: ";
+    // for (const auto& mask : custom_masks_host) {
+    //     std::cout << static_cast<int>(mask) << " ";
+    // }
+    // std::cout << "\nmask_indptr_host: ";
+    // for (const auto& idx : mask_indptr_host) {
+    //     std::cout << idx << " ";
+    // }
+    // std::cout << "\nnew_token_ids_host: ";
+    // for (const auto& token_id : new_token_ids_host) {
+    //     std::cout << token_id << " ";
+    // }
+    // std::cout << "\nnew_position_ids_host: ";
+    // for (const auto& pos_id : new_position_ids_host) {
+    //     std::cout << pos_id << " ";
+    // }
+    // std::cout << "\nkv_batch_indices_host: ";
+    // for (const auto& batch_idx : kv_batch_indices_host) {
+    //     std::cout << batch_idx << " ";
+    // }
+    // std::cout << "\nkv_positions_host: ";
+    // for (const auto& pos : kv_positions_host) {
+    //     std::cout << pos << " ";
+    // }
+    // std::cout << std::endl;
 
     std::vector<uint8_t> packed_mask_host = packbits_little(custom_masks_host);
 
@@ -335,14 +335,19 @@ void Model::ModelImpl::handle_fill_block(const std::vector<Model::FillBlockComma
     size_t workspace_size_bytes = model->get_workspace_size(num_total_new_tokens);
 
     StackAllocator allocator(workspace_size_bytes);
+    LoggingManager manager(false);
 
-    cudaStream_t stream = 0;
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+    
+    // create a stream
+    auto model_logger = manager.scope("model_run", stream);
 
-    // --- Model Forward Pass ---
-
-    // start measuring time
+    // measure the start time
     auto start_time = std::chrono::high_resolution_clock::now();
+
     model->forward(
+        model_logger,
         allocator,
         logits,
         new_token_ids,
@@ -361,12 +366,14 @@ void Model::ModelImpl::handle_fill_block(const std::vector<Model::FillBlockComma
         kv_positions
     );
 
-    // end measuring time
-    cudaDeviceSynchronize(); // Ensure all operations are complete before measuring time
+    //manager.print_report();
+    // measure the end time
+    cudaStreamSynchronize(stream);
     auto end_time = std::chrono::high_resolution_clock::now();
-
     std::chrono::duration<double, std::milli> elapsed = end_time - start_time;
-    std::cout << "Model forward pass completed in " << elapsed.count() << " ms." << std::endl;
+    std::cout << "Model forward pass took " << (elapsed.count()) << " ms." << std::endl;
+
+
 
     // --- Post-processing ---
     if (!output_embed_postproc.empty()) {
@@ -467,7 +474,7 @@ Model::Model(const AppConfig& config,const ModelMetadata& out_metadata)
     std::cout << "Model loaded successfully and is resident on the GPU." << std::endl;
 
     // initialize kv cache
-    pimpl->model->create_kv_device_vectors(config.max_num_kv_pages);
+    pimpl->model->create_kv_device_vectors(config.max_num_kv_pages * config.kv_page_size);
 
     // Initialize state
     pimpl->kv_page_size = config.kv_page_size;
