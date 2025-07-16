@@ -45,8 +45,8 @@ struct Model::ModelImpl {
     std::map<uint32_t, TextEmbed> embeds;
 
     // Storage for results of embedding/inference, analogous to Python's embed_storage
-    thrust::device_vector<__nv_bfloat16> embed_storage_p1;
-    thrust::device_vector<int32_t> embed_storage_p2;
+    std::vector<float> embed_storage_p1;
+    std::vector<int32_t> embed_storage_p2;
 
     // Configuration
     int32_t kv_page_size;
@@ -173,13 +173,15 @@ void Model::ModelImpl::handle_fill_block(const std::vector<Model::FillBlockComma
     std::vector<int32_t> mask_indptr_host = {0};
     std::vector<int32_t> kv_batch_indices_host;
     std::vector<int32_t> kv_positions_host;
-    std::vector<uint32_t> new_token_ids_host;
+    std::vector<int32_t> new_token_ids_host;
     std::vector<int32_t> new_position_ids_host;
 
     struct OutputEmbedPostproc {
         size_t logit_row_idx;
         uint32_t dest_embed_id;
     };
+    std::vector<int32_t> output_indices_src_host;
+    std::vector<int32_t> output_indices_dest_host;
     std::vector<OutputEmbedPostproc> output_embed_postproc;
 
 
@@ -239,6 +241,8 @@ void Model::ModelImpl::handle_fill_block(const std::vector<Model::FillBlockComma
         for (size_t i = 0; i < cmd.output_embedding_ids.size(); ++i) {
             size_t logit_row = new_token_ids_host.size() - cmd.output_embedding_ids.size() + i;
             output_embed_postproc.push_back({logit_row, cmd.output_embedding_ids[i]});
+            output_indices_src_host.push_back(logit_row);
+            output_indices_dest_host.push_back(cmd.output_embedding_ids[i]);
         }
 
         if (total_ctx_tokens > 0) {
@@ -335,11 +339,11 @@ void Model::ModelImpl::handle_fill_block(const std::vector<Model::FillBlockComma
         stream, new_token_ids_host, new_position_ids_host,
         kv_page_indices_host, kv_page_indptr_host, kv_last_page_lens_host,
         qo_indptr_host, custom_masks_host, mask_indptr_host,
-        kv_batch_indices_host, kv_positions_host
+        kv_batch_indices_host, kv_positions_host, output_indices_src_host
     );
 
 
-    LoggingManager manager(false);
+    LoggingManager manager(true);
     auto model_logger = manager.scope("model_run", stream);
 
     Tensor<__nv_bfloat16> logits(num_total_new_tokens * model->get_config().vocab_size);
@@ -350,13 +354,11 @@ void Model::ModelImpl::handle_fill_block(const std::vector<Model::FillBlockComma
     std::cout << "  [ModelImpl] indices gpu upload completed in " << duration << " microseconds." << std::endl;   
     start_time = std::chrono::high_resolution_clock::now();
 
-    model->forward(
+    auto [logits_vals, logits_indices] = model->forward(
         model_logger,
-        *buffer,
-        logits
-    );
+        *buffer);
 
-    //manager.print_report();
+    manager.print_report();
     // measure the end time
     cudaStreamSynchronize(stream);
     
@@ -367,37 +369,34 @@ void Model::ModelImpl::handle_fill_block(const std::vector<Model::FillBlockComma
     start_time = std::chrono::high_resolution_clock::now();
 
     // --- Post-processing ---
-    if (!output_embed_postproc.empty()) {
-        std::vector<size_t> logit_indices_host;
-        std::vector<uint32_t> dest_embed_ids_host;
-        logit_indices_host.reserve(output_embed_postproc.size());
-        dest_embed_ids_host.reserve(output_embed_postproc.size());
-        for (const auto& p : output_embed_postproc) {
-            logit_indices_host.push_back(p.logit_row_idx);
-            dest_embed_ids_host.push_back(p.dest_embed_id);
-        }
-        thrust::device_vector<size_t> logit_indices_dev = logit_indices_host;
-        thrust::device_vector<uint32_t> dest_embed_ids_dev = dest_embed_ids_host;
-        
-        //std::cout << "logit mean: " << logits.mean() << std::endl;
+    
+    // appropriately copy the logits to the embed_storage_p1 and embed_storage_p2
+    for (const auto& postproc_info : output_embed_postproc) {
+        size_t src_row_idx = postproc_info.logit_row_idx;
+        size_t dest_embed_id = postproc_info.dest_embed_id;
 
-        topk_scatter(
-            logits.data(),
-            logit_indices_dev,
-            dest_embed_ids_dev,
-            model->get_config().vocab_size,
-            dist_size,
-            embed_storage_p1,
-            embed_storage_p2,
-            stream
+        size_t src_offset = src_row_idx * dist_size;
+        size_t dest_offset = dest_embed_id * dist_size;
+
+        // Ensure storage is large enough before copying
+        if (dest_offset + dist_size > embed_storage_p1.size() || dest_offset + dist_size > embed_storage_p2.size()) {
+             std::cerr << "Error: embed_storage is too small for destination ID " << dest_embed_id << std::endl;
+             continue;
+        }
+
+        // Copy probability values
+        std::copy(
+            logits_vals.begin() + src_offset,
+            logits_vals.begin() + src_offset + dist_size,
+            embed_storage_p1.begin() + dest_offset
+        );
+        // Copy token indices
+        std::copy(
+            logits_indices.begin() + src_offset,
+            logits_indices.begin() + src_offset + dist_size,
+            embed_storage_p2.begin() + dest_offset
         );
     }
-    cudaStreamSynchronize(stream);
-    
-    // print the time taken for the entire operation
-    end_time = std::chrono::high_resolution_clock::now();
-    duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time).count();
-    std::cout << "  [ModelImpl] sampling completed in " << duration << " microseconds." << std::endl;    
 
 }
 
@@ -438,22 +437,37 @@ std::vector<Model::SampleTopKResult> Model::ModelImpl::handle_sample_top_k(const
     for (const auto& cmd : commands) {
         Model::SampleTopKResult res;
         
-        // Determine the number of elements to copy
         uint32_t k = (cmd.k > 0 && cmd.k < static_cast<uint32_t>(dist_size)) ? cmd.k : dist_size;
-
-        // Create host vectors to hold the results
-        thrust::host_vector<__nv_bfloat16> topk_probs_host(k);
-        thrust::host_vector<int32_t> topk_tokens_host(k);
-
-        // Copy data from device to host
-        cudaMemcpy(topk_probs_host.data(), thrust::raw_pointer_cast(embed_storage_p1.data()) + cmd.distribution_id * dist_size, k * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
-        cudaMemcpy(topk_tokens_host.data(), thrust::raw_pointer_cast(embed_storage_p2.data()) + cmd.distribution_id * dist_size, k * sizeof(int32_t), cudaMemcpyDeviceToHost);
         
-        res.token_ids.assign(topk_tokens_host.begin(), topk_tokens_host.end());
+        // MODIFICATION: Get data directly from host vectors, no CUDA copy needed.
+        size_t offset = cmd.distribution_id * dist_size;
+        if (offset + k > embed_storage_p1.size()) {
+            std::cerr << "Warning: sample_top_k requested invalid distribution_id " << cmd.distribution_id << std::endl;
+            results.push_back(res); // Return empty result
+            continue;
+        }
         
-        res.probabilities.resize(k);
-        for(size_t i = 0; i < k; ++i) {
-            res.probabilities[i] = static_cast<float>(topk_probs_host[i]);
+        // MODIFICATION: Create pairs for sorting.
+        std::vector<std::pair<float, int32_t>> sorted_pairs;
+        sorted_pairs.reserve(k);
+        for (uint32_t i = 0; i < k; ++i) {
+            sorted_pairs.push_back({
+                embed_storage_p1[offset + i],
+                embed_storage_p2[offset + i]
+            });
+        }
+        
+        // MODIFICATION: Sort pairs in descending order based on probability (the first element).
+        std::sort(sorted_pairs.begin(), sorted_pairs.end(), [](const auto& a, const auto& b) {
+            return a.first > b.first;
+        });
+        
+        // MODIFICATION: Populate result from the sorted pairs.
+        res.probabilities.reserve(k);
+        res.token_ids.reserve(k);
+        for (uint32_t i = 0; i < k; ++i) {
+            res.probabilities.push_back(sorted_pairs[i].first);
+            res.token_ids.push_back(sorted_pairs[i].second);
         }
 
         results.push_back(res);
@@ -478,7 +492,7 @@ Model::Model(const AppConfig& config,const ModelMetadata& out_metadata)
         4096, // batch size
         4096 // number of old tokens
     );
-    pimpl->buffer = std::make_unique<L4maBuffer<__nv_bfloat16>>(pimpl->model->get_config(), config.kv_page_size, workspace_size);
+    pimpl->buffer = std::make_unique<L4maBuffer<__nv_bfloat16>>(pimpl->model->get_config(), config.kv_page_size, config.dist_size, workspace_size);
 
     // Initialize the CUDA stream
     cudaStreamCreate(&pimpl->stream);
