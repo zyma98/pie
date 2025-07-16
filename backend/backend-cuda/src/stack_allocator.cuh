@@ -64,6 +64,9 @@ public:
     Tensor<T> allocate_and_copy_async(const std::vector<T>& host_vector, cudaStream_t stream) {
         if (host_vector.empty()) {
             throw std::runtime_error("empty vector provided to StackAllocator::allocate_and_copy_async.");
+
+            // exit program
+            //std::exit(EXIT_FAILURE);
         }
 
         size_t count = host_vector.size();

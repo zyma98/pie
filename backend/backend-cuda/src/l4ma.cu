@@ -264,7 +264,10 @@ void L4maBuffer<T>::plan(
     mask_indptr        = allocator_->allocate_and_copy_async<int32_t>(mask_indptr_host, stream);
     kv_batch_indices   = allocator_->allocate_and_copy_async<int32_t>(kv_batch_indices_host, stream);
     kv_positions       = allocator_->allocate_and_copy_async<int32_t>(kv_positions_host, stream);
-    output_indices_src = allocator_->allocate_and_copy_async<int32_t>(output_indices_src_host, stream);
+
+    if (!output_indices_src_host.empty()) {
+        output_indices_src = allocator_->allocate_and_copy_async<int32_t>(output_indices_src_host, stream);
+    }
 
     Tensor<uint8_t> flashinfer_float_buffer = this->allocate<uint8_t>(256 * 1024 * 1024);
     Tensor<uint8_t> flashinfer_int_buffer = this->allocate<uint8_t>(8 * 1024 * 1024);
@@ -789,12 +792,6 @@ std::pair<std::vector<float>, std::vector<int32_t>> L4maForCausalLM<T>::forward(
 
     // 1. Allocate all necessary temporary buffers from the stack allocator.
     Tensor<T> hidden_states = buffer.template allocate<T>(hidden_elements);
-    Tensor<T> output_logits = buffer.template allocate<T>(num_output_tokens * config_.vocab_size);
-    Tensor<float> output_logits_fp32 = buffer.template allocate<float>(num_output_tokens * config_.vocab_size);
-    Tensor<float> output_logits_masked = buffer.template allocate<float>(num_output_tokens * config_.vocab_size);
-    Tensor<float> final_logits_val = buffer.template allocate<float>(num_output_tokens * dist_size);
-    Tensor<int32_t> final_logits_indices = buffer.template allocate<int32_t>(num_output_tokens * dist_size);
-    Tensor<uint8_t> lm_head_workspace = buffer.template allocate<uint8_t>(lm_head_workspace_bytes);
 
     // 2. Run the main model layers to produce hidden states.
     model_.forward(
@@ -805,6 +802,22 @@ std::pair<std::vector<float>, std::vector<int32_t>> L4maForCausalLM<T>::forward(
         kv_cache_v_
     );
     logger.record("model.forward", buffer.stream);
+
+
+    if (num_output_tokens == 0) {
+        // If there are no output tokens, we can return empty vectors.
+        return std::make_pair(std::vector<float>(), std::vector<int32_t>());
+    }
+
+
+    Tensor<T> output_logits = buffer.template allocate<T>(num_output_tokens * config_.vocab_size);
+    Tensor<float> output_logits_fp32 = buffer.template allocate<float>(num_output_tokens * config_.vocab_size);
+    Tensor<float> output_logits_masked = buffer.template allocate<float>(num_output_tokens * config_.vocab_size);
+    Tensor<float> final_logits_val = buffer.template allocate<float>(num_output_tokens * dist_size);
+    Tensor<int32_t> final_logits_indices = buffer.template allocate<int32_t>(num_output_tokens * dist_size);
+    Tensor<uint8_t> lm_head_workspace = buffer.template allocate<uint8_t>(lm_head_workspace_bytes);
+
+
 
     // 3. Handle the hidden states for the final projection.
     Tensor<T>* final_hidden_states_ptr = &hidden_states;

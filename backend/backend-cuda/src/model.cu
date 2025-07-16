@@ -34,6 +34,12 @@ struct TextEmbed {
     uint32_t position_id;
 };
 
+// Represents a token distribution (probabilities and corresponding token IDs).
+struct Dist {
+    std::vector<float> probabilities;
+    std::vector<int32_t> token_ids;
+};
+
 
 // The actual implementation of the Server is hidden in this struct.
 struct Model::ModelImpl {
@@ -43,11 +49,8 @@ struct Model::ModelImpl {
     // --- State Management ---
     std::map<uint32_t, Block> blocks;
     std::map<uint32_t, TextEmbed> embeds;
-
-    // Storage for results of embedding/inference, analogous to Python's embed_storage
-    std::vector<float> embed_storage_p1;
-    std::vector<int32_t> embed_storage_p2;
-
+    std::map<uint32_t, Dist> dists;
+    
     // Configuration
     int32_t kv_page_size;
     int32_t dist_size;
@@ -343,10 +346,8 @@ void Model::ModelImpl::handle_fill_block(const std::vector<Model::FillBlockComma
     );
 
 
-    LoggingManager manager(true);
+    LoggingManager manager(false);
     auto model_logger = manager.scope("model_run", stream);
-
-    Tensor<__nv_bfloat16> logits(num_total_new_tokens * model->get_config().vocab_size);
 
 
     end_time = std::chrono::high_resolution_clock::now();
@@ -369,32 +370,51 @@ void Model::ModelImpl::handle_fill_block(const std::vector<Model::FillBlockComma
     start_time = std::chrono::high_resolution_clock::now();
 
     // --- Post-processing ---
+
+    // // print logits vals and indices
+    // std::cout << "logits_vals: ";
+    // for (const auto& val : logits_vals) {
+    //     std::cout << val << " ";
+    // }
+    // std::cout << "\nlogits_indices: ";
+    // for (const auto& idx : logits_indices) {
+    //     std::cout << idx << " ";
+    // }
+    // std::cout << std::endl;
+
     
-    // appropriately copy the logits to the embed_storage_p1 and embed_storage_p2
-    for (const auto& postproc_info : output_embed_postproc) {
-        size_t src_row_idx = postproc_info.logit_row_idx;
-        size_t dest_embed_id = postproc_info.dest_embed_id;
+    // Store the top-k distributions in the map
+    for (size_t i = 0; i < output_embed_postproc.size(); ++i) {
+        const auto& postproc_info = output_embed_postproc[i];
+        uint32_t dest_embed_id = postproc_info.dest_embed_id;
 
-        size_t src_offset = src_row_idx * dist_size;
-        size_t dest_offset = dest_embed_id * dist_size;
+        // The returned logits_vals is a compact tensor for the requested output tokens.
+        // We must use an index `i` from 0 to N-1, where N is the number of requested distributions.
+        size_t src_output_row_idx = i;
+        size_t src_offset = src_output_row_idx * dist_size;
 
-        // Ensure storage is large enough before copying
-        if (dest_offset + dist_size > embed_storage_p1.size() || dest_offset + dist_size > embed_storage_p2.size()) {
-             std::cerr << "Error: embed_storage is too small for destination ID " << dest_embed_id << std::endl;
+        // Safety check to prevent reading out of bounds
+        if (src_offset + dist_size > logits_vals.size()) {
+             std::cerr << "Error: Logits vector is smaller than expected for distribution ID " << dest_embed_id << std::endl;
              continue;
         }
 
-        // Copy probability values
+        // Create a new distribution object or get the existing one
+        Dist& dist = dists[dest_embed_id];
+        dist.probabilities.resize(dist_size);
+        dist.token_ids.resize(dist_size);
+
+        // Copy probability values from the model's output
         std::copy(
             logits_vals.begin() + src_offset,
             logits_vals.begin() + src_offset + dist_size,
-            embed_storage_p1.begin() + dest_offset
+            dist.probabilities.begin()
         );
-        // Copy token indices
+        // Copy token indices from the model's output
         std::copy(
             logits_indices.begin() + src_offset,
             logits_indices.begin() + src_offset + dist_size,
-            embed_storage_p2.begin() + dest_offset
+            dist.token_ids.begin()
         );
     }
 
@@ -436,33 +456,35 @@ std::vector<Model::SampleTopKResult> Model::ModelImpl::handle_sample_top_k(const
 
     for (const auto& cmd : commands) {
         Model::SampleTopKResult res;
-        
-        uint32_t k = (cmd.k > 0 && cmd.k < static_cast<uint32_t>(dist_size)) ? cmd.k : dist_size;
-        
-        // MODIFICATION: Get data directly from host vectors, no CUDA copy needed.
-        size_t offset = cmd.distribution_id * dist_size;
-        if (offset + k > embed_storage_p1.size()) {
+
+        auto it = dists.find(cmd.distribution_id);
+        if (it == dists.end()) {
             std::cerr << "Warning: sample_top_k requested invalid distribution_id " << cmd.distribution_id << std::endl;
             results.push_back(res); // Return empty result
             continue;
         }
+
+        const auto& dist = it->second;
         
-        // MODIFICATION: Create pairs for sorting.
+        // Create pairs for sorting from the entire stored distribution.
         std::vector<std::pair<float, int32_t>> sorted_pairs;
-        sorted_pairs.reserve(k);
-        for (uint32_t i = 0; i < k; ++i) {
+        sorted_pairs.reserve(dist.probabilities.size());
+        for (size_t i = 0; i < dist.probabilities.size(); ++i) {
             sorted_pairs.push_back({
-                embed_storage_p1[offset + i],
-                embed_storage_p2[offset + i]
+                dist.probabilities[i],
+                dist.token_ids[i]
             });
         }
         
-        // MODIFICATION: Sort pairs in descending order based on probability (the first element).
+        // Sort pairs in descending order based on probability.
         std::sort(sorted_pairs.begin(), sorted_pairs.end(), [](const auto& a, const auto& b) {
             return a.first > b.first;
         });
+
+        // Determine how many results to return (k).
+        uint32_t k = (cmd.k > 0 && cmd.k < sorted_pairs.size()) ? cmd.k : sorted_pairs.size();
         
-        // MODIFICATION: Populate result from the sorted pairs.
+        // Populate result from the top k sorted pairs.
         res.probabilities.reserve(k);
         res.token_ids.reserve(k);
         for (uint32_t i = 0; i < k; ++i) {
@@ -504,9 +526,6 @@ Model::Model(const AppConfig& config,const ModelMetadata& out_metadata)
     // Initialize state
     pimpl->kv_page_size = config.kv_page_size;
     pimpl->dist_size = config.dist_size;
-    pimpl->embed_storage_p1.resize(config.max_num_embeds * config.dist_size);
-    pimpl->embed_storage_p2.resize(config.max_num_embeds * config.dist_size);
-
 
 }
 
