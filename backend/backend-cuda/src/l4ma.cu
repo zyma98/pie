@@ -303,6 +303,39 @@ void L4maBuffer<T>::deallocate(Tensor<U>& tensor) {
 }
 
 
+/// KV cache
+
+template <typename T>
+size_t L4maKVCache<T>::get_workspace_size(const L4maConfig& config, int32_t num_kv_pages, int32_t page_size) {
+    size_t single_layer_elements = (size_t)num_kv_pages * page_size * config.num_key_value_heads * config.head_size;
+    size_t all_layers_elements = config.num_layers * single_layer_elements;
+    // Return size in bytes for both K and V caches
+    return 2 * all_layers_elements * sizeof(T);
+}
+
+template <typename T>
+L4maKVCache<T>::L4maKVCache(const L4maConfig& config, int32_t num_kv_pages, int32_t page_size)
+    : config_(config), num_kv_pages_(num_kv_pages), page_size_(page_size) {
+    size_t single_layer_elements = (size_t)num_kv_pages * page_size * config.num_key_value_heads * config.head_size;
+    size_t total_elements = 2 * (size_t)config.num_layers * single_layer_elements;
+    kv_cache_ = Tensor<T>(total_elements);
+}
+
+template <typename T>
+std::pair<T*, T*> L4maKVCache<T>::get_layer_pointers(size_t layer_idx) {
+    size_t layer_cache_size_elements = (size_t)num_kv_pages_ * page_size_ * config_.num_key_value_heads * config_.head_size;
+    size_t total_k_cache_elements = (size_t)config_.num_layers * layer_cache_size_elements;
+
+    T* k_base_ptr = kv_cache_.data();
+    T* v_base_ptr = kv_cache_.data() + total_k_cache_elements;
+
+    T* layer_k_ptr = k_base_ptr + layer_idx * layer_cache_size_elements;
+    T* layer_v_ptr = v_base_ptr + layer_idx * layer_cache_size_elements;
+
+    return {layer_k_ptr, layer_v_ptr};
+}
+
+
 
 
 // --- Constructor Implementations (Unchanged) ---
@@ -360,16 +393,16 @@ L4maForCausalLM<T>::L4maForCausalLM(const L4maConfig& config)
 
 // --- KV Cache and Workspace Management (REFACTORED) ---
 
-template <typename T>
-void L4maForCausalLM<T>::create_kv_device_vectors(int max_kv_num) {
-    size_t kv_cache_size = static_cast<size_t>(max_kv_num) * config_.num_key_value_heads * config_.head_size * config_.num_layers;
-    if (kv_cache_k_.size() != kv_cache_size) {
-        kv_cache_k_.resize(kv_cache_size);
-    }
-    if (kv_cache_v_.size() != kv_cache_size) {
-        kv_cache_v_.resize(kv_cache_size);
-    }
-}
+// template <typename T>
+// void L4maForCausalLM<T>::create_kv_device_vectors(int max_kv_num) {
+//     size_t kv_cache_size = static_cast<size_t>(max_kv_num) * config_.num_key_value_heads * config_.head_size * config_.num_layers;
+//     if (kv_cache_k_.size() != kv_cache_size) {
+//         kv_cache_k_.resize(kv_cache_size);
+//     }
+//     if (kv_cache_v_.size() != kv_cache_size) {
+//         kv_cache_v_.resize(kv_cache_size);
+//     }
+// }
 
 
 // --- get_parameters() Implementations (Corrected) ---
@@ -660,9 +693,8 @@ template <typename T>
 void L4maModel<T>::forward(
     ProfileScope profiler,
     L4maBuffer<T>& buffer,
-    T* final_norm_output,
-    thrust::device_vector<T>& kv_cache_k,
-    thrust::device_vector<T>& kv_cache_v
+    L4maKVCache<T>& kv_cache,
+    T* final_norm_output
 ) {
     const int num_tokens = buffer.num_tokens;
     const size_t hidden_size_elements = (size_t)num_tokens * config_.hidden_size;
@@ -685,19 +717,11 @@ void L4maModel<T>::forward(
     // float embed_mean = compute_mean(working_hidden_buffer, hidden_size_elements);
     // std::cout << "Embed mean: " << embed_mean << std::endl;
 
-    size_t kv_cache_size = kv_cache_k.size() / config_.num_layers;
-
-    T* k_cache_ptr = thrust::raw_pointer_cast(kv_cache_k.data());
-    T* v_cache_ptr = thrust::raw_pointer_cast(kv_cache_v.data());
-
-    const size_t max_num_pages = kv_cache_k.size() / (config_.num_key_value_heads * config_.head_size);
     for (size_t i = 0; i < layers_.size(); ++i) {
 
         auto& layer = layers_[i];
 
-        // compute offset
-        T* layer_k_cache_ptr = k_cache_ptr + i * kv_cache_size;
-        T* layer_v_cache_ptr = v_cache_ptr + i * kv_cache_size;
+        auto [layer_k_cache_ptr, layer_v_cache_ptr] = kv_cache.get_layer_pointers(i);
 
         layer.forward(profiler.scope("decoder_layer"), buffer, working_hidden_buffer.data(),
                       layer_k_cache_ptr, layer_v_cache_ptr);
@@ -715,7 +739,9 @@ void L4maModel<T>::forward(
 template <typename T>
 std::pair<std::vector<float>, std::vector<int32_t>> L4maForCausalLM<T>::forward(
     ProfileScope profiler,
-    L4maBuffer<T>& buffer) {
+    L4maBuffer<T>& buffer, 
+    L4maKVCache<T>& kv_cache
+) {
 
     const int num_tokens = buffer.num_tokens;
     const int num_output_tokens = buffer.output_indices_src.size();
@@ -730,9 +756,8 @@ std::pair<std::vector<float>, std::vector<int32_t>> L4maForCausalLM<T>::forward(
     model_.forward(
         profiler.scope("model"),
         buffer,
-        hidden_states.data(),
-        kv_cache_k_,
-        kv_cache_v_
+        kv_cache,
+        hidden_states.data()
     );
 
     if (num_output_tokens == 0) {
@@ -840,8 +865,9 @@ std::pair<std::vector<float>, std::vector<int32_t>> L4maForCausalLM<T>::forward(
 }
 
 // --- Explicit Template Instantiations (Unchanged) ---
-template class L4maBuffer<__nv_bfloat16>;
 template class RMSNorm<__nv_bfloat16>;
+template class L4maKVCache<__nv_bfloat16>;
+template class L4maBuffer<__nv_bfloat16>;
 template class L4maMlp<__nv_bfloat16>;
 template class L4maAttention<__nv_bfloat16>;
 template class L4maDecoderLayer<__nv_bfloat16>;

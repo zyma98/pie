@@ -109,6 +109,50 @@ private:
 };
 
 
+
+
+/**
+ * @brief Manages the paged Key-Value cache memory for all layers.
+ * This class allocates a single contiguous block of device memory and provides
+ * accessors to layer-specific cache pointers.
+ */
+template <typename T>
+class L4maKVCache {
+public:
+    /**
+     * @brief Calculates the total device memory in bytes required for the KV cache.
+     * @param config Model configuration.
+     * @param num_kv_pages Total number of pages available for the cache.
+     * @param page_size The number of tokens each page can hold.
+     * @return The required memory size in bytes.
+     */
+    static size_t get_workspace_size(const L4maConfig& config, int32_t num_kv_pages, int32_t page_size);
+
+    /**
+     * @brief Allocates the KV cache memory.
+     * @param config Model configuration.
+     * @param num_kv_pages Total number of pages for the cache.
+     * @param page_size Size of each page in tokens.
+     */
+    L4maKVCache(const L4maConfig& config, int32_t num_kv_pages, int32_t page_size);
+
+    /**
+     * @brief Gets the pointers to the key and value cache for a specific layer.
+     * @param layer_idx The index of the decoder layer.
+     * @return A pair of device pointers (key_cache_ptr, value_cache_ptr).
+     */
+    std::pair<T*, T*> get_layer_pointers(size_t layer_idx);
+
+private:
+    const L4maConfig& config_;
+    int32_t num_kv_pages_;
+    int32_t page_size_;
+    Tensor<T> kv_cache_; // Single tensor for both K and V caches
+};
+
+
+
+
 /**
  * @brief RMS Normalization layer.
  */
@@ -224,9 +268,8 @@ public:
 
     void forward(ProfileScope profiler,
                  L4maBuffer<T>& buffer,
-                 T* final_norm_output,
-                 thrust::device_vector<T>& kv_cache_k,
-                 thrust::device_vector<T>& kv_cache_v);
+                 L4maKVCache<T>& kv_cache,
+                 T* final_norm_output);
 
     std::map<std::string, Tensor<T>*> get_parameters() override;
 
@@ -251,18 +294,14 @@ public:
 
 
     std::pair<std::vector<float>, std::vector<int32_t>> forward(ProfileScope profiler,
-                 L4maBuffer<T>& buffer);
+                 L4maBuffer<T>& buffer, L4maKVCache<T>& kv_cache);
 
     std::map<std::string, Tensor<T>*> get_parameters() override;
-    void create_kv_device_vectors(int max_kv_num);
 
     L4maConfig& get_config() { return config_; }
 
 private:
     L4maConfig config_;
-
     L4maModel<T> model_;
 
-    thrust::device_vector<T> kv_cache_k_;
-    thrust::device_vector<T> kv_cache_v_;
 };
