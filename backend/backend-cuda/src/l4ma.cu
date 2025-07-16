@@ -159,7 +159,8 @@ size_t L4maBuffer<T>::get_workspace_size(
     const L4maConfig& config,
     size_t max_num_tokens,
     size_t max_batch_size,
-    size_t max_kv_seqlens // TODO: max_dist_size is needed for sampling buffers
+    size_t max_kv_seqlens, // TODO: max_dist_size is needed for sampling buffers
+    size_t dist_size
 ) {
     const size_t alignment = 256;
     const size_t hidden_size = config.hidden_size;
@@ -167,7 +168,6 @@ size_t L4maBuffer<T>::get_workspace_size(
     const size_t num_q_heads = config.num_query_heads;
     const size_t num_kv_heads = config.num_key_value_heads;
     const size_t head_size = config.head_size;
-    const int dist_size = 32; // Assuming a fixed top-k/dist_size, or pass it in.
 
     // --- Peak memory within a decoder layer ---
     size_t decoder_layer_peak = 0;
@@ -271,34 +271,6 @@ void L4maBuffer<T>::plan(
 
     Tensor<uint8_t> flashinfer_float_buffer = this->allocate<uint8_t>(256 * 1024 * 1024);
     Tensor<uint8_t> flashinfer_int_buffer = this->allocate<uint8_t>(8 * 1024 * 1024);
-
-    // //prefill_handler = flashinfer::BatchPrefillHandler();
-
-
-    // // print out qo_indptr_host
-    // std::cout << "qo_indptr_host: ";
-    // for (const auto& val : qo_indptr_host) {
-    //     std::cout << val << " ";
-    // }
-    // std::cout << std::endl;
-
-    // // print out kv_page_indptr_host
-    // std::cout << "kv_page_indptr_host: ";
-    // for (const auto& val : kv_page_indptr_host) {
-    //     std::cout << val << " ";
-    // }
-    // std::cout << std::endl;
-
-    // // print config num_query_heads
-    // std::cout << "num_tokens: " << num_tokens << std::endl;
-    // std::cout << "batch_size: " << batch_size << std::endl;
-    // std::cout << "config.num_query_heads: " << config.num_query_heads << std::endl;
-    // std::cout << "config.num_key_value_heads: " << config.num_key_value_heads << std::endl;
-    // std::cout << "config.head_size: " << config.head_size << std::endl;
-
-    // std::cout << "kv_page_size: " << page_size << std::endl;
-    // // Plan the prefill operation
-
 
     prefill_handler.Plan<T, int32_t>(
         flashinfer_float_buffer.data(), flashinfer_float_buffer.size(),

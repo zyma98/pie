@@ -346,7 +346,7 @@ void Model::ModelImpl::handle_fill_block(const std::vector<Model::FillBlockComma
     );
 
 
-    LoggingManager manager(false);
+    LoggingManager manager(true);
     auto model_logger = manager.scope("model_run", stream);
 
 
@@ -369,20 +369,6 @@ void Model::ModelImpl::handle_fill_block(const std::vector<Model::FillBlockComma
     std::cout << "  [ModelImpl] forward pass completed in " << duration << " microseconds." << std::endl;    
     start_time = std::chrono::high_resolution_clock::now();
 
-    // --- Post-processing ---
-
-    // // print logits vals and indices
-    // std::cout << "logits_vals: ";
-    // for (const auto& val : logits_vals) {
-    //     std::cout << val << " ";
-    // }
-    // std::cout << "\nlogits_indices: ";
-    // for (const auto& idx : logits_indices) {
-    //     std::cout << idx << " ";
-    // }
-    // std::cout << std::endl;
-
-    
     // Store the top-k distributions in the map
     for (size_t i = 0; i < output_embed_postproc.size(); ++i) {
         const auto& postproc_info = output_embed_postproc[i];
@@ -512,7 +498,8 @@ Model::Model(const AppConfig& config,const ModelMetadata& out_metadata)
         pimpl->model->get_config(), 
         4096, // number of new tokens
         4096, // batch size
-        4096 // number of old tokens
+        4096, // number of old tokens
+        config.dist_size
     );
     pimpl->buffer = std::make_unique<L4maBuffer<__nv_bfloat16>>(pimpl->model->get_config(), config.kv_page_size, config.dist_size, workspace_size);
 

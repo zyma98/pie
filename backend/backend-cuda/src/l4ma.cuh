@@ -78,7 +78,8 @@ public:
         const L4maConfig& config,
         size_t max_num_tokens,
         size_t max_batch_size,
-        size_t max_kv_seqlens
+        size_t max_kv_seqlens,
+        size_t dist_size
     );
 
     // --- Public Methods ---
