@@ -162,10 +162,8 @@ void Model::ModelImpl::handle_embed_text(const std::vector<Model::EmbedTextComma
 
 void Model::ModelImpl::handle_fill_block(const std::vector<Model::FillBlockCommand>& commands) {
 
-    std::cout << "  [ModelImpl] handle_fill_block called with " << commands.size() << " items." << std::endl;
-    auto start_time = std::chrono::high_resolution_clock::now();
-    auto end_time = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time).count();
+    Profiler profiler(true);
+    ProfileScope scope = profiler.scope("fill", stream);
 
     // --- Host-side vector preparations ---
     std::vector<int32_t> kv_page_indices_host;
@@ -188,7 +186,6 @@ void Model::ModelImpl::handle_fill_block(const std::vector<Model::FillBlockComma
     std::vector<OutputEmbedPostproc> output_embed_postproc;
 
 
-
     int batch_idx = 0;
     for (const auto& cmd : commands) {
         kv_page_indices_host.insert(kv_page_indices_host.end(), cmd.context_block_ids.begin(), cmd.context_block_ids.end());
@@ -199,7 +196,7 @@ void Model::ModelImpl::handle_fill_block(const std::vector<Model::FillBlockComma
         qo_indptr_host.push_back(qo_indptr_host.back() + num_new_tokens);
 
         size_t total_ctx_tokens = (cmd.context_block_ids.empty()) ? 0 :
-                                  kv_page_size * (cmd.context_block_ids.size() - 1) + cmd.last_block_len;
+                                kv_page_size * (cmd.context_block_ids.size() - 1) + cmd.last_block_len;
 
         mask_indptr_host.push_back(mask_indptr_host.back() + (num_new_tokens * total_ctx_tokens));
 
@@ -285,11 +282,8 @@ void Model::ModelImpl::handle_fill_block(const std::vector<Model::FillBlockComma
         batch_idx++;
     }
 
-    // print time taken for processing commands
-    end_time = std::chrono::high_resolution_clock::now();
-    duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time).count();
-    std::cout << "  [ModelImpl] index calculation took " << duration << " microseconds." << std::endl;
-    start_time = std::chrono::high_resolution_clock::now();
+    scope.record("input_prep");
+    
 
     // // print all host vectors for debugging
     // std::cout << "kv_page_indices_host: ";
@@ -344,29 +338,11 @@ void Model::ModelImpl::handle_fill_block(const std::vector<Model::FillBlockComma
         qo_indptr_host, custom_masks_host, mask_indptr_host,
         kv_batch_indices_host, kv_positions_host, output_indices_src_host
     );
-
-
-    Profiler profiler(true);
-
-
-    end_time = std::chrono::high_resolution_clock::now();
-    duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time).count();
-    std::cout << "  [ModelImpl] indices gpu upload completed in " << duration << " microseconds." << std::endl;   
-    start_time = std::chrono::high_resolution_clock::now();
+    scope.record("preproc");
 
     auto [logits_vals, logits_indices] = model->forward(
-        profiler.scope("model_run", stream),
+        scope.scope("forward pass"),
         *buffer);
-
-    // measure the end time
-    cudaStreamSynchronize(stream);
-    profiler.print_report();
-
-    // print the time taken for the entire operation
-    end_time = std::chrono::high_resolution_clock::now();
-    duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time).count();
-    std::cout << "  [ModelImpl] forward pass completed in " << duration << " microseconds." << std::endl;    
-    start_time = std::chrono::high_resolution_clock::now();
 
     // Store the top-k distributions in the map
     for (size_t i = 0; i < output_embed_postproc.size(); ++i) {
@@ -402,6 +378,10 @@ void Model::ModelImpl::handle_fill_block(const std::vector<Model::FillBlockComma
             dist.token_ids.begin()
         );
     }
+    scope.record("postproc");
+
+    cudaStreamSynchronize(stream);
+    profiler.print_report();
 
 }
 

@@ -16,7 +16,6 @@
 #include <tuple>
 #include <map>
 #include <set>
-#include <unordered_map> // Required for fast lookups
 
 // Forward declarations
 class Profiler;
@@ -39,10 +38,11 @@ struct ProfileNode {
     size_t count = 0;
     double inclusive_sum_ms = 0.0;
 
-    // MODIFIED: Use a vector to preserve insertion order for printing.
+    // Stores children in insertion order. The string is the key/name.
     std::vector<std::pair<std::string, ProfileNode>> children;
-    // MODIFIED: Use a map for fast lookups when aggregating data.
-    std::unordered_map<std::string, size_t> child_indices;
+    
+    // For fast lookup of a child's index in the `children` vector.
+    std::map<std::string, size_t> name_to_child_index;
 };
 
 class Profiler {
@@ -64,12 +64,15 @@ private:
     
     cudaEvent_t create_event();
     void add_event_pair(const std::string& name, cudaEvent_t start, cudaEvent_t end, cudaStream_t stream);
-    std::vector<std::pair<std::string, float>> process_events();
+    void process_events();
 
     static double calculate_inclusive_times(ProfileNode& node);
     static void print_node_recursive(const ProfileNode& node, const std::string& name, const std::string& indent, bool is_last, double parent_inclusive_ms, double total_root_ms, int depth);
-
+    
+    // Data is stored here to preserve order before being processed into the tree
     std::vector<std::tuple<std::string, cudaEvent_t, cudaEvent_t>> event_pairs_;
+    std::vector<std::pair<std::string, float>> timed_events_;
+
     std::vector<cudaEvent_t> all_events_;
     std::set<cudaStream_t> streams_used_;
     bool enabled_;
@@ -138,7 +141,7 @@ inline ProfileScope::ProfileScope(ProfileScope&& other) noexcept
       stream_(other.stream_),
       last_event_(other.last_event_),
       moved_from_(false) {
-    other.moved_from_ = true;
+    other.moved_from_ = true; // Invalidate the other scope.
 }
 
 inline ProfileScope& ProfileScope::operator=(ProfileScope&& other) noexcept {
@@ -156,6 +159,7 @@ inline ProfileScope& ProfileScope::operator=(ProfileScope&& other) noexcept {
 
 inline ProfileScope::~ProfileScope() {
     if (moved_from_ || !profiler_ || !profiler_->enabled_) return;
+
     if (parent_) {
         parent_->last_event_ = this->last_event_;
     }
@@ -163,8 +167,10 @@ inline ProfileScope::~ProfileScope() {
 
 inline void ProfileScope::record(std::string_view name) {
     if (!profiler_ || !profiler_->enabled_ || !last_event_) return;
+
     cudaEvent_t current_event = profiler_->create_event();
     CUDA_CHECK_PROFILER(cudaEventRecord(current_event, stream_));
+
     profiler_->add_event_pair(name_prefix_ + std::string(name), last_event_, current_event, stream_);
     last_event_ = current_event;
 }
@@ -205,127 +211,65 @@ inline void Profiler::reset() {
     }
     all_events_.clear();
     event_pairs_.clear();
+    timed_events_.clear();
     streams_used_.clear();
 }
 
-inline std::vector<std::pair<std::string, float>> Profiler::process_events() {
-    std::vector<std::pair<std::string, float>> timed_events;
-    if (!enabled_) return timed_events;
+inline void Profiler::process_events() {
+    if (!enabled_ || !timed_events_.empty()) return; // Already processed
 
     for (cudaStream_t stream : streams_used_) {
         CUDA_CHECK_PROFILER(cudaStreamSynchronize(stream));
     }
 
-    timed_events.reserve(event_pairs_.size());
+    timed_events_.reserve(event_pairs_.size());
     for (const auto& [name, start_event, end_event] : event_pairs_) {
         float elapsed_ms;
         CUDA_CHECK_PROFILER(cudaEventElapsedTime(&elapsed_ms, start_event, end_event));
-        timed_events.emplace_back(name, elapsed_ms);
+        timed_events_.emplace_back(name, elapsed_ms);
     }
     
     event_pairs_.clear();
     streams_used_.clear();
-    return timed_events;
 }
 
 inline void Profiler::print_report() {
     if (!enabled_) return;
     
-    // MODIFIED: Process events to get an ordered list of timings.
-    auto timed_events = process_events();
+    process_events(); // Populates `timed_events_` in order.
 
     ProfileNode root;
-    // Data structure to aggregate timings for the same event name.
-    std::map<std::string, std::vector<float>> timings_aggregator;
-    for(const auto& event : timed_events) {
-        timings_aggregator[event.first].push_back(event.second);
-    }
-
-    // MODIFIED: Build the tree from the ordered list of events to preserve order.
-    for (const auto& [fullname, elapsed_ms] : timed_events) {
+    for (const auto& [fullname, time_ms] : timed_events_) {
         std::stringstream ss(fullname);
         std::string segment;
         ProfileNode* current_node = &root;
 
-        // Traverse or build the node hierarchy for the event
         while (std::getline(ss, segment, '.')) {
-            auto it = current_node->child_indices.find(segment);
-            if (it == current_node->child_indices.end()) {
-                // If child does not exist, create it.
-                current_node->children.push_back({segment, ProfileNode()});
-                size_t new_index = current_node->children.size() - 1;
-                current_node->child_indices[segment] = new_index;
-                current_node = &current_node->children[new_index].second;
-            } else {
-                // If child exists, move to it.
-                current_node = &current_node->children[it->second].second;
+            if (!segment.empty()) {
+                auto it = current_node->name_to_child_index.find(segment);
+                if (it == current_node->name_to_child_index.end()) {
+                    // Child not found, create it to preserve order.
+                    current_node->children.emplace_back(segment, ProfileNode{});
+                    size_t new_index = current_node->children.size() - 1;
+                    current_node->name_to_child_index[segment] = new_index;
+                    current_node = &current_node->children.back().second;
+                } else {
+                    // Child found, move to it.
+                    current_node = &current_node->children[it->second].second;
+                }
             }
         }
-    }
 
-    // MODIFIED: Populate the stats from the aggregated timings.
-    std::function<void(ProfileNode&)> populate_stats = 
-        [&](ProfileNode& node) {
-        for (auto& child_pair : node.children) {
-            std::string child_fullname; // We need to reconstruct the full name to look up in the aggregator.
-            
-            // This is inefficient, a better way would be to pass the parent name down.
-            // For now, let's find the full name by traversing back up, or just re-aggregate inside the tree.
-            // Let's re-aggregate directly on the node instead of the external map. This is simpler.
-            // The above tree building loop already creates the structure. We just need to add the timings.
-        };
-    };
-
-    // Let's use a simpler approach for the tree building and aggregation.
-    // The previous loop was only for structure. Let's combine it with aggregation.
-    
-    // Clear the root to rebuild with combined logic.
-    root = ProfileNode(); 
-    
-    // A map to keep track of nodes already created to avoid creating duplicates from the aggregator map.
-    std::map<std::string, bool> node_created;
-
-    for (const auto& [fullname, times] : timings_aggregator) {
-        std::stringstream ss(fullname);
-        std::string segment;
-        std::string current_path;
-        ProfileNode* current_node = &root;
-        
-        std::vector<std::string> segments;
-        while (std::getline(ss, segment, '.')) {
-            segments.push_back(segment);
-        }
-
-        for(size_t i = 0; i < segments.size(); ++i) {
-            segment = segments[i];
-            if (!current_path.empty()) {
-                current_path += ".";
-            }
-            current_path += segment;
-
-            auto it = current_node->child_indices.find(segment);
-            if (it == current_node->child_indices.end()) {
-                 current_node->children.push_back({segment, ProfileNode()});
-                size_t new_index = current_node->children.size() - 1;
-                current_node->child_indices[segment] = new_index;
-                current_node = &current_node->children[new_index].second;
-            } else {
-                current_node = &current_node->children[it->second].second;
-            }
-            
-            // If this is the leaf node, populate its stats
-            if (i == segments.size() - 1) {
-                current_node->count = times.size();
-                current_node->exclusive_sum_ms = std::accumulate(times.begin(), times.end(), 0.0);
-                current_node->exclusive_sum_sq_ms = std::inner_product(times.begin(), times.end(), times.begin(), 0.0);
-            }
-        }
+        // Aggregate timing data on the final leaf node.
+        current_node->count++;
+        current_node->exclusive_sum_ms += time_ms;
+        current_node->exclusive_sum_sq_ms += time_ms * time_ms;
     }
 
     calculate_inclusive_times(root);
     const double total_root_ms = root.inclusive_sum_ms;
 
-    std::cout << "\n--- 🌲 Performance Report 🌲 ---\n\n";
+    std::cout << "\n--- 🌲 Performance Report (Execution Order) 🌲 ---\n\n";
     std::cout << std::left << std::setw(50) << "Operation"
               << std::right 
               << std::setw(20) << "Total Latency (ms)"
@@ -335,21 +279,20 @@ inline void Profiler::print_report() {
               << std::setw(10) << "Samples" << "\n";
     std::cout << std::string(130, '-') << "\n";
 
-    int depth = 0;
-    // MODIFIED: Iterate over the vector to print in order.
+    // Iterate through the ordered vector of children to print the report.
     for (size_t i = 0; i < root.children.size(); ++i) {
-        const auto& child_pair = root.children[i];
+        const auto& child_entry = root.children[i];
         bool is_last = (i == root.children.size() - 1);
-        print_node_recursive(child_pair.second, child_pair.first, "", is_last, total_root_ms, total_root_ms, depth);
+        print_node_recursive(child_entry.second, child_entry.first, "", is_last, total_root_ms, total_root_ms, 0);
     }
     std::cout << std::string(130, '-') << "\n";
 }
 
 inline double Profiler::calculate_inclusive_times(ProfileNode& node) {
     double children_inclusive_sum = 0.0;
-    // MODIFIED: Iterate over the vector of children.
-    for (auto& entry : node.children) {
-        children_inclusive_sum += calculate_inclusive_times(entry.second);
+    // Iterate over the ordered vector.
+    for (auto& child_pair : node.children) {
+        children_inclusive_sum += calculate_inclusive_times(child_pair.second);
     }
     node.inclusive_sum_ms = node.exclusive_sum_ms + children_inclusive_sum;
     return node.inclusive_sum_ms;
@@ -394,11 +337,11 @@ inline void Profiler::print_node_recursive(const ProfileNode& node, const std::s
     std::cout << "\n";
 
     std::string child_indent = indent + (is_last ? "    " : "│   ");
-    // MODIFIED: Iterate over the vector of children to recurse in order.
+    // Iterate over the ordered vector for recursive printing.
     for (size_t i = 0; i < node.children.size(); ++i) {
-        const auto& child_pair = node.children[i];
+        const auto& child_entry = node.children[i];
         bool is_child_last = (i == node.children.size() - 1);
-        print_node_recursive(child_pair.second, child_pair.first, child_indent, is_child_last, node.inclusive_sum_ms, total_root_ms, depth + 1);
+        print_node_recursive(child_entry.second, child_entry.first, child_indent, is_child_last, node.inclusive_sum_ms, total_root_ms, depth + 1);
     }
 }
 #endif // PROFILER_HPP

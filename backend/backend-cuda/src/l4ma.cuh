@@ -141,7 +141,7 @@ public:
     explicit L4maMlp(const L4maConfig& config);
 
     // REFACTORED: Now accepts a StackAllocator.
-    void forward(ProfileScope scope,
+    void forward(ProfileScope profiler,
                  L4maBuffer<T>& buffer,
                  T* output,
                  const T* x);
@@ -165,7 +165,7 @@ class L4maAttention : public Module<T> {
 public:
     explicit L4maAttention(const L4maConfig& config);
 
-    void forward(ProfileScope scope,
+    void forward(ProfileScope profiler,
                  L4maBuffer<T>& buffer,
                  T* attn_output,
                  const T* hidden_states,
@@ -196,7 +196,7 @@ class L4maDecoderLayer : public Module<T> {
 public:
     explicit L4maDecoderLayer(const L4maConfig& config);
 
-    void forward(ProfileScope scope,
+    void forward(ProfileScope profiler,
                  L4maBuffer<T>& buffer,
                  T* hidden_states, 
                  T* kv_cache_k,
@@ -222,7 +222,7 @@ class L4maModel : public Module<T> {
 public:
     explicit L4maModel(const L4maConfig& config);
 
-    void forward(ProfileScope scope,
+    void forward(ProfileScope profiler,
                  L4maBuffer<T>& buffer,
                  T* final_norm_output,
                  thrust::device_vector<T>& kv_cache_k,
@@ -250,7 +250,7 @@ public:
     explicit L4maForCausalLM(const L4maConfig& config);
 
 
-    std::pair<std::vector<float>, std::vector<int32_t>> forward(ProfileScope scope,
+    std::pair<std::vector<float>, std::vector<int32_t>> forward(ProfileScope profiler,
                  L4maBuffer<T>& buffer);
 
     std::map<std::string, Tensor<T>*> get_parameters() override;

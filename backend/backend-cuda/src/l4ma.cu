@@ -458,7 +458,7 @@ void RMSNorm<T>::forward(
 
 template <typename T>
 void L4maMlp<T>::forward(
-    ProfileScope scope,
+    ProfileScope profiler,
     L4maBuffer<T>& buffer,
     T* output, 
     const T* x
@@ -476,9 +476,9 @@ void L4maMlp<T>::forward(
 
     // 2. Gate and Up projections. TODO: Fuse them into a single GEMM if possible
     gemm_cublasLt<T>(buffer.ltHandle, buffer.stream, x, up_proj_weights_.data(), nullptr, up_proj_out.data(), buffer.num_tokens, intermediate_size, hidden_size, cublas_workspace.data(), cublas_workspace_size, false, true);
-    scope.record("up_projection");
+    profiler.record("up_projection");
     gemm_cublasLt<T>(buffer.ltHandle, buffer.stream, x, gate_proj_weights_.data(), nullptr, gate_proj_out.data(), buffer.num_tokens, intermediate_size, hidden_size, cublas_workspace.data(), cublas_workspace_size, false, true);
-    scope.record("gate_projection");
+    profiler.record("gate_projection");
 
     // 3. SwiGLU activation (gate * silu(up))
     // We can reuse the gate_proj_out_ptr buffer for the output of SwiGLU
@@ -490,12 +490,12 @@ void L4maMlp<T>::forward(
         intermediate_size, 
         buffer.stream
     );
-    scope.record("silu_and_mul");
+    profiler.record("silu_and_mul");
     //std::cout << "SwiGLU output mean: " << up_proj_out.mean() << std::endl;
 
     // 4. Down projection
     gemm_cublasLt<T>(buffer.ltHandle, buffer.stream, up_proj_out.data(), down_proj_weights_.data(), nullptr, output, buffer.num_tokens, hidden_size, intermediate_size, cublas_workspace.data(), cublas_workspace_size, false, true);
-    scope.record("down_projection");
+    profiler.record("down_projection");
 
     // 5. Deallocate buffers in reverse order of allocation (LIFO)
     buffer.deallocate(cublas_workspace);
@@ -506,7 +506,7 @@ void L4maMlp<T>::forward(
 
 template <typename T>
 void L4maAttention<T>::forward(
-    ProfileScope scope,
+    ProfileScope profiler,
     L4maBuffer<T>& buffer,
     T* attn_output,
     const T* hidden_states,
@@ -533,11 +533,11 @@ void L4maAttention<T>::forward(
 
     // 2. Q, K, V projections. TODO: Fuse them into a single GEMM if possible
     gemm_cublasLt<T>(buffer.ltHandle, buffer.stream, hidden_states, q_proj_weights_.data(), nullptr, q_proj.data(), num_tokens, num_query_heads * head_size, hidden_size, cublas_workspace.data(), cublas_workspace_size, false, true);
-    scope.record("q_projection");
+    profiler.record("q_projection");
     gemm_cublasLt<T>(buffer.ltHandle, buffer.stream, hidden_states, k_proj_weights_.data(), nullptr, k_proj.data(), num_tokens, num_key_value_heads * head_size, hidden_size, cublas_workspace.data(), cublas_workspace_size, false, true);
-    scope.record("k_projection");
+    profiler.record("k_projection");
     gemm_cublasLt<T>(buffer.ltHandle, buffer.stream, hidden_states, v_proj_weights_.data(), nullptr, v_proj.data(), num_tokens, num_key_value_heads * head_size, hidden_size, cublas_workspace.data(), cublas_workspace_size, false, true);
-    scope.record("v_projection");
+    profiler.record("v_projection");
 
     flashinfer::paged_kv_t<T, int32_t> paged_kv(
         num_key_value_heads, buffer.page_size, head_size, batch_size,
@@ -547,7 +547,7 @@ void L4maAttention<T>::forward(
         buffer.kv_page_indptr.data(), 
         buffer.kv_last_page_lens.data()
     );
-    scope.record("kv_page_create");
+    profiler.record("kv_page_create");
 
     // 3. Apply RoPE (in-place)
     cudaError_t status = flashinfer::BatchQKApplyLlama31RotaryPosIds(
@@ -560,7 +560,7 @@ void L4maAttention<T>::forward(
         config_.rope_high_frequency_factor, 8192, buffer.stream
     );
 
-    scope.record("apply_rope");
+    profiler.record("apply_rope");
 
     flashinfer::AppendPagedKVCache<T, int32_t>(
         paged_kv, k_proj.data(), v_proj.data(),
@@ -571,7 +571,7 @@ void L4maAttention<T>::forward(
         num_key_value_heads * head_size, head_size,
         buffer.stream
     );
-    scope.record("append_kv_cache");
+    profiler.record("append_kv_cache");
 
     // Reuse a buffer for the attention output before the final projection
     T* o_proj_input_ptr = q_proj.data(); 
@@ -588,11 +588,11 @@ void L4maAttention<T>::forward(
         1e4, // rope_theta -> unused
         buffer.stream
     );
-    scope.record("attention");
+    profiler.record("attention");
 
     // 5. Final output projection
     gemm_cublasLt<T>(buffer.ltHandle, buffer.stream, o_proj_input_ptr, o_proj_weights_.data(), nullptr, attn_output, num_tokens, hidden_size, num_query_heads * head_size, cublas_workspace.data(), cublas_workspace_size, false, true);
-    scope.record("o_projection");
+    profiler.record("o_projection");
     
     // 6. Deallocate buffers in reverse order
     buffer.deallocate(cublas_workspace);
@@ -603,7 +603,7 @@ void L4maAttention<T>::forward(
 
 template <typename T>
 void L4maDecoderLayer<T>::forward(
-    ProfileScope scope,
+    ProfileScope profiler,
     L4maBuffer<T>& buffer,
     T* hidden_states,
     T* kv_cache_k,
@@ -616,11 +616,11 @@ void L4maDecoderLayer<T>::forward(
     // The input `hidden_states` serves as the first residual.
     Tensor<T> normed_input = buffer.template allocate<T>(hidden_size_elements);
     input_layernorm_.forward(normed_input.data(), hidden_states, num_tokens, buffer.stream);
-    scope.record("norm_1");
+    profiler.record("norm_1");
 
     Tensor<T> attn_output = buffer.template allocate<T>(hidden_size_elements);
 
-    self_attn_.forward(scope.scope("self_attn"), buffer, attn_output.data(), 
+    self_attn_.forward(profiler.scope("self_attn"), buffer, attn_output.data(), 
                        normed_input.data() , kv_cache_k, kv_cache_v);
 
     //logger.record("self_attn", buffer.stream);
@@ -628,7 +628,7 @@ void L4maDecoderLayer<T>::forward(
 
     add_residual_kernel<<<(hidden_size_elements + 255) / 256, 256, 0, buffer.stream>>>(
         hidden_states, attn_output.data(), hidden_size_elements);
-    scope.record("attn_residual_add");
+    profiler.record("attn_residual_add");
 
     // Deallocate attn_output and then normed_input to free up space for the MLP block
     buffer.deallocate(attn_output);
@@ -639,17 +639,17 @@ void L4maDecoderLayer<T>::forward(
     // The result of the attention block, `hidden_states`, is the residual for the MLP block.
     Tensor<T> normed_mlp_input = buffer.template allocate<T>(hidden_size_elements);
     post_attention_layernorm_.forward(normed_mlp_input.data(), hidden_states, num_tokens, buffer.stream);
-    scope.record("norm_2");
+    profiler.record("norm_2");
 
     Tensor<T> mlp_output = buffer.template allocate<T>(hidden_size_elements);
-    mlp_.forward(scope.scope("mlp"), buffer, mlp_output.data(), normed_mlp_input.data());
+    mlp_.forward(profiler.scope("mlp"), buffer, mlp_output.data(), normed_mlp_input.data());
     // print the attn_output_ptr mean for debugging
     // float attn_output_mean = compute_mean(mlp_output_ptr, hidden_size_elements);
     // std::cout << "mlp_output_ptr mean: " << attn_output_mean << std::endl;
 
     add_residual_kernel<<<(hidden_size_elements + 255) / 256, 256, 0, buffer.stream>>>(
         hidden_states, mlp_output.data(), hidden_size_elements);
-    scope.record("mlp_residual_add");
+    profiler.record("mlp_residual_add");
     
     // Deallocate MLP buffers
     buffer.deallocate(mlp_output);
@@ -658,7 +658,7 @@ void L4maDecoderLayer<T>::forward(
 
 template <typename T>
 void L4maModel<T>::forward(
-    ProfileScope scope,
+    ProfileScope profiler,
     L4maBuffer<T>& buffer,
     T* final_norm_output,
     thrust::device_vector<T>& kv_cache_k,
@@ -679,7 +679,7 @@ void L4maModel<T>::forward(
         config_.hidden_size, 
         buffer.stream
     );
-    scope.record("embedding_lookup");
+    profiler.record("embedding_lookup");
 
     // print out the mean of the embeddings
     // float embed_mean = compute_mean(working_hidden_buffer, hidden_size_elements);
@@ -699,14 +699,14 @@ void L4maModel<T>::forward(
         T* layer_k_cache_ptr = k_cache_ptr + i * kv_cache_size;
         T* layer_v_cache_ptr = v_cache_ptr + i * kv_cache_size;
 
-        layer.forward(scope.scope("decoder_layer"), buffer, working_hidden_buffer.data(),
+        layer.forward(profiler.scope("decoder_layer"), buffer, working_hidden_buffer.data(),
                       layer_k_cache_ptr, layer_v_cache_ptr);
 
     }
 
     // Final norm reads from the working buffer and writes to the final output buffer.
     norm_.forward(final_norm_output, working_hidden_buffer.data(), num_tokens, buffer.stream);
-    scope.record("norm_");
+    profiler.record("norm_");
 
     // Deallocate the working buffer.
     buffer.deallocate(working_hidden_buffer);
@@ -714,7 +714,7 @@ void L4maModel<T>::forward(
 
 template <typename T>
 std::pair<std::vector<float>, std::vector<int32_t>> L4maForCausalLM<T>::forward(
-    ProfileScope scope,
+    ProfileScope profiler,
     L4maBuffer<T>& buffer) {
 
     const int num_tokens = buffer.num_tokens;
@@ -728,7 +728,7 @@ std::pair<std::vector<float>, std::vector<int32_t>> L4maForCausalLM<T>::forward(
     Tensor<T> hidden_states = buffer.template allocate<T>(hidden_elements);
 
     model_.forward(
-        scope.scope("model"),
+        profiler.scope("model"),
         buffer,
         hidden_states.data(),
         kv_cache_k_,
@@ -768,7 +768,7 @@ std::pair<std::vector<float>, std::vector<int32_t>> L4maForCausalLM<T>::forward(
             buffer.stream
         );
         final_hidden_states_ptr = &gathered_states;
-        scope.record("gather_hidden_states");
+        profiler.record("gather_hidden_states");
 
     }
 
@@ -783,7 +783,7 @@ std::pair<std::vector<float>, std::vector<int32_t>> L4maForCausalLM<T>::forward(
         config_.vocab_size, config_.hidden_size,
         lm_head_workspace.data(), lm_head_workspace_bytes, false, true
     );
-    scope.record("lm_head");
+    profiler.record("lm_head");
 
     cast_type<T, float>(
         output_logits.data(),
@@ -791,7 +791,7 @@ std::pair<std::vector<float>, std::vector<int32_t>> L4maForCausalLM<T>::forward(
         num_output_tokens * config_.vocab_size,
         buffer.stream
     );
-    scope.record("casting");
+    profiler.record("casting");
 
     // 5. Perform sampling
     flashinfer::sampling::TopKMaskLogits<float, int32_t>(
@@ -803,7 +803,7 @@ std::pair<std::vector<float>, std::vector<int32_t>> L4maForCausalLM<T>::forward(
         config_.vocab_size,
         buffer.stream
     );
-    scope.record("topkmask");
+    profiler.record("topkmask");
 
     extract_k_values<float>(
         output_logits_masked.data(),
@@ -814,7 +814,7 @@ std::pair<std::vector<float>, std::vector<int32_t>> L4maForCausalLM<T>::forward(
         dist_size,
         buffer.stream
     );
-    scope.record("extract");
+    profiler.record("extract");
 
     // 6. Copy final results back to the host.
     std::vector<float> final_logits_val_host = final_logits_val.to_vector();
