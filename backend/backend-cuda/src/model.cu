@@ -346,8 +346,7 @@ void Model::ModelImpl::handle_fill_block(const std::vector<Model::FillBlockComma
     );
 
 
-    LoggingManager manager(true);
-    auto model_logger = manager.scope("model_run", stream);
+    Profiler profiler(true);
 
 
     end_time = std::chrono::high_resolution_clock::now();
@@ -356,13 +355,13 @@ void Model::ModelImpl::handle_fill_block(const std::vector<Model::FillBlockComma
     start_time = std::chrono::high_resolution_clock::now();
 
     auto [logits_vals, logits_indices] = model->forward(
-        model_logger,
+        profiler.scope("model_run", stream),
         *buffer);
 
-    manager.print_report();
     // measure the end time
     cudaStreamSynchronize(stream);
-    
+    profiler.print_report();
+
     // print the time taken for the entire operation
     end_time = std::chrono::high_resolution_clock::now();
     duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time).count();
