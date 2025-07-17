@@ -520,13 +520,28 @@ async fn handle_model_command(command: ModelCommands) -> Result<()> {
         ModelCommands::Add(args) => {
             println!("➕ Adding model: {}", args.model_name);
 
-            // --- Set up directories and save files with the new structure ---
             let models_root = get_pie_home()?.join("models");
-            // Subdirectory for the actual model files (e.g., models/bert-base-uncased/)
             let model_files_dir = models_root.join(&args.model_name);
+            let metadata_path = models_root.join(format!("{}.toml", args.model_name));
+
+            // Check if the model already exists and ask for confirmation to overwrite.
+            if metadata_path.exists() || model_files_dir.exists() {
+                print!("⚠️ Model '{}' already exists. Overwrite? [y/N] ", args.model_name);
+                std::io::stdout().flush().context("Failed to flush stdout")?;
+
+                let mut confirmation = String::new();
+                std::io::stdin().read_line(&mut confirmation).context("Failed to read user input")?;
+
+                if confirmation.trim().to_lowercase() != "y" {
+                    println!("Aborted by user.");
+                    return Ok(());
+                }
+            }
+
+            // --- Set up directories and save files with the new structure ---
             fs::create_dir_all(&model_files_dir)?;
 
-            println!("Parameters will be stored at {:?}", models_root);
+            println!("Parameters will be stored at {:?}", model_files_dir);
 
             let model_index_base = "https://raw.githubusercontent.com/pie-project/model-index/refs/heads/main";
             let metadata_url = format!("{}/{}.toml", model_index_base, args.model_name);
@@ -535,15 +550,11 @@ async fn handle_model_command(command: ModelCommands) -> Result<()> {
             let metadata_raw = match download_file_with_progress(&metadata_url, "Downloading metadata...").await {
                 Ok(data) => data,
                 Err(e) => {
-                    // Attempt to downcast the error to a reqwest::Error
                     if let Some(req_err) = e.downcast_ref::<reqwest::Error>() {
-                        // Check if the HTTP status is 404 Not Found
                         if req_err.status() == Some(reqwest::StatusCode::NOT_FOUND) {
-                            // Return a specific, user-friendly error message
-                            anyhow::bail!("Model not found");
+                            anyhow::bail!("Model '{}' not found in the official index.", args.model_name);
                         }
                     }
-                    // For all other errors, add context and propagate the original error
                     return Err(e.context("Failed to download model metadata"));
                 }
             };
@@ -552,18 +563,14 @@ async fn handle_model_command(command: ModelCommands) -> Result<()> {
                 .context("Failed to parse model metadata as UTF-8")?;
             let metadata: toml::Value = toml::from_str(&metadata_str)?;
 
-
-
-            // Store the .toml metadata file directly in the 'models' directory
-            let metadata_path = models_root.join(format!("{}.toml", args.model_name));
-            fs::write(metadata_path, &metadata_str)?;
+            // Store the .toml metadata file
+            fs::write(&metadata_path, &metadata_str)?;
 
             // Download all source files listed in the metadata
             if let Some(source) = metadata.get("source").and_then(|s| s.as_table()) {
                 for (name, url_val) in source {
                     if let Some(url) = url_val.as_str() {
                         let file_data = download_file_with_progress(url, &format!("Downloading {}...", name)).await?;
-                        // Store model files in their specific subdirectory
                         fs::write(model_files_dir.join(name), file_data)?;
                     }
                 }
