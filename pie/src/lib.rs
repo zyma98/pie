@@ -1,10 +1,17 @@
-mod service;
+use anyhow::{Context, Result};
+use std::fs;
+use std::path::PathBuf;
+use tokio::sync::oneshot;
 
+// Public modules
 pub mod auth;
+pub mod client;
+
+// Internal modules
+mod service;
 mod backend;
 mod batching;
 mod bindings;
-pub mod client;
 mod instance;
 mod l4m;
 mod messaging;
@@ -15,21 +22,15 @@ mod server;
 mod tokenizer;
 mod utils;
 
-//
-use anyhow::Context;
-use std::path::{Path, PathBuf};
-
+// Re-export core components from internal modules
 use crate::auth::{create_jwt, init_secret};
 use crate::messaging::{PubSub, PushPull};
 use crate::ping::Ping;
 use crate::runtime::Runtime;
 use crate::server::Server;
 use crate::service::install_service;
-use std::fs;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::{EnvFilter, Layer};
 
+/// Configuration for the PIE engine.
 #[derive(Debug)]
 pub struct Config {
     pub host: String,
@@ -41,69 +42,16 @@ pub struct Config {
     pub log: Option<PathBuf>,
 }
 
-pub fn start(config: Config) -> anyhow::Result<()> {
-    // 3. Setup logging
-    // This guard must be kept alive for the duration of the program.
-    // If it's dropped, the background logging thread will shut down.
-    let _guard;
-
-    let stdout_filter = if config.verbose {
-        EnvFilter::new("info")
-    } else {
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"))
-    };
-
-    let stdout_layer = tracing_subscriber::fmt::layer()
-        .with_writer(std::io::stdout)
-        .with_filter(stdout_filter);
-
-    let file_layer = if let Some(log_path) = &config.log {
-        // Ensure the parent directory exists.
-        if let Some(parent) = log_path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create log directory at {:?}", parent))?;
-        }
-
-        // Use tracing_appender to create a non-blocking file writer.
-        // We use `rolling::never` to create a single, non-rotating log file.
-        let file_appender = tracing_appender::rolling::never(
-            log_path.parent().unwrap_or_else(|| Path::new(".")),
-            log_path.file_name().unwrap_or_else(|| "pie.log".as_ref()),
-        );
-
-        // The 'non_blocking' function spawns a dedicated thread for writing.
-        let (non_blocking_writer, guard) = tracing_appender::non_blocking(file_appender);
-        _guard = guard; // Store the guard to keep the thread alive.
-
-        let layer = tracing_subscriber::fmt::layer()
-            .with_writer(non_blocking_writer) // Use the non-blocking writer
-            .with_ansi(false)
-            .with_filter(EnvFilter::new("trace")); // Log everything to the file
-        Some(layer)
-    } else {
-        None
-    };
-
-    tracing_subscriber::registry()
-        .with(stdout_layer)
-        .with(file_layer)
-        .init();
-
-    tracing::debug!("{:#?}", config);
-
-    // 4. Build the Tokio runtime and start the runtime.
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-
-    rt.block_on(main(config))
-}
-
-async fn main(config: Config) -> anyhow::Result<()> {
+/// Runs the PIE server logic within an existing Tokio runtime.
+///
+/// This async function sets up all the engine's services and listens for a shutdown
+/// signal to terminate gracefully.
+pub async fn run_server(config: Config, mut shutdown_rx: oneshot::Receiver<()>) -> Result<()> {
     // Ensure the cache directory exists
-    fs::create_dir_all(&config.cache_dir).map_err(|e| {
-        tracing::error!(error = %e,"Setup failure: could not create cache dir");
-        e
+    fs::create_dir_all(&config.cache_dir).with_context(|| {
+        let err_msg = format!("Setup failure: could not create cache dir at {:?}", &config.cache_dir);
+        tracing::error!(error = %err_msg);
+        err_msg
     })?;
 
     if config.enable_auth {
@@ -124,9 +72,6 @@ async fn main(config: Config) -> anyhow::Result<()> {
     let server = Server::new(&server_url, config.enable_auth);
     let messaging_inst2inst = PubSub::new();
     let messaging_user2inst = PushPull::new();
-
-    // Set up test services
-    //let dummy_l4m_backend = backend::SimulatedBackend::new(l4m::Simulator::new()).await;
     let dummy_ping_backend = backend::SimulatedBackend::new(ping::Simulator::new()).await;
     let ping = Ping::new(dummy_ping_backend.clone()).await;
 
@@ -136,12 +81,20 @@ async fn main(config: Config) -> anyhow::Result<()> {
     install_service("messaging-user2inst", messaging_user2inst);
     install_service("ping", ping);
 
-    //l4m::attach_new_backend("model-test", dummy_l4m_backend).await;
+    tracing::info!("✅ PIE runtime started successfully on {}", server_url);
 
-    tracing::info!("Runtime started successfully.");
-
-    tokio::signal::ctrl_c().await?;
-    tracing::info!("Ctrl+C received, shutting down.");
+    // Wait for either a Ctrl+C signal or the shutdown signal from the parent task
+    tokio::select! {
+        res = tokio::signal::ctrl_c() => {
+            if let Err(e) = res {
+                tracing::error!("Failed to listen for Ctrl+C: {}", e);
+            }
+            tracing::info!("Ctrl+C received, shutting down.");
+        }
+        _ = &mut shutdown_rx => {
+            tracing::info!("Shutdown signal received, shutting down.");
+        }
+    }
 
     Ok(())
 }

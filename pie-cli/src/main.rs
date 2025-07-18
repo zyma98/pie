@@ -1,7 +1,6 @@
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, Parser, Subcommand};
 use comfy_table::{Table, presets::UTF8_FULL};
-use daemonize::Daemonize;
 use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use pie::{
@@ -14,12 +13,16 @@ use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
 use std::{
     env,
-    fs::{self, File},
-    io::Write,
-    path::{Path, PathBuf},
+    fs::{self},
+    io::{self, Write},
+    path::PathBuf,
 };
-use sysinfo::{Pid, System};
-
+use tokio::io::{AsyncBufReadExt, BufReader, stdin as tokio_stdin};
+use tokio::sync::oneshot;
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::{EnvFilter, FmtSubscriber, Layer};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 //================================================================================//
 // SECTION: CLI Command & Config Structs
 //================================================================================//
@@ -33,23 +36,19 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Start the PIE engine and enter an interactive session.
     Start(StartArgs),
-    Stop,
-    Status,
     #[command(subcommand)]
+    /// Manage local models.
     Model(ModelCommands),
-    Run(RunArgs),
 }
 
 #[derive(Args, Debug)]
-/// Start the PIE engine.
+/// Arguments for starting the PIE engine.
 pub struct StartArgs {
     /// Path to a custom TOML configuration file.
     #[arg(long)]
     pub config: Option<PathBuf>,
-    /// Run the engine in the foreground for interactive debugging.
-    #[arg(long, short)]
-    pub interactive: bool,
     /// The network host to bind to.
     #[arg(long)]
     pub host: Option<String>,
@@ -67,8 +66,8 @@ pub struct StartArgs {
     pub verbose: bool,
 }
 
-#[derive(Args, Debug)]
-/// Submit an inferlet (Wasm program) to the engine.
+#[derive(Args, Debug, Default)]
+/// Arguments to submit an inferlet (Wasm program) to the engine.
 pub struct RunArgs {
     /// Path to the .wasm inferlet file.
     pub wasm_path: PathBuf,
@@ -93,7 +92,6 @@ pub struct AddModelArgs {
 pub struct RemoveModelArgs {
     pub model_name: String,
 }
-
 #[derive(Args, Debug)]
 pub struct ModelServeArgs {
     pub model_name: String,
@@ -125,97 +123,173 @@ struct ClientConfig {
 // SECTION: Main Entrypoint
 //================================================================================//
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // The 'start' command is special: it's synchronous and might daemonize.
-    if let Commands::Start(args) = cli.command {
-        let config = build_engine_config(&args)?;
-        if args.interactive {
-            println!("🚀 Starting PIE engine in interactive mode...");
-            return pie::start(config); // This blocks until Ctrl+C
-        } else {
-            return handle_start_daemon(config);
+    match cli.command {
+        Commands::Start(args) => {
+            // 1. Build the config first
+            let engine_config = build_engine_config(&args)?;
+
+            // 2. Initialize logging based on the config and get the file-writer guard
+            let _guard = init_logging(&engine_config)?;
+
+            // 3. Start the interactive session, passing the already-built config
+            start_interactive_session(engine_config).await?;
+        }
+        Commands::Model(cmd) => {
+            // Model commands don't start the engine, so they can use a simple logger
+            let subscriber = FmtSubscriber::builder().with_max_level(tracing::Level::INFO).finish();
+            tracing::subscriber::set_global_default(subscriber)?;
+            handle_model_command(cmd).await?;
         }
     }
-
-    // All other commands are async clients, so we create a Tokio runtime.
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?
-        .block_on(async {
-            match cli.command {
-                Commands::Start(_) => unreachable!(), // Already handled
-                Commands::Stop => handle_stop().await,
-                Commands::Status => handle_status().await,
-                Commands::Run(args) => handle_run(args).await,
-                Commands::Model(cmd) => handle_model_command(cmd).await,
-            }
-        })
+    Ok(())
 }
-
 //================================================================================//
 // SECTION: Command Handlers
 //================================================================================//
 
-/// Handles the daemonization (background) start process.
-fn handle_start_daemon(config: EngineConfig) -> Result<()> {
-    if is_engine_running() {
-        return Err(anyhow!(
-            "Engine is already running. Use 'pie-cli stop' first."
-        ));
-    }
+/// Starts the engine and drops into a client command-prompt session.
+async fn start_interactive_session(engine_config: EngineConfig) -> Result<()> {
+    // Config is already built and logging is already initialized.
+    let client_config = ClientConfig {
+        host: engine_config.host.clone(),
+        port: engine_config.port,
+        auth_secret: engine_config.auth_secret.clone(),
+    };
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
     println!("🚀 Starting PIE engine in background...");
+    let server_handle = tokio::spawn(async move {
+        if let Err(e) = pie::run_server(engine_config, shutdown_rx).await {
+            eprintln!("\n[Engine Error] Engine failed: {}", e);
+        }
+    });
 
-    let pie_home = get_pie_home()?;
-    let logs_dir = pie_home.join("logs");
-    fs::create_dir_all(&logs_dir)?;
-    let stdout = File::create(logs_dir.join("engine.out"))?;
-    let stderr = File::create(logs_dir.join("engine.err"))?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    println!("✅ Engine started. Entering interactive session. Type 'help' for commands.");
 
-    let daemonize = Daemonize::new()
-        .pid_file(get_pids_path()?) // Use a dedicated PID file
-        .working_directory(&pie_home)
-        .stdout(stdout)
-        .stderr(stderr);
+    let mut reader = BufReader::new(tokio_stdin());
+    let mut line = String::new();
+    let mut should_exit = false;
 
-    match daemonize.start() {
-        Ok(_) => {
-            // This code runs ONLY in the forked DAEMON process.
-            // The pie::start function is blocking and handles its own runtime.
-            println!(
-                "PIE daemon process started with PID: {}",
-                std::process::id()
-            );
-            if let Err(e) = pie::start(config) {
-                eprintln!("PIE Engine failed: {}", e);
+    while !should_exit {
+        print!("pie> ");
+        io::stdout().flush()?;
+
+        line.clear();
+        if reader.read_line(&mut line).await? == 0 {
+            println!("\nExiting...");
+            break; // Exit on Ctrl+D
+        }
+
+        let parts: Vec<&str> = line.trim().split_whitespace().collect();
+        if parts.is_empty() {
+            continue;
+        }
+
+        // Updated loop logic to handle exit correctly
+        match handle_interactive_command(parts[0], &parts[1..], &client_config).await {
+            Ok(exit_signal) => {
+                should_exit = exit_signal;
+            }
+            Err(e) => {
+                eprintln!("Error: {}", e);
             }
         }
-        Err(e) => return Err(anyhow!("Failed to daemonize: {}", e)),
     }
 
-    // The PARENT process exits here after successfully forking.
-    println!("✅ Engine process launched in background.");
+    // --- GRACEFUL SHUTDOWN ---
+    println!("Shutting down PIE engine...");
+    // Send the shutdown signal. We don't care if the receiver has already been dropped.
+    let _ = shutdown_tx.send(());
+    // Wait for the server task to finish its cleanup.
+    server_handle.await?;
+    println!("✅ Shutdown complete.");
+
     Ok(())
 }
 
-async fn handle_run(args: RunArgs) -> Result<()> {
-    let client_config = load_client_config()?;
+/// Parses and executes commands entered in the interactive session.
+async fn handle_interactive_command(
+    command: &str,
+    args: &[&str],
+    client_config: &ClientConfig,
+) -> Result<bool> {
+    match command {
+        "run" => {
+            let mut wasm_path = None;
+            let mut detach = false;
+            for arg in args {
+                if *arg == "-d" || *arg == "--detach" {
+                    detach = true;
+                } else if wasm_path.is_none() {
+                    wasm_path = Some(PathBuf::from(arg));
+                }
+            }
+
+            if let Some(path) = wasm_path {
+                let run_args = RunArgs {
+                    wasm_path: path,
+                    detach,
+                };
+                if let Err(e) = handle_run(run_args, client_config).await {
+                    eprintln!("Failed to run inferlet: {}", e);
+                }
+            } else {
+                println!("Usage: run [--detach] <path_to_wasm_file>");
+            }
+        }
+        "query" => {
+            println!("(Query functionality not yet implemented)");
+        }
+        "help" => {
+            println!("Available commands:");
+            println!("  run [--detach] <path>  - Run a .wasm inferlet");
+            println!("  query                  - (Placeholder) Query the engine state");
+            println!("  exit                   - Exit the PIE session");
+            println!("  help                   - Show this help message");
+        }
+        "exit" => {
+            println!("Exiting...");
+            return Ok(true); // Signal to the main loop to exit.
+        }
+        _ => {
+            println!(
+                "Unknown command: '{}'. Type 'help' for a list of commands.",
+                command
+            );
+        }
+    }
+    Ok(false) // Do not exit the loop.
+}
+
+/// Connects to the engine and executes a Wasm inferlet.
+async fn handle_run(args: RunArgs, client_config: &ClientConfig) -> Result<()> {
     let url = format!("ws://{}:{}", client_config.host, client_config.port);
-    let mut client = Client::connect(&url).await?;
+    let mut client = match Client::connect(&url).await {
+        Ok(c) => c,
+        Err(_) => {
+            return Err(anyhow!(
+                "Could not connect to engine at {}. Is it running?",
+                url
+            ));
+        }
+    };
 
     init_secret(&client_config.auth_secret);
-
     let token = create_jwt("default", pie::auth::Role::User)?;
     client.authenticate(&token).await?;
-    //println!("🔐 Authenticated successfully.");
 
-    let wasm_blob = fs::read(&args.wasm_path).context("Failed to read Wasm file")?;
+    let wasm_blob = fs::read(&args.wasm_path)
+        .with_context(|| format!("Failed to read Wasm file at {:?}", args.wasm_path))?;
     let hash = client::hash_program(&wasm_blob);
     println!("Program hash: {}", hash);
 
     if !client.program_exists(&hash).await? {
-        //println!("Program not found on engine, uploading...");
         client.upload_program(&wasm_blob).await?;
         println!("✅ Program upload successful.");
     }
@@ -224,54 +298,33 @@ async fn handle_run(args: RunArgs) -> Result<()> {
     let mut instance = client.launch_instance(&hash).await?;
     println!("✅ Instance launched with ID: {}", instance.id());
 
-    if args.detach {
-        return Ok(());
-    }
-
-    println!("Attaching to instance output... (Ctrl+C to exit)");
-    while let Ok((event, message)) = instance.recv().await {
-        if event == "terminated" {
-            println!("Instance terminated. Reason: {}", message);
-            break;
-        } else {
-            println!("[{}] {}", event, message);
-        }
-    }
-    Ok(())
-}
-
-async fn handle_stop() -> Result<()> {
-    println!("🔌 Stopping PIE services...");
-    if let Ok(pid) = fs::read_to_string(get_pids_path()?) {
-        if let Ok(pid_val) = pid.trim().parse::<u32>() {
-            if let Some(process) = System::new_all().process(Pid::from_u32(pid_val)) {
-                println!("- Stopping engine (PID: {})", pid_val);
-                process.kill();
+    // If not detached, spawn a task to listen for output asynchronously.
+    // This prevents blocking the main command prompt.
+    if !args.detach {
+        println!("Streaming output for instance {}...", instance.id());
+        let instance_id = instance.id().to_string();
+        tokio::spawn(async move {
+            while let Ok((event, message)) = instance.recv().await {
+                // Printing asynchronously can interfere with the prompt. Prepending a newline helps.
+                if event == "terminated" {
+                    println!(
+                        "\n[Instance {}] Terminated. Reason: {}",
+                        instance_id, message
+                    );
+                    break;
+                } else {
+                    println!("\n[Instance {}] {}: {}", instance_id, event, message);
+                }
             }
-        }
+            // Let the user know the stream is done and they can get a clean prompt.
+            print!(
+                "(Output stream for {} ended). Press Enter to refresh prompt.",
+                instance_id
+            );
+            let _ = io::stdout().flush();
+        });
     }
-    fs::remove_file(get_pids_path()?).ok();
-    println!("✅ Engine stopped.");
-    Ok(())
-}
 
-async fn handle_status() -> Result<()> {
-    let mut table = Table::new();
-    table
-        .load_preset(UTF8_FULL)
-        .set_header(vec!["Service", "Status", "Details"]);
-
-    if is_engine_running() {
-        let pid = fs::read_to_string(get_pids_path()?).unwrap_or_default();
-        table.add_row(vec![
-            "PIE Engine",
-            &format!("Running (PID: {})", pid.trim()),
-            "",
-        ]);
-    } else {
-        table.add_row(vec!["PIE Engine", "Stopped", ""]);
-    }
-    println!("{table}");
     Ok(())
 }
 
@@ -298,18 +351,15 @@ async fn handle_model_command(command: ModelCommands) -> Result<()> {
             let model_files_dir = models_root.join(&args.model_name);
             let metadata_path = models_root.join(format!("{}.toml", args.model_name));
 
-            // Check if the model already exists and ask for confirmation to overwrite.
             if metadata_path.exists() || model_files_dir.exists() {
                 print!(
                     "⚠️ Model '{}' already exists. Overwrite? [y/N] ",
                     args.model_name
                 );
-                std::io::stdout()
-                    .flush()
-                    .context("Failed to flush stdout")?;
+                io::stdout().flush().context("Failed to flush stdout")?;
 
                 let mut confirmation = String::new();
-                std::io::stdin()
+                io::stdin()
                     .read_line(&mut confirmation)
                     .context("Failed to read user input")?;
 
@@ -319,16 +369,13 @@ async fn handle_model_command(command: ModelCommands) -> Result<()> {
                 }
             }
 
-            // --- Set up directories and save files with the new structure ---
             fs::create_dir_all(&model_files_dir)?;
-
             println!("Parameters will be stored at {:?}", model_files_dir);
 
             let model_index_base =
                 "https://raw.githubusercontent.com/pie-project/model-index/refs/heads/main";
             let metadata_url = format!("{}/{}.toml", model_index_base, args.model_name);
 
-            // --- Download metadata with specific 404 error handling ---
             let metadata_raw =
                 match download_file_with_progress(&metadata_url, "Downloading metadata...").await {
                     Ok(data) => data,
@@ -349,10 +396,8 @@ async fn handle_model_command(command: ModelCommands) -> Result<()> {
                 .context("Failed to parse model metadata as UTF-8")?;
             let metadata: toml::Value = toml::from_str(&metadata_str)?;
 
-            // Store the .toml metadata file
             fs::write(&metadata_path, &metadata_str)?;
 
-            // Download all source files listed in the metadata
             if let Some(source) = metadata.get("source").and_then(|s| s.as_table()) {
                 for (name, url_val) in source {
                     if let Some(url) = url_val.as_str() {
@@ -367,36 +412,27 @@ async fn handle_model_command(command: ModelCommands) -> Result<()> {
         }
         ModelCommands::Remove(args) => {
             println!("🗑️ Removing model: {}", args.model_name);
-
-            // Define the base path for all models
             let models_root = get_pie_home()?.join("models");
-            // Path to the subdirectory containing the model's files
             let model_files_dir = models_root.join(&args.model_name);
-            // Path to the model's metadata .toml file
             let metadata_path = models_root.join(format!("{}.toml", args.model_name));
-
             let mut was_removed = false;
-
-            // Attempt to remove the model's file directory if it exists
             if model_files_dir.exists() {
                 fs::remove_dir_all(&model_files_dir)?;
                 was_removed = true;
             }
-
-            // Attempt to remove the model's metadata file if it exists
             if metadata_path.exists() {
                 fs::remove_file(&metadata_path)?;
                 was_removed = true;
             }
-
             if was_removed {
                 println!("✅ Model '{}' removed.", args.model_name);
             } else {
-                // If neither the directory nor the file was found, return an error
                 anyhow::bail!("Model '{}' not found locally.", args.model_name);
             }
         }
-        ModelCommands::Serve(args) => return Err(anyhow!("`model serve` is not yet implemented.")),
+        ModelCommands::Serve(_args) => {
+            return Err(anyhow!("`model serve` is not yet implemented."));
+        }
     }
     Ok(())
 }
@@ -433,34 +469,14 @@ fn build_engine_config(args: &StartArgs) -> Result<EngineConfig> {
             .clone()
             .or(file_config.host)
             .unwrap_or_else(|| "127.0.0.1".to_string()),
-        port: args.port.or(file_config.port).unwrap_or(9123),
+        port: args.port.or(file_config.port).unwrap_or(8080),
         enable_auth,
         auth_secret,
         cache_dir: file_config
             .cache_dir
-            .unwrap_or_else(|| get_pie_home().unwrap().join("cache")),
+            .unwrap_or_else(|| get_pie_home().unwrap()),
         verbose: args.verbose || file_config.verbose.unwrap_or(false),
         log: args.log.clone().or(file_config.log),
-    })
-}
-
-/// Loads the minimal config needed for client commands to connect to the engine.
-fn load_client_config() -> Result<ClientConfig> {
-    let config_path = get_pie_home()?.join("runtime/engine.toml");
-    let content = fs::read_to_string(&config_path).with_context(|| {
-        format!(
-            "Engine config not found at {:?}. Is the engine running?",
-            config_path
-        )
-    })?;
-    let config: ConfigFile = toml::from_str(&content)?;
-
-    Ok(ClientConfig {
-        host: config.host.context("'host' missing from engine config")?,
-        port: config.port.context("'port' missing from engine config")?,
-        auth_secret: config
-            .auth_secret
-            .context("'auth_secret' missing from engine config")?,
     })
 }
 
@@ -468,27 +484,10 @@ fn get_pie_home() -> Result<PathBuf> {
     if let Ok(path) = env::var("PIE_HOME") {
         Ok(PathBuf::from(path))
     } else {
-        dirs::home_dir()
-            .map(|p| p.join(".pie"))
+        dirs::cache_dir()
+            .map(|p| p.join("pie"))
             .ok_or_else(|| anyhow!("Failed to find home dir"))
     }
-}
-
-fn get_pids_path() -> Result<PathBuf> {
-    let dir = get_pie_home()?.join("runtime");
-    fs::create_dir_all(&dir)?;
-    Ok(dir.join("pie.pid"))
-}
-
-fn is_engine_running() -> bool {
-    if let Ok(pid_path) = get_pids_path() {
-        if let Ok(pid_str) = fs::read_to_string(pid_path) {
-            if let Ok(pid) = pid_str.trim().parse::<u32>() {
-                return System::new_all().process(Pid::from_u32(pid)).is_some();
-            }
-        }
-    }
-    false
 }
 
 async fn download_file_with_progress(url: &str, message: &str) -> Result<Vec<u8>> {
@@ -525,4 +524,50 @@ async fn download_file_with_progress(url: &str, message: &str) -> Result<Vec<u8>
 
     pb.finish_with_message(format!("✅ Downloaded {}", file_name));
     Ok(content)
+}
+
+
+fn init_logging(config: &EngineConfig) -> Result<Option<WorkerGuard>> {
+    let mut guard = None;
+
+    // Console logger setup
+    let console_filter = if config.verbose {
+        // If -v is passed, show info for everything
+        EnvFilter::new("info")
+    } else {
+        // Otherwise, use RUST_LOG or default to "warn"
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"))
+    };
+    let console_layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stdout)
+        .with_filter(console_filter);
+
+    // File logger setup
+    let file_layer = if let Some(log_path) = &config.log {
+        let parent = log_path.parent().context("Log path has no parent directory")?;
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create log directory at {:?}", parent))?;
+
+        let file_appender = tracing_appender::rolling::never(parent, log_path.file_name().unwrap());
+        let (non_blocking_writer, worker_guard) = tracing_appender::non_blocking(file_appender);
+
+        // Save the guard to be returned
+        guard = Some(worker_guard);
+
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(non_blocking_writer)
+            .with_ansi(false) // No colors in files
+            .with_filter(EnvFilter::new("trace")); // Log everything to the file
+        Some(layer)
+    } else {
+        None
+    };
+
+    // Register the layers
+    tracing_subscriber::registry()
+        .with(console_layer)
+        .with(file_layer)
+        .init();
+
+    Ok(guard)
 }
