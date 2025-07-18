@@ -3,9 +3,11 @@ name = "pie"
 version = "0.1.0"
 edition = "2024"
 authors = ["In Gim <in.gim@yale.edu>"]
-description = "Pie Runtime"
+description = "Programmable Inference Engine (PIE)"
 license = "MIT"
 repository = "https://github.com/pie-project/pie"
+
+[lib]
 
 [dependencies]
 anyhow = "1.0.95"

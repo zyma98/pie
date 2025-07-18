@@ -5,6 +5,9 @@ edition = "2024"
 description = "Command-line interface for the PIE"
 
 [dependencies]
+
+pie = { path = "../pie" }
+
 # Core & Async
 tokio = { version = "1.38", features = ["full"] }
 anyhow = "1.0"
