@@ -26,20 +26,18 @@
 
 ### 1. Prerequisites
 
-Before you begin, set up a backend and install the `wasm32-wasip2` target for Rust.
-
 - **Configure a Backend:**  
   Navigate to a backend directory and follow its `README.md` for setup:
-  - [Python PyTorch Backend](backend/backend-python/README.md)
-  - [C++ CUDA Backend](backend/backend-cuda/README.md)
+  - [Python Backend](backend/backend-python/README.md)
+  - [C++ Backend](backend/backend-cuda/README.md)
 
 - **Add Wasm Target:**  
-  Install the necessary WebAssembly target for Rust:
+  Install the WebAssembly target for Rust:
 
   ```bash
   rustup target add wasm32-wasip2
   ```
-
+  This is required to compile Rust-based inferlets in the `example-apps` directory.
 
 
 ### 2. Build
