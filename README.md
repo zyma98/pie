@@ -30,8 +30,8 @@ Before you begin, set up a backend and install the `wasm32-wasip2` target for Ru
 
 - **Configure a Backend:**  
   Navigate to a backend directory and follow its `README.md` for setup:
-  - [Python PyTorch Backend](https://www.google.com/search?q=backend/backend-python/README.md)
-  - [C++ CUDA Backend](https://www.google.com/search?q=backend/backend-cuda/README.md)
+  - [Python PyTorch Backend](backend/backend-python/README.md)
+  - [C++ CUDA Backend](backend/backend-cuda/README.md)
 
 - **Add Wasm Target:**  
   Install the necessary WebAssembly target for Rust:
@@ -44,7 +44,7 @@ Before you begin, set up a backend and install the `wasm32-wasip2` target for Ru
 
 ### 2. Build
 
-Build the **PIE CLI** and the example `inferlet` applications.
+Build the **PIE CLI** and the example inferlets.
 
 - **Build the PIE CLI:**  
   From the repository root, run:
@@ -63,7 +63,7 @@ Build the **PIE CLI** and the example `inferlet` applications.
 
 ### 3. Run an Inferlet
 
-Download a model, start the engine, and run an `inferlet`.
+Download a model, start the engine, and run an inferlet.
 
 1. **Download a Model:**  
    Use the PIE CLI to add a model from the [model index](https://github.com/pie-project/model-index):
@@ -80,7 +80,7 @@ Download a model, start the engine, and run an `inferlet`.
    ```
 
 3. **Run an Inferlet:**  
-   From within the PIE shell, execute a compiled `inferlet`:
+   From within the PIE shell, execute a compiled inferlet:
 
    ```bash
    pie> run ./example-apps/target/wasm32-wasip2/release/simple_decoding.wasm
