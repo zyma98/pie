@@ -111,9 +111,18 @@ class Driver:
                 block.occupancy[i] = m
 
     def copy_block(self, cmds: BatchCopyBlock):
+        for cmd in cmds.items:
+            src_block = self.blocks[cmd.source_block_id]
+            dst_block = self.blocks[cmd.destination_block_id]
+            src_start = cmd.source_start
+            dst_start = cmd.destination_start
+            length = cmd.length
 
-        # TODO.
-        ...
+            dst_block.occupancy[dst_start:dst_start+length] = src_block.occupancy[src_start:src_start+length]
+            dst_block.position_ids[dst_start:dst_start+length] = src_block.position_ids[src_start:src_start+length]
+
+            for kv_cache_layer in self.kv_cache_at_layer:
+                kv_cache_layer[dst_block, :, dst_start:dst_start+length, :, :] = kv_cache_layer[src_block, :, src_start:src_start+length, :, :]
 
     @torch.inference_mode()
     def decode_token_distribution(self, cmds: BatchDecodeTokenDistribution):
