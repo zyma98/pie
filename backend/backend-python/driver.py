@@ -96,7 +96,7 @@ class Driver:
         ...
 
     def embed_text(self, cmds: BatchEmbedText):
-        print(f"Debug - embed_text called with {len(cmds.items)} items")
+        # print(f"Debug - embed_text called with {len(cmds.items)} items")
         for _i, cmd in enumerate(cmds.items):
             self.embeds[cmd.embedding_id] = TextEmbed(token_id=cmd.token_id, position_id=cmd.position_id)
 
@@ -259,11 +259,11 @@ class Driver:
 
 
         # print all inputs
-        print('kv_page_indices', kv_page_indices)
-        print('kv_page_indptr', kv_page_indptr)
-        print('kv_last_page_lens', kv_last_page_lens)
-        print('qo_indptr', qo_indptr)
-        print('custom_mask', custom_mask)
+        # print('kv_page_indices', kv_page_indices)
+        # print('kv_page_indptr', kv_page_indptr)
+        # print('kv_last_page_lens', kv_last_page_lens)
+        # print('qo_indptr', qo_indptr)
+        # print('custom_mask', custom_mask)
 
         pt_new_token_ids = torch.as_tensor(new_token_ids, device=self.device, dtype=torch.int32)
         pt_new_position_ids = torch.as_tensor(new_position_ids, device=self.device, dtype=torch.int32)
@@ -304,8 +304,8 @@ class Driver:
             # precompute the dists
             logits = self.lm.lm_head(output_embeds)
             
-            torch.cuda.synchronize()
-            elapsed_time = (time.time() - start_time) * 1000
+            #torch.cuda.synchronize()
+            #elapsed_time = (time.time() - start_time) * 1000
             #print(f"forward pass elapsed time {elapsed_time:.2f}ms size {output_embeds.shape}")
             # topk
             
@@ -320,8 +320,8 @@ class Driver:
             self.embed_storage_p1[vec_id].copy_(condensed.values[idx], non_blocking=True)
             self.embed_storage_p2[vec_id].copy_(condensed.indices[idx], non_blocking=True)
 
-        torch.cuda.synchronize()
-        elapsed_time = (time.time() - start_time) * 1000
-        print(f"fill_block elapsed time {elapsed_time}ms size {output_embeds.shape}")
+        #torch.cuda.synchronize()
+        #elapsed_time = (time.time() - start_time) * 1000
+        #print(f"fill_block elapsed time {elapsed_time}ms size {output_embeds.shape}")
 
         self.inter_fill_time = time.time()
