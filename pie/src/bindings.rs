@@ -1,3 +1,5 @@
+use wasmtime::component::HasSelf;
+
 mod l4m;
 mod l4m_vision;
 mod messaging;
@@ -31,10 +33,10 @@ where
         + wit::pie::nbi::ping::Host
         + wit::pie::nbi::messaging::Host,
 {
-    wit::pie::nbi::l4m::add_to_linker(linker, |s| s)?;
-    wit::pie::nbi::l4m_vision::add_to_linker(linker, |s| s)?;
-    wit::pie::nbi::runtime::add_to_linker(linker, |s| s)?;
-    wit::pie::nbi::ping::add_to_linker(linker, |s| s)?;
-    wit::pie::nbi::messaging::add_to_linker(linker, |s| s)?;
+    wit::pie::nbi::l4m::add_to_linker::<T, HasSelf<T>>(linker, |s| s)?;
+    wit::pie::nbi::l4m_vision::add_to_linker::<T, HasSelf<T>>(linker, |s| s)?;
+    wit::pie::nbi::runtime::add_to_linker::<T, HasSelf<T>>(linker, |s| s)?;
+    wit::pie::nbi::ping::add_to_linker::<T, HasSelf<T>>(linker, |s| s)?;
+    wit::pie::nbi::messaging::add_to_linker::<T, HasSelf<T>>(linker, |s| s)?;
     Ok(())
 }
