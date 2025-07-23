@@ -9,7 +9,7 @@ mod runtime;
 mod wit {
     use super::*;
     wasmtime::component::bindgen!({
-        path: "../api/wit",
+        path: "../inferlet/wit",
         world: "imports",
         async: true,
         with: {
