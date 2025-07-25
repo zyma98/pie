@@ -1,7 +1,6 @@
 interface input-image {
 
-    use model.{model};
-    use queue.{queue};
+    use model.{queue};
     use allocate.{object-id};         // Import object ID type for memory references
 
     // Embeds an image blob into model-compatible embeddings

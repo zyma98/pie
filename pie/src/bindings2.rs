@@ -1,38 +1,25 @@
-use wasmtime::component::HasSelf;
-use crate::bindings::l4m;
-use crate::bindings::messaging;
+mod allocate;
+mod forward;
+mod input_image;
+mod input_text;
+mod model;
+mod output_text;
+mod runtime;
+mod tokenize;
 
-mod wit {
-    use super::*;
-    wasmtime::component::bindgen!({
-        path: "../inferlet/wit2",
-        world: "inferlet",
-        async: true,
-        with: {
-            "wasi:io/poll": wasmtime_wasi::p2::bindings::io::poll,
-            "pie:inferlet/runtime/subscription": messaging::Subscription,
-            "pie:inferlet/runtime/receive-result": messaging::ReceiveResult,
-            "pie:inferlet/model/model": l4m::Model,
-            "pie:inferlet/queue/synchronization-result": l4m::SynchronizationResult,
-            "pie:inferlet/tokenize/tokenizer": l4m::Tokenizer,
-            "pie:inferlet/output-text/distribution-result": l4m::SampleTopKResult,
-        },
-        trappable_imports: true,
-    });
-}
-
-// pub fn add_to_linker<T>(linker: &mut wasmtime::component::Linker<T>) -> Result<(), wasmtime::Error>
-// where
-//     T: wit::pie::nbi::l4m::Host
-//     + wit::pie::nbi::l4m_vision::Host
-//     + wit::pie::nbi::runtime::Host
-//     + wit::pie::nbi::ping::Host
-//     + wit::pie::nbi::messaging::Host,
-// {
-//     wit::pie::nbi::l4m::add_to_linker::<T, HasSelf<T>>(linker, |s| s)?;
-//     wit::pie::nbi::l4m_vision::add_to_linker::<T, HasSelf<T>>(linker, |s| s)?;
-//     wit::pie::nbi::runtime::add_to_linker::<T, HasSelf<T>>(linker, |s| s)?;
-//     wit::pie::nbi::ping::add_to_linker::<T, HasSelf<T>>(linker, |s| s)?;
-//     wit::pie::nbi::messaging::add_to_linker::<T, HasSelf<T>>(linker, |s| s)?;
-//     Ok(())
-// }
+wasmtime::component::bindgen!({
+    path: "../inferlet/wit2",
+    world: "inferlet",
+    async: true,
+    with: {
+        "wasi:io/poll": wasmtime_wasi::p2::bindings::io::poll,
+        "pie:inferlet/runtime/subscription": runtime::Subscription,
+        "pie:inferlet/runtime/receive-result": runtime::ReceiveResult,
+        "pie:inferlet/model/model": model::Model,
+        "pie:inferlet/model/queue": model::Queue,
+        "pie:inferlet/model/synchronization-result": model::SynchronizationResult,
+        "pie:inferlet/tokenize/tokenizer": tokenize::Tokenizer,
+        "pie:inferlet/output-text/distribution-result": output_text::DistributionResult,
+    },
+    trappable_imports: true,
+});

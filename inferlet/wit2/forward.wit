@@ -1,11 +1,10 @@
 interface forward {
 
-    use model.{model};
-    use queue.{queue};
+    use model.{queue};
     use allocate.{object-id};        // Import object ID type for memory references
 
     // Returns a list of available PEFT (parameter-efficient fine-tuning) adapter names
-    get-all-adapters: func() -> list<string>;
+    get-all-adapters: func(queue: borrow<queue>) -> list<string>;
 
     // Executes a forward pass using context and input embeddings
     forward: func(

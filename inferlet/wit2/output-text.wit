@@ -3,13 +3,12 @@ interface output-text {
     // Import pollable functionality from the WASI IO poll package
     use wasi:io/poll@0.2.4.{pollable};
 
-    use model.{model};
-    use queue.{queue};
+    use model.{queue};
     use allocate.{object-id};         // Import object ID type for memory references
 
     // Computes the next-token distribution from the given embedding IDs
     get-next-token-distribution: func(
-        model: borrow<model>,         // The model to use for prediction
+        queue: borrow<queue>,
         emb-ids: list<object-id>      // Embedding IDs to base the prediction on
     ) -> distribution-result;
 

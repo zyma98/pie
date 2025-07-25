@@ -11,7 +11,6 @@ world traits {
 
 world inferlet {
     include traits;
-    import queue;
     import model;
     import runtime;
     export run;
@@ -19,7 +18,6 @@ world inferlet {
 
 world inferlet-server {
     include traits;
-    import queue;
     import model;
     import runtime;
     export wasi:http/incoming-handler@0.2.4;
