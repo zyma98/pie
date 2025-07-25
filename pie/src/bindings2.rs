@@ -1,3 +1,5 @@
+use wasmtime::component::HasSelf;
+
 mod allocate;
 mod forward;
 mod input_image;
@@ -23,3 +25,25 @@ wasmtime::component::bindgen!({
     },
     trappable_imports: true,
 });
+
+pub fn add_to_linker<T>(linker: &mut wasmtime::component::Linker<T>) -> Result<(), wasmtime::Error>
+where
+    T: pie::inferlet::model::Host
+        + pie::inferlet::runtime::Host
+        + pie::inferlet::allocate::Host
+        + pie::inferlet::forward::Host
+        + pie::inferlet::input_text::Host
+        + pie::inferlet::input_image::Host
+        + pie::inferlet::output_text::Host
+        + pie::inferlet::tokenize::Host,
+{
+    pie::inferlet::model::add_to_linker::<T, HasSelf<T>>(linker, |s| s)?;
+    pie::inferlet::runtime::add_to_linker::<T, HasSelf<T>>(linker, |s| s)?;
+    pie::inferlet::allocate::add_to_linker::<T, HasSelf<T>>(linker, |s| s)?;
+    pie::inferlet::forward::add_to_linker::<T, HasSelf<T>>(linker, |s| s)?;
+    pie::inferlet::input_text::add_to_linker::<T, HasSelf<T>>(linker, |s| s)?;
+    pie::inferlet::input_image::add_to_linker::<T, HasSelf<T>>(linker, |s| s)?;
+    pie::inferlet::output_text::add_to_linker::<T, HasSelf<T>>(linker, |s| s)?;
+    pie::inferlet::tokenize::add_to_linker::<T, HasSelf<T>>(linker, |s| s)?;
+    Ok(())
+}
