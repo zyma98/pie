@@ -214,7 +214,6 @@ impl Model {
 
 /// Defines task priority levels.
 pub use crate::bindings::pie::inferlet::core::Priority;
-use crate::context::ContextError;
 
 impl Queue {
     /// Gets the service ID for the queue.
