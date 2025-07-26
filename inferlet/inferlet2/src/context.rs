@@ -9,6 +9,8 @@ use crate::traits::forward::Forward;
 use crate::traits::input_text::InputText;
 use crate::traits::output_text::{Distribution, OutputText};
 use std::{fmt, mem};
+use wit_bindgen::rt::async_support::futures;
+use wit_bindgen::rt::async_support::futures::future::join_all;
 
 #[derive(Debug)]
 pub struct Context {
@@ -74,21 +76,6 @@ impl Context {
 
     pub fn get_text(&self) -> String {
         self.tokenizer.detokenize(&self.token_ids)
-    }
-
-    pub fn fork_unsafe(&self) -> Self {
-        self.queue.increase_ref_count(&self.kv_page_ids);
-
-        Context {
-            queue: self.model.create_queue(),
-            model: self.model.clone(),
-            tokenizer: self.tokenizer.clone(),
-            token_ids: self.token_ids.clone(),
-            token_ids_pending: self.token_ids_pending.clone(),
-            kv_page_ids: self.kv_page_ids.clone(),
-            kv_page_last_len: self.kv_page_size,
-            kv_page_size: self.kv_page_size,
-        }
     }
 
     /// Creates a safe, copy-on-write fork of the context.
@@ -240,46 +227,6 @@ impl Context {
         self.queue.deallocate_embeds(&embed_ids);
     }
 
-    /// Generates text autoregressively until a stop condition is met.
-    ///
-    /// This function drives the text generation loop. In each iteration, it calls
-    /// `decode_step()` to get a probability distribution, uses the provided `sampler`
-    /// to choose the next token, and adds it to the context. The loop continues
-    /// until the `stop_condition` signals that generation should end.
-    ///
-    /// # Arguments
-    ///
-    /// * `sampler`: A mutable reference to a struct implementing the `Sampler` trait,
-    ///   which will be used to sample a token from the model's output distribution at each step.
-    /// * `stop_condition`: A mutable reference to a struct implementing the `StopCondition`
-    ///   trait, which determines when to halt the generation process.
-    ///
-    /// # Returns
-    ///
-    /// A `Result` containing the generated `String` upon successful completion.
-    pub async fn generate<S: Sampler, C: StopCondition>(
-        &mut self,
-        sampler: &mut S,
-        stop_condition: &mut C,
-    ) -> String {
-        let mut generated_token_ids = Vec::new();
-
-        // The autoregressive generation loop
-        loop {
-            let dist = self.decode_step().await;
-            let next_token_id = sampler.sample(&dist.ids, &dist.probs);
-            self.fill_token(next_token_id);
-
-            generated_token_ids.push(next_token_id);
-
-            if stop_condition.should_stop(&generated_token_ids) {
-                break;
-            }
-        }
-
-        self.tokenizer.detokenize(&generated_token_ids)
-    }
-
     /// Performs a single, atomic autoregressive decoding step.
     ///
     /// This function is the core of the generation process. It takes the last token
@@ -341,42 +288,144 @@ impl Context {
         sampled.into_iter().next().unwrap()
     }
 
+    /// Generates text autoregressively until a stop condition is met.
+    ///
+    /// This function drives the text generation loop. In each iteration, it calls
+    /// `decode_step()` to get a probability distribution, uses the provided `sampler`
+    /// to choose the next token, and adds it to the context. The loop continues
+    /// until the `stop_condition` signals that generation should end.
+    ///
+    /// # Arguments
+    ///
+    /// * `sampler`: A mutable reference to a struct implementing the `Sampler` trait,
+    ///   which will be used to sample a token from the model's output distribution at each step.
+    /// * `stop_condition`: A mutable reference to a struct implementing the `StopCondition`
+    ///   trait, which determines when to halt the generation process.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing the generated `String` upon successful completion.
+    pub async fn generate<S: Sampler, C: StopCondition>(
+        &mut self,
+        sampler: &mut S,
+        stop_condition: &mut C,
+    ) -> String {
+        let mut generated_token_ids = Vec::new();
+
+        // The autoregressive generation loop
+        loop {
+            let dist = self.decode_step().await;
+            let next_token_id = sampler.sample(&dist.ids, &dist.probs);
+            self.fill_token(next_token_id);
+
+            generated_token_ids.push(next_token_id);
+
+            if stop_condition.should_stop(&generated_token_ids) {
+                break;
+            }
+        }
+
+        self.tokenizer.detokenize(&generated_token_ids)
+    }
+
+    /// Generates text using beam search decoding until a stop condition is met.
+    ///
+    /// Beam search is an autoregressive decoding algorithm that explores multiple
+    /// potential sequences (hypotheses) simultaneously. At each step, it maintains
+    /// a set of `beam_size` candidate sequences, called "beams."
+    ///
+    /// # Algorithm
+    /// 1.  **Expansion**: For each existing beam, the model predicts the probability
+    ///     distribution for the next token. The top `beam_size` most likely next
+    ///     tokens are used to create new, longer candidate beams.
+    /// 2.  **Scoring**: Each new beam's score is calculated by adding the
+    ///     log probability of the new token to the score of its parent beam.
+    /// 3.  **Pruning**: All new candidate beams from all parents are gathered,
+    ///     sorted by their score in descending order, and only the top `beam_size`
+    ///     are kept for the next generation step.
+    /// 4.  **Termination**: The generation loop continues until the highest-scoring
+    ///     beam in the current set satisfies the `stop_condition`. The text from
+    ///     this winning beam is then returned. Note that this heuristic stops at the
+    ///     first valid complete beam and may not be the global highest-scoring sequence.
+    ///
+    /// # Side Effects
+    /// Upon completion, this method **modifies the `Context` (`self`)** to adopt the
+    /// full state (token history and KV cache) of the winning beam.
+    ///
+    /// # Arguments
+    ///
+    /// * `stop_condition`: A mutable reference to a struct implementing the
+    ///   `StopCondition` trait. The generation process will halt once the condition
+    ///   is met by the highest-scoring beam.
+    /// * `beam_size`: The number of candidate sequences to maintain at each step.
+    ///   A larger `beam_size` increases the search space and potential quality at the
+    ///   cost of computational resources.
+    ///
+    /// # Returns
+    ///
+    /// A `String` containing the generated text from the winning beam.
     pub async fn generate_with_beam<C: StopCondition>(
         &mut self,
         stop_condition: &mut C,
         beam_size: usize,
     ) -> String {
         let mut beams = Vec::new();
-        beams.push((self.fork(), vec![], 0.0f32));
+        // The score is the cumulative probability, starting at 1.0.
+        beams.push((self.fork(), vec![], 1.0f32));
 
         loop {
-            if let Some((_, generated_tokens, _)) = beams
-                .iter()
-                .find(|(_, genx, _)| stop_condition.should_stop(genx))
+            // Beams are sorted by score, so the first match is the best valid one found so far.
+            if let Some((beam, generated_tokens, _)) =
+                beams.iter().find(|(_, g, _)| stop_condition.should_stop(g))
             {
+                // Deallocate the pages previously held by `self`.
+                let old_pages = mem::take(&mut self.kv_page_ids);
+                self.queue.deallocate_kv_pages(&old_pages);
+
+                // Adopt the state from the winning beam.
+                self.kv_page_last_len = beam.kv_page_last_len;
+                self.token_ids = beam.token_ids.clone();
+                self.token_ids_pending = beam.token_ids_pending.clone();
+                self.kv_page_ids = beam.kv_page_ids.clone();
+
+                // Increment the ref count for the newly adopted pages, as `self` is a new owner.
+                self.queue.increase_ref_count(&self.kv_page_ids);
+
                 return self.tokenizer.detokenize(generated_tokens);
             }
 
+            // Progress the beams in parallel.
+            let mut next_dist_futures = Vec::with_capacity(beams.len());
+            for (beam, _, _) in beams.iter_mut() {
+                let next_dist = beam.decode_step();
+                next_dist_futures.push(next_dist);
+            }
+
+            // Wait for all forward passes to complete.
+            let next_dists = join_all(next_dist_futures).await;
+
             let mut next_beams = Vec::new();
-            for (mut beam, generated, score) in beams.into_iter() {
-                let next_dist = beam.decode_step().await;
+            for ((mut beam, generated, score), next_dist) in beams.into_iter().zip(next_dists) {
+                // Expand this beam with the top candidates.
                 for i in 0..beam_size.min(next_dist.ids.len()) {
                     let mut next_beam = beam.fork();
+                    // We assume the distribution is sorted by probability in descending order.
                     next_beam.fill_token(next_dist.ids[i]);
+
                     let mut next_generated = generated.clone();
                     next_generated.push(next_dist.ids[i]);
-                    let next_score = score + next_dist.probs[i];
+
+                    // Update score by multiplying probabilities.
+                    let next_score = score * next_dist.probs[i];
+
                     next_beams.push((next_beam, next_generated, next_score));
                 }
             }
 
+            // Prune: Sort all new candidates by score and keep only the top `beam_size`.
             next_beams.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
             next_beams.truncate(beam_size);
             beams = next_beams;
-
-            if beams.is_empty() {
-                return String::new(); // Or handle as an error
-            }
         }
     }
 
