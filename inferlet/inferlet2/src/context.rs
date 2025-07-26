@@ -6,7 +6,7 @@ use crate::{
     allocate, core, forward, input_text, output_text_async, sampler, stop_condition, tokenize,
 };
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::{fmt, mem};
 
@@ -39,6 +39,78 @@ impl Allocator for EmbedAllocator {
     }
 }
 
+thread_local! {
+    static KV_PAGE_POOL: RefCell<HashMap<u32, Rc<RefCell<RcResourcePool<KvPageAllocator>>>>> = RefCell::new(HashMap::new());
+    static EMBED_POOL: RefCell<HashMap<u32, Rc<RefCell<ResourcePool<EmbedAllocator>>>>> = RefCell::new(HashMap::new());
+}
+
+/// Helper function to get the KV page pool for a given queue.
+/// It accesses the global `OnceCell` and initializes the pool map on first use.
+fn get_kv_page_pool(queue: &core::Queue) -> Rc<RefCell<RcResourcePool<KvPageAllocator>>> {
+    let service_id = queue.get_service_id();
+
+    // Use .with() to access the thread-local static.
+    KV_PAGE_POOL.with(|pools| {
+        // Borrow the map mutably to insert a new pool if needed for this service_id.
+        let mut pools_map = pools.borrow_mut();
+        pools_map
+            .entry(service_id)
+            .or_insert_with(|| {
+                let new_pool = RcResourcePool::new(KvPageAllocator {}, u32::MAX, true, 20);
+                Rc::new(RefCell::new(new_pool))
+            })
+            .clone()
+    })
+}
+
+fn get_embed_pool(queue: &core::Queue) -> Rc<RefCell<ResourcePool<EmbedAllocator>>> {
+    let service_id = queue.get_service_id();
+
+    EMBED_POOL.with(|pools| {
+        let mut pools_map = pools.borrow_mut();
+        pools_map
+            .entry(service_id)
+            .or_insert_with(|| {
+                let new_pool = ResourcePool::new(EmbedAllocator {}, u32::MAX, true, 20);
+                Rc::new(RefCell::new(new_pool))
+            })
+            .clone()
+    })
+}
+
+pub fn allocate_kv_pages(queue: &core::Queue, count: usize) -> Result<Vec<u32>, ContextError> {
+    let pool = get_kv_page_pool(queue);
+    pool.borrow_mut()
+        .acquire_many(queue, count)
+        .map_err(|_| ContextError::OutOfMemory("Failed to allocate KV pages".to_string()))
+}
+
+pub fn deallocate_kv_pages(queue: &core::Queue, ids: &[u32]) -> Result<(), ContextError> {
+    let pool = get_kv_page_pool(queue);
+    pool.borrow_mut()
+        .release_many(queue, ids)
+        .map_err(|_| ContextError::OutOfMemory("Failed to deallocate KV pages".to_string()))
+}
+
+pub fn increment_rc_kv_pages(queue: &core::Queue, ids: &[u32]) {
+    let pool = get_kv_page_pool(queue);
+    pool.borrow_mut().increment_rc_many(ids);
+}
+
+pub fn allocate_embeds(queue: &core::Queue, count: usize) -> Result<Vec<u32>, ContextError> {
+    let pool = get_embed_pool(queue);
+    pool.borrow_mut()
+        .acquire_many(queue, count)
+        .map_err(|_| ContextError::OutOfMemory("Failed to allocate embeds".to_string()))
+}
+
+pub fn deallocate_embeds(queue: &core::Queue, ids: &[u32]) -> Result<(), ContextError> {
+    let pool = get_embed_pool(queue);
+    pool.borrow_mut()
+        .release_many(queue, ids)
+        .map_err(|_| ContextError::OutOfMemory("Failed to deallocate embeds".to_string()))
+}
+
 #[derive(Debug)]
 pub struct Context {
     queue: core::Queue,
@@ -51,9 +123,6 @@ pub struct Context {
     pending_token_ids: Vec<u32>,
 
     kv_page_size: usize,
-
-    kv_page_pool: Rc<RefCell<RcResourcePool<KvPageAllocator>>>,
-    embed_pool: Rc<RefCell<ResourcePool<EmbedAllocator>>>,
 
     tokenizer: Rc<tokenize::Tokenizer>,
 }
@@ -76,7 +145,7 @@ impl fmt::Display for ContextError {
 impl Drop for Context {
     fn drop(&mut self) {
         let taken = mem::take(&mut self.kv_page_ids);
-        self.deallocate_kv_pages(&taken).unwrap();
+        deallocate_kv_pages(&self.queue, &taken).unwrap();
     }
 }
 
@@ -87,8 +156,6 @@ impl Context {
         let queue = model.create_queue();
         let kv_page_size = allocate::get_kv_page_size(&queue) as usize;
         let tokenizer = tokenize::get_tokenizer(&queue);
-        let kv_page_pool = RcResourcePool::new(KvPageAllocator {}, u32::MAX, true, 20);
-        let embed_pool = ResourcePool::new(EmbedAllocator {}, u32::MAX, false, 100);
 
         Ok(Context {
             queue,
@@ -98,8 +165,6 @@ impl Context {
             token_ids: Vec::new(),
             pending_token_ids: Vec::new(),
             kv_page_size,
-            kv_page_pool: Rc::new(RefCell::new(kv_page_pool)),
-            embed_pool: Rc::new(RefCell::new(embed_pool)),
             tokenizer: Rc::new(tokenizer),
         })
     }
@@ -111,7 +176,6 @@ impl Context {
         // Store the returned Vec<String> in a variable to extend its lifetime.
         let available_traits_vec = model.get_traits();
 
-        // Now, the HashSet can safely borrow from `available_traits_vec`.
         let available_traits: HashSet<&str> =
             available_traits_vec.iter().map(String::as_str).collect();
 
@@ -141,45 +205,13 @@ impl Context {
         self.tokenizer.detokenize(&self.token_ids)
     }
 
-    fn allocate_kv_pages(&mut self, count: usize) -> Result<Vec<u32>, ContextError> {
-        self.kv_page_pool
-            .borrow_mut()
-            .acquire_many(&self.queue, count)
-            .map_err(|_| ContextError::OutOfMemory("Failed to allocate KV pages".to_string()))
-    }
-
-    fn allocate_embeds(&mut self, count: usize) -> Result<Vec<u32>, ContextError> {
-        self.embed_pool
-            .borrow_mut()
-            .acquire_many(&self.queue, count)
-            .map_err(|_| ContextError::OutOfMemory("Failed to allocate embeds".to_string()))
-    }
-
-    fn deallocate_kv_pages(&mut self, ids: &[u32]) -> Result<(), ContextError> {
-        self.kv_page_pool
-            .borrow_mut()
-            .release_many(&self.queue, ids)
-            .map_err(|_| ContextError::OutOfMemory("Failed to deallocate KV pages".to_string()))
-    }
-
-    fn deallocate_embeds(&mut self, ids: &[u32]) -> Result<(), ContextError> {
-        self.embed_pool
-            .borrow_mut()
-            .release_many(&self.queue, ids)
-            .map_err(|_| ContextError::OutOfMemory("Failed to deallocate embeds".to_string()))
-    }
-
     pub fn fork_unsafe(&self) -> Self {
-        self.kv_page_pool
-            .borrow_mut()
-            .increment_rc_many(&self.kv_page_ids);
+        increment_rc_kv_pages(&self.queue, &self.kv_page_ids);
 
         Context {
             queue: self.model.create_queue(),
             model: self.model.clone(),
             kv_page_size: self.kv_page_size,
-            kv_page_pool: self.kv_page_pool.clone(),
-            embed_pool: self.embed_pool.clone(),
             tokenizer: self.tokenizer.clone(),
             kv_page_ids: self.kv_page_ids.clone(),
             last_kv_page_len: self.kv_page_size,
@@ -200,8 +232,6 @@ impl Context {
                 queue: self.model.create_queue(),
                 model: self.model.clone(),
                 kv_page_size: self.kv_page_size,
-                kv_page_pool: self.kv_page_pool.clone(),
-                embed_pool: self.embed_pool.clone(),
                 tokenizer: self.tokenizer.clone(),
                 kv_page_ids: self.kv_page_ids.clone(),
                 last_kv_page_len: self.kv_page_size,
@@ -229,8 +259,6 @@ impl Context {
                 queue: self.model.create_queue(),
                 model: self.model.clone(),
                 kv_page_size: self.kv_page_size,
-                kv_page_pool: self.kv_page_pool.clone(),
-                embed_pool: self.embed_pool.clone(),
                 tokenizer: self.tokenizer.clone(),
                 kv_page_ids: forked_kv_page_ids,
                 last_kv_page_len: forked_last_kv_page_len,
@@ -240,9 +268,7 @@ impl Context {
         };
 
         // increase the refcount
-        self.kv_page_pool
-            .borrow_mut()
-            .increment_rc_many(&forked.kv_page_ids);
+        increment_rc_kv_pages(&forked.queue, &forked.kv_page_ids);
 
         forked
     }
@@ -284,7 +310,7 @@ impl Context {
             ..(self.token_ids.len() + pending_token_ids.len()) as u32)
             .collect::<Vec<u32>>();
 
-        let embed_ids = self.allocate_embeds(pending_token_ids.len()).unwrap();
+        let embed_ids = allocate_embeds(&self.queue, pending_token_ids.len()).unwrap();
         input_text::embed_text(&self.queue, &embed_ids, &pending_token_ids, &position_ids);
 
         let available_space = if !self.kv_page_ids.is_empty() {
@@ -296,7 +322,7 @@ impl Context {
         if pending_token_ids.len() > available_space {
             let needed_page_count =
                 (pending_token_ids.len() - available_space).div_ceil(self.kv_page_size);
-            let new_kv_page_ids = self.allocate_kv_pages(needed_page_count).unwrap();
+            let new_kv_page_ids = allocate_kv_pages(&self.queue, needed_page_count).unwrap();
             self.kv_page_ids.extend(new_kv_page_ids);
 
             let remaining_tokens = (pending_token_ids.len() - available_space) % self.kv_page_size;
@@ -319,7 +345,7 @@ impl Context {
 
         self.token_ids.extend(pending_token_ids);
 
-        self.deallocate_embeds(&embed_ids).unwrap();
+        deallocate_embeds(&self.queue, &embed_ids).unwrap();
     }
 
     pub async fn apply_sink(&mut self, sink_size: usize, window_size: usize) {
@@ -371,8 +397,8 @@ impl Context {
         );
 
         let mut generated_token_ids = Vec::new();
-        let input_embed_id = self.allocate_embeds(1).unwrap();
-        let output_embed_id = self.allocate_embeds(1).unwrap();
+        let input_embed_id = allocate_embeds(&self.queue, 1).unwrap();
+        let output_embed_id = allocate_embeds(&self.queue, 1).unwrap();
 
         let mut next_token_id = self.pending_token_ids[0];
         let mut next_pos_id = self.token_ids.len() as u32;
@@ -386,7 +412,7 @@ impl Context {
             );
 
             if self.last_kv_page_len == self.kv_page_size || self.kv_page_ids.is_empty() {
-                let new_kv_page_ids = self.allocate_kv_pages(1).unwrap();
+                let new_kv_page_ids = allocate_kv_pages(&self.queue, 1).unwrap();
                 self.kv_page_ids.extend(new_kv_page_ids);
                 self.last_kv_page_len = 1;
             } else {
@@ -422,8 +448,8 @@ impl Context {
 
         self.pending_token_ids.clear();
         self.pending_token_ids.push(next_token_id);
-        self.deallocate_embeds(&input_embed_id).unwrap();
-        self.deallocate_embeds(&output_embed_id).unwrap();
+        deallocate_embeds(&self.queue, &input_embed_id).unwrap();
+        deallocate_embeds(&self.queue, &output_embed_id).unwrap();
 
         self.tokenizer.detokenize(&generated_token_ids)
     }
@@ -439,8 +465,8 @@ impl Context {
             "Context must be filled before generation"
         );
 
-        let input_embed_id = self.allocate_embeds(1).unwrap();
-        let output_embed_id = self.allocate_embeds(1).unwrap();
+        let input_embed_id = allocate_embeds(&self.queue, 1).unwrap();
+        let output_embed_id = allocate_embeds(&self.queue, 1).unwrap();
 
         let next_token_id = self.pending_token_ids.pop().unwrap();
         let next_pos_id = self.token_ids.len() as u32;
@@ -453,7 +479,7 @@ impl Context {
         );
 
         if self.last_kv_page_len == self.kv_page_size || self.kv_page_ids.is_empty() {
-            let new_kv_page_ids = self.allocate_kv_pages(1).unwrap();
+            let new_kv_page_ids = allocate_kv_pages(&self.queue, 1).unwrap();
             self.kv_page_ids.extend(new_kv_page_ids);
             self.last_kv_page_len = 1;
         } else {
@@ -474,8 +500,8 @@ impl Context {
 
         self.token_ids.push(next_token_id);
 
-        self.deallocate_embeds(&input_embed_id).unwrap();
-        self.deallocate_embeds(&output_embed_id).unwrap();
+        deallocate_embeds(&self.queue, &input_embed_id).unwrap();
+        deallocate_embeds(&self.queue, &output_embed_id).unwrap();
 
         sampled.into_iter().next().unwrap()
     }
@@ -549,8 +575,8 @@ impl Context {
                 res
             };
 
-            let input_embed_id = self.allocate_embeds(combined_token_ids.len()).unwrap();
-            let output_embed_id = self.allocate_embeds(combined_token_ids.len()).unwrap();
+            let input_embed_id = allocate_embeds(&self.queue, combined_token_ids.len()).unwrap();
+            let output_embed_id = allocate_embeds(&self.queue, combined_token_ids.len()).unwrap();
 
             input_text::embed_text(
                 &self.queue,
@@ -564,7 +590,7 @@ impl Context {
                 let needed_page_count =
                     (combined_token_ids.len() - available_space).div_ceil(self.kv_page_size);
 
-                let new_kv_page_ids = self.allocate_kv_pages(needed_page_count).unwrap();
+                let new_kv_page_ids = allocate_kv_pages(&self.queue, needed_page_count).unwrap();
                 self.kv_page_ids.extend(new_kv_page_ids);
                 self.last_kv_page_len = (self.token_ids.len() + combined_token_ids.len())
                     - (self.kv_page_ids.len() - 1) * self.kv_page_size;
@@ -607,12 +633,12 @@ impl Context {
             } else {
                 let mut remaining_redundancy = redundant_token_count - self.last_kv_page_len;
                 let redundant = self.kv_page_ids.pop().unwrap();
-                self.deallocate_kv_pages(&[redundant]).unwrap();
+                deallocate_kv_pages(&self.queue, &[redundant]).unwrap();
 
                 while remaining_redundancy > self.kv_page_size {
                     let redundant = self.kv_page_ids.pop().unwrap();
 
-                    self.deallocate_kv_pages(&[redundant]).unwrap();
+                    deallocate_kv_pages(&self.queue, &[redundant]).unwrap();
                     remaining_redundancy -= self.kv_page_size;
                 }
                 self.last_kv_page_len = self.kv_page_size - remaining_redundancy;
@@ -627,8 +653,8 @@ impl Context {
                 self.token_ids.extend(&next_token_ids);
             }
 
-            self.deallocate_embeds(&input_embed_id).unwrap();
-            self.deallocate_embeds(&output_embed_id).unwrap();
+            deallocate_embeds(&self.queue, &input_embed_id).unwrap();
+            deallocate_embeds(&self.queue, &output_embed_id).unwrap();
         }
 
         self.pending_token_ids.clear();

@@ -185,7 +185,11 @@ impl bindings2::pie::inferlet::core::HostModel for InstanceState {
     }
     async fn get_traits(&mut self, _this: Resource<Model>) -> anyhow::Result<Vec<String>> {
         // Placeholder
-        Ok(vec![])
+        Ok(vec![
+            "input_text".to_string(),
+            "tokenize".to_string(),
+            "output_text".to_string(),
+        ])
     }
     async fn get_description(&mut self, _this: Resource<Model>) -> anyhow::Result<String> {
         // Placeholder
@@ -203,6 +207,11 @@ impl bindings2::pie::inferlet::core::HostModel for InstanceState {
         // Placeholder
         Ok("".to_string())
     }
+
+    async fn get_service_id(&mut self, this: Resource<Model>) -> anyhow::Result<u32> {
+        Ok(self.table().get(&this)?.service_id as u32)
+    }
+
     async fn create_queue(&mut self, this: Resource<Model>) -> anyhow::Result<Resource<Queue>> {
         let model = self.table().get(&this)?;
         let queue = Queue {
@@ -227,6 +236,10 @@ impl bindings2::pie::inferlet::core::HostModel for InstanceState {
 }
 
 impl bindings2::pie::inferlet::core::HostQueue for InstanceState {
+    async fn get_service_id(&mut self, this: Resource<Queue>) -> anyhow::Result<u32> {
+        Ok(self.table().get(&this)?.service_id as u32)
+    }
+
     async fn synchronize(
         &mut self,
         this: Resource<Queue>,

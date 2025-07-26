@@ -44,6 +44,7 @@ interface core {
         get-version: func() -> string;               // Model version string (e.g. "1.0")
         get-license: func() -> string;               // License name (e.g. "Llama")
         get-prompt-template: func() -> string;       // Returns the prompt formatting template in Tera
+        get-service-id: func() -> u32;
         create-queue: func() -> queue;               // Create a new command queue
         debug-query: func(query: string) -> string;  // Sends a message to the model and returns the response
     }
@@ -57,6 +58,7 @@ interface core {
 
     // Queue resource with methods for synchronization and priority control
     resource queue {
+        get-service-id: func() -> u32;
         synchronize: func() -> synchronization-result; // Begin synchronization process
         set-priority: func(priority: priority);     // Change the queue's priority
     }
