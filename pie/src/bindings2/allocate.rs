@@ -1,7 +1,7 @@
 use crate::bindings2;
 use crate::bindings2::core;
 use crate::instance::InstanceState;
-use crate::l4m::{Command, ManagedTypes};
+use crate::model::{Command, ManagedTypes};
 use tokio::sync::oneshot;
 use wasmtime::component::Resource;
 use wasmtime_wasi::p2::IoView;

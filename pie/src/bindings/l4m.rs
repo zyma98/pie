@@ -1,8 +1,8 @@
 use crate::instance::InstanceState;
-use crate::l4m::{Command, ManagedTypes, StreamPriority};
+use crate::model::{Command, ManagedTypes, StreamPriority};
 use crate::object::IdRepr;
 use crate::tokenizer::BytePairEncoder;
-use crate::{bindings, l4m, service};
+use crate::{bindings, model, service};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use wasmtime::component::Resource;
@@ -78,7 +78,7 @@ fn map_object_types(ty: bindings::wit::pie::nbi::l4m::ObjectType) -> ManagedType
 
 impl bindings::wit::pie::nbi::l4m::Host for InstanceState {
     async fn get_model(&mut self, model_name: String) -> anyhow::Result<Option<Resource<Model>>> {
-        if let Some(service_id) = l4m::model_service_id(&model_name) {
+        if let Some(service_id) = model::model_service_id(&model_name) {
             let model = Model {
                 name: model_name,
                 service_id,
@@ -90,7 +90,7 @@ impl bindings::wit::pie::nbi::l4m::Host for InstanceState {
     }
 
     async fn get_all_models(&mut self) -> anyhow::Result<Vec<String>> {
-        Ok(l4m::available_models())
+        Ok(model::available_models())
     }
 }
 
