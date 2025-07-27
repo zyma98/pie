@@ -71,8 +71,8 @@ pub struct Cache {
 
 fn map_object_types(ty: bindings::wit::pie::nbi::l4m::ObjectType) -> ManagedTypes {
     match ty {
-        bindings::wit::pie::nbi::l4m::ObjectType::Block => ManagedTypes::KvBlock,
-        bindings::wit::pie::nbi::l4m::ObjectType::Embed => ManagedTypes::TokenEmb,
+        bindings::wit::pie::nbi::l4m::ObjectType::Block => ManagedTypes::KvPage,
+        bindings::wit::pie::nbi::l4m::ObjectType::Embed => ManagedTypes::Embed,
     }
 }
 
@@ -193,13 +193,13 @@ impl bindings::wit::pie::nbi::l4m::HostModel for InstanceState {
     ) -> Result<(), wasmtime::Error> {
         let service_id = self.table().get(&model)?.service_id;
 
-        Command::FillBlock {
+        Command::Forward {
             inst_id: self.id(),
             stream_id,
-            last_block_len: last_block_len,
-            context: context_block_ids,
-            inputs: input_emb_ids,
-            outputs: output_emb_ids,
+            kv_page_last_len: last_block_len,
+            kv_pages: context_block_ids,
+            input_embeds: input_emb_ids,
+            output_embeds: output_emb_ids,
         }
         .dispatch(service_id)?;
         Ok(())
@@ -217,13 +217,13 @@ impl bindings::wit::pie::nbi::l4m::HostModel for InstanceState {
     ) -> Result<(), wasmtime::Error> {
         let service_id = self.table().get(&model)?.service_id;
 
-        Command::FillBlock {
+        Command::Forward {
             inst_id: self.id(),
             stream_id,
-            last_block_len: last_block_len,
-            context: context_block_ids,
-            inputs: input_emb_ids,
-            outputs: output_emb_ids,
+            kv_page_last_len: last_block_len,
+            kv_pages: context_block_ids,
+            input_embeds: input_emb_ids,
+            output_embeds: output_emb_ids,
         }
         .dispatch(service_id)?;
         Ok(())
@@ -241,11 +241,11 @@ impl bindings::wit::pie::nbi::l4m::HostModel for InstanceState {
     ) -> Result<(), wasmtime::Error> {
         let service_id = self.table().get(&model)?.service_id;
 
-        Command::CopyBlock {
+        Command::CopyKvPage {
             inst_id: self.id(),
             stream_id,
-            src_block: src_block_id,
-            dst_block: dst_block_id,
+            src_kv_page: src_block_id,
+            dst_kv_page: dst_block_id,
             src_token_offset: src_offset,
             dst_token_offset: dst_offset,
             size,
@@ -263,10 +263,10 @@ impl bindings::wit::pie::nbi::l4m::HostModel for InstanceState {
     ) -> Result<(), wasmtime::Error> {
         let service_id = self.table().get(&model)?.service_id;
 
-        Command::MaskBlock {
+        Command::MaskKvPage {
             inst_id: self.id(),
             stream_id,
-            block: block_id,
+            kv_page: block_id,
             mask,
         }
         .dispatch(service_id)?;
@@ -281,9 +281,9 @@ impl bindings::wit::pie::nbi::l4m::HostModel for InstanceState {
     ) -> Result<(), wasmtime::Error> {
         let service_id = self.table().get(&model)?.service_id;
 
-        Command::ExportBlocks {
+        Command::ExportKvPages {
             inst_id: self.id(),
-            blocks: src_block_ids,
+            pages: src_block_ids,
             resource_name: name,
         }
         .dispatch(service_id)?;
@@ -298,9 +298,9 @@ impl bindings::wit::pie::nbi::l4m::HostModel for InstanceState {
     ) -> Result<(), wasmtime::Error> {
         let service_id = self.table().get(&model)?.service_id;
 
-        Command::ImportBlocks {
+        Command::ImportKvPages {
             inst_id: self.id(),
-            blocks: dst_block_ids,
+            kv_pages: dst_block_ids,
             resource_name: name,
         }
         .dispatch(service_id)?;

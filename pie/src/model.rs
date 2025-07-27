@@ -234,41 +234,41 @@ pub enum Command {
         ids: Vec<IdRepr>,
     },
 
-    FillBlock {
+    Forward {
         inst_id: InstanceId,
         stream_id: LocalStreamId,
-        last_block_len: u32,
-        context: Vec<IdRepr>,
-        inputs: Vec<IdRepr>,
-        outputs: Vec<IdRepr>,
+        kv_page_last_len: u32,
+        kv_pages: Vec<IdRepr>,
+        input_embeds: Vec<IdRepr>,
+        output_embeds: Vec<IdRepr>,
     },
 
-    ExportBlocks {
+    ExportKvPages {
         inst_id: InstanceId,
-        blocks: Vec<IdRepr>,
+        pages: Vec<IdRepr>,
         resource_name: String,
     },
 
-    ImportBlocks {
+    ImportKvPages {
         inst_id: InstanceId,
-        blocks: Vec<IdRepr>,
+        kv_pages: Vec<IdRepr>,
         resource_name: String,
     },
 
-    CopyBlock {
+    CopyKvPage {
         inst_id: InstanceId,
         stream_id: LocalStreamId,
-        src_block: IdRepr,
-        dst_block: IdRepr,
+        src_kv_page: IdRepr,
+        dst_kv_page: IdRepr,
         src_token_offset: u32,
         dst_token_offset: u32,
         size: u32,
     },
 
-    MaskBlock {
+    MaskKvPage {
         inst_id: InstanceId,
         stream_id: LocalStreamId,
-        block: IdRepr,
+        kv_page: IdRepr,
         mask: Vec<bool>,
     },
 
@@ -283,8 +283,8 @@ pub enum Command {
     ForwardText {
         inst_id: InstanceId,
         stream_id: LocalStreamId,
-        last_block_len: u32,
-        context: Vec<IdRepr>,
+        kv_page_last_len: u32,
+        kv_pages: Vec<IdRepr>,
         text: Vec<u32>,
         positions: Vec<u32>,
         output_indices: Vec<u32>,
@@ -353,7 +353,7 @@ impl Batchable<BatchGroup> for Command {
                 //batching::t_only(Duration::from_micros(100))
                 batching::eager()
             }
-            Command::FillBlock { .. } => {
+            Command::Forward { .. } => {
                 //
                 //batching::k_or_t(Duration::from_millis(10), 30, None)
                 // 7ms, 14ms
@@ -364,8 +364,8 @@ impl Batchable<BatchGroup> for Command {
                     TRIGGERS.fill_block_trigger.clone(),
                 ))
             }
-            Command::CopyBlock { .. } => batching::eager(),
-            Command::MaskBlock { .. } => batching::eager(),
+            Command::CopyKvPage { .. } => batching::eager(),
+            Command::MaskKvPage { .. } => batching::eager(),
             Command::EmbedText { .. } => {
                 //batching::t_only(Duration::from_micros(100))
                 batching::eager()
@@ -394,9 +394,9 @@ impl Batchable<BatchGroup> for Command {
             Command::GetInfo { .. } => BatchGroup::GetInfo,
             Command::Allocate { .. } => BatchGroup::Allocate,
             Command::Deallocate { .. } => BatchGroup::Deallocate,
-            Command::FillBlock { .. } => BatchGroup::FillBlock,
-            Command::CopyBlock { .. } => BatchGroup::CopyBlock,
-            Command::MaskBlock { .. } => BatchGroup::MaskBlock,
+            Command::Forward { .. } => BatchGroup::FillBlock,
+            Command::CopyKvPage { .. } => BatchGroup::CopyBlock,
+            Command::MaskKvPage { .. } => BatchGroup::MaskBlock,
             Command::EmbedText { .. } => BatchGroup::EmbedText,
             Command::ForwardText { .. } => BatchGroup::ForwardText,
             Command::SampleTopK { .. } => BatchGroup::SampleTopK,
@@ -416,22 +416,22 @@ pub enum Event {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ManagedTypes {
-    KvBlock,
-    TokenEmb,
+    KvPage,
+    Embed,
 }
 
 impl ObjectType for ManagedTypes {
     fn is_sharable(&self) -> bool {
         match self {
-            ManagedTypes::KvBlock => true,
-            ManagedTypes::TokenEmb => false,
+            ManagedTypes::KvPage => true,
+            ManagedTypes::Embed => false,
         }
     }
 
     fn allow_remapping(&self) -> bool {
         match self {
-            ManagedTypes::KvBlock => false,
-            ManagedTypes::TokenEmb => true,
+            ManagedTypes::KvPage => false,
+            ManagedTypes::Embed => true,
         }
     }
 }
@@ -508,10 +508,10 @@ impl L4m {
 
         let mut objects = ObjectManager::new();
         objects
-            .set_capacity(ManagedTypes::KvBlock, info.num_kv_pages as IdRepr)
+            .set_capacity(ManagedTypes::KvPage, info.num_kv_pages as IdRepr)
             .unwrap();
         objects
-            .set_capacity(ManagedTypes::TokenEmb, info.num_embeddings as IdRepr)
+            .set_capacity(ManagedTypes::Embed, info.num_embeddings as IdRepr)
             .unwrap();
 
         let driver = Self {
@@ -531,15 +531,15 @@ impl L4m {
 
     pub fn print_stats(&self) {
         let mut stats = Vec::new();
-        for &managed_type in &[ManagedTypes::KvBlock, ManagedTypes::TokenEmb] {
+        for &managed_type in &[ManagedTypes::KvPage, ManagedTypes::Embed] {
             let current = self.objects.available(managed_type).unwrap();
             let capacity: usize = self.objects.capacity(managed_type).unwrap() as usize;
             let used = capacity - current;
             let percentage = (used as f32 / capacity as f32) * 100.0;
 
             let type_name = match managed_type {
-                ManagedTypes::KvBlock => "kvpage",
-                ManagedTypes::TokenEmb => "emb",
+                ManagedTypes::KvPage => "kvpage",
+                ManagedTypes::Embed => "emb",
                 // _ => "unknown",
             };
 
@@ -557,7 +557,7 @@ impl L4m {
     fn get_cleanup_cmds(&mut self, inst_id: InstanceId) -> Vec<Command> {
         let mut cmds = Vec::new();
 
-        for ty in [ManagedTypes::KvBlock, ManagedTypes::TokenEmb] {
+        for ty in [ManagedTypes::KvPage, ManagedTypes::Embed] {
             if let Ok(ids) = self.objects.all_names(ty, inst_id) {
                 cmds.push(Command::Deallocate {
                     inst_id,
@@ -654,7 +654,7 @@ impl L4m {
                         );
 
                         // Deallocate all resources for the victim instance.
-                        for resource_type in [ManagedTypes::KvBlock, ManagedTypes::TokenEmb] {
+                        for resource_type in [ManagedTypes::KvPage, ManagedTypes::Embed] {
                             if let Ok(victim_ids) = self.objects.all_names(resource_type, victim_id)
                             {
                                 if !victim_ids.is_empty() {
@@ -678,7 +678,10 @@ impl L4m {
 
                         self.instance_launch_order.remove(victim_index);
 
-                        runtime::trap(victim_id, "terminated due to resource contention");
+                        runtime::trap(
+                            victim_id,
+                            "terminated by the system, due to resource contention",
+                        );
                     } else {
                         runtime::trap(
                             inst_id,
@@ -741,36 +744,36 @@ impl L4m {
                 ))
             }
 
-            Command::FillBlock {
+            Command::Forward {
                 inst_id,
                 stream_id,
-                last_block_len,
-                mut context,
-                mut inputs,
-                mut outputs,
+                kv_page_last_len,
+                mut kv_pages,
+                mut input_embeds,
+                mut output_embeds,
             } => {
-                if last_block_len == 0 || last_block_len > self.info.kv_page_size {
+                if kv_page_last_len == 0 || kv_page_last_len > self.info.kv_page_size {
                     // error
                     runtime::trap(
                         inst_id,
                         format!(
-                            "l4m::fill_block failed. last_block_len ({}) is 0 or greater than the block size ({})",
-                            last_block_len, self.info.kv_page_size
+                            "forward failed. kv_page_last_len ({}) is 0 or greater than the page size ({})",
+                            kv_page_last_len, self.info.kv_page_size
                         ),
                     );
                     return None;
                 }
 
                 let max_tokens =
-                    self.info.kv_page_size * (context.len() as u32 - 1) + last_block_len;
+                    self.info.kv_page_size * (kv_pages.len() as u32 - 1) + kv_page_last_len;
 
-                if inputs.len() > max_tokens as usize {
+                if input_embeds.len() > max_tokens as usize {
                     // error
                     runtime::trap(
                         inst_id,
                         format!(
                             "l4m::fill_block failed. inputs length is greater than the max tokens: {} > {}",
-                            inputs.len(),
+                            input_embeds.len(),
                             max_tokens
                         ),
                     );
@@ -779,31 +782,31 @@ impl L4m {
 
                 try_trap!(
                     self.objects
-                        .translate_many(ManagedTypes::KvBlock, inst_id, &mut context),
+                        .translate_many(ManagedTypes::KvPage, inst_id, &mut kv_pages),
                     inst_id,
                     "l4m::fill_block failed. some context blocks are invalid"
                 );
                 try_trap!(
                     self.objects
-                        .translate_many(ManagedTypes::TokenEmb, inst_id, &mut inputs),
+                        .translate_many(ManagedTypes::Embed, inst_id, &mut input_embeds),
                     inst_id,
                     "l4m::fill_block failed. some input embeddings are invalid"
                 );
                 try_trap!(
                     self.objects
-                        .translate_many(ManagedTypes::TokenEmb, inst_id, &mut outputs),
+                        .translate_many(ManagedTypes::Embed, inst_id, &mut output_embeds),
                     inst_id,
                     "l4m::fill_block failed. some output embeddings are invalid"
                 );
 
                 Some((
-                    Command::FillBlock {
+                    Command::Forward {
                         inst_id,
                         stream_id,
-                        last_block_len,
-                        context,
-                        inputs,
-                        outputs,
+                        kv_page_last_len,
+                        kv_pages,
+                        input_embeds,
+                        output_embeds,
                     },
                     Stream::new(inst_id, stream_id),
                 ))
@@ -812,8 +815,8 @@ impl L4m {
             Command::ForwardText {
                 inst_id,
                 stream_id,
-                last_block_len,
-                mut context,
+                kv_page_last_len,
+                mut kv_pages,
                 text,
                 positions,
                 output_indices,
@@ -821,7 +824,7 @@ impl L4m {
             } => {
                 try_trap!(
                     self.objects
-                        .translate_many(ManagedTypes::KvBlock, inst_id, &mut context),
+                        .translate_many(ManagedTypes::KvPage, inst_id, &mut kv_pages),
                     inst_id,
                     "l4m::fill_block failed. some context blocks are invalid"
                 );
@@ -830,8 +833,8 @@ impl L4m {
                     Command::ForwardText {
                         inst_id,
                         stream_id,
-                        last_block_len,
-                        context,
+                        kv_page_last_len,
+                        kv_pages,
                         text,
                         positions,
                         output_indices,
@@ -841,14 +844,14 @@ impl L4m {
                 ))
             }
 
-            Command::ExportBlocks {
+            Command::ExportKvPages {
                 inst_id,
-                mut blocks,
+                pages: mut blocks,
                 resource_name,
             } => {
                 try_trap!(
                     self.objects
-                        .translate_many(ManagedTypes::KvBlock, inst_id, &mut blocks),
+                        .translate_many(ManagedTypes::KvPage, inst_id, &mut blocks),
                     inst_id,
                     "l4m::export_blocks failed. some blocks are invalid"
                 );
@@ -858,9 +861,9 @@ impl L4m {
                 None
             }
 
-            Command::ImportBlocks {
+            Command::ImportKvPages {
                 inst_id,
-                blocks,
+                kv_pages: blocks,
                 resource_name,
             } => {
                 let exported = match self.exported_blocks.get(&resource_name) {
@@ -879,7 +882,7 @@ impl L4m {
 
                 try_trap!(
                     self.objects.create_ref_many(
-                        ManagedTypes::KvBlock,
+                        ManagedTypes::KvPage,
                         inst_id,
                         blocks,
                         &exported.addrs
@@ -890,34 +893,34 @@ impl L4m {
                 None
             }
 
-            Command::CopyBlock {
+            Command::CopyKvPage {
                 inst_id,
                 stream_id,
-                mut src_block,
-                mut dst_block,
+                src_kv_page: mut src_block,
+                dst_kv_page: mut dst_block,
                 src_token_offset,
                 dst_token_offset,
                 size,
             } => {
                 try_trap!(
                     self.objects
-                        .translate(ManagedTypes::KvBlock, inst_id, &mut src_block),
+                        .translate(ManagedTypes::KvPage, inst_id, &mut src_block),
                     inst_id,
                     "l4m::copy_block failed. invalid source block"
                 );
                 try_trap!(
                     self.objects
-                        .translate(ManagedTypes::KvBlock, inst_id, &mut dst_block),
+                        .translate(ManagedTypes::KvPage, inst_id, &mut dst_block),
                     inst_id,
                     "l4m::copy_block failed. invalid destination block"
                 );
 
                 Some((
-                    Command::CopyBlock {
+                    Command::CopyKvPage {
                         inst_id,
                         stream_id,
-                        src_block,
-                        dst_block,
+                        src_kv_page: src_block,
+                        dst_kv_page: dst_block,
                         src_token_offset,
                         dst_token_offset,
                         size,
@@ -926,24 +929,24 @@ impl L4m {
                 ))
             }
 
-            Command::MaskBlock {
+            Command::MaskKvPage {
                 inst_id,
                 stream_id,
-                mut block,
+                kv_page: mut block,
                 mask,
             } => {
                 try_trap!(
                     self.objects
-                        .translate(ManagedTypes::KvBlock, inst_id, &mut block),
+                        .translate(ManagedTypes::KvPage, inst_id, &mut block),
                     inst_id,
                     "l4m::mask_block failed. invalid block"
                 );
 
                 Some((
-                    Command::MaskBlock {
+                    Command::MaskKvPage {
                         inst_id,
                         stream_id,
-                        block,
+                        kv_page: block,
                         mask,
                     },
                     Stream::new(inst_id, stream_id),
@@ -959,7 +962,7 @@ impl L4m {
             } => {
                 try_trap!(
                     self.objects
-                        .translate_many(ManagedTypes::TokenEmb, inst_id, &mut embs),
+                        .translate_many(ManagedTypes::Embed, inst_id, &mut embs),
                     inst_id,
                     "l4m::embed_text failed. invalid embeddings"
                 );
@@ -985,7 +988,7 @@ impl L4m {
             } => {
                 try_trap!(
                     self.objects
-                        .translate(ManagedTypes::TokenEmb, inst_id, &mut emb_id),
+                        .translate(ManagedTypes::Embed, inst_id, &mut emb_id),
                     inst_id,
                     "l4m::sample_topk failed. invalid distribution"
                 );
@@ -1033,7 +1036,7 @@ impl L4m {
             } => {
                 try_trap!(
                     self.objects
-                        .translate_many(ManagedTypes::TokenEmb, inst_id, &mut embs),
+                        .translate_many(ManagedTypes::Embed, inst_id, &mut embs),
                     inst_id,
                     "l4m::embed_image failed. invalid embeddings"
                 );
@@ -1388,8 +1391,8 @@ fn encode_pb_batch_allocate_inner(batch: Vec<Command>) -> Vec<pb_bindings::Alloc
                 ids,
             } => {
                 let kind = match ty {
-                    ManagedTypes::KvBlock => pb_bindings::ObjectKind::KvBlock,
-                    ManagedTypes::TokenEmb => pb_bindings::ObjectKind::Emb,
+                    ManagedTypes::KvPage => pb_bindings::ObjectKind::KvBlock,
+                    ManagedTypes::Embed => pb_bindings::ObjectKind::Emb,
                     _ => unreachable!(),
                 }
                 .into();
@@ -1426,8 +1429,8 @@ fn encode_pb_batch_deallocate_inner(batch: Vec<Command>) -> Vec<pb_bindings::Dea
                 ids,
             } => {
                 let kind = match ty {
-                    ManagedTypes::KvBlock => pb_bindings::ObjectKind::KvBlock,
-                    ManagedTypes::TokenEmb => pb_bindings::ObjectKind::Emb,
+                    ManagedTypes::KvPage => pb_bindings::ObjectKind::KvBlock,
+                    ManagedTypes::Embed => pb_bindings::ObjectKind::Emb,
                     _ => unreachable!(),
                 }
                 .into();
@@ -1485,13 +1488,13 @@ fn encode_pb_batch_fill_block(
     let mut items = Vec::new();
     for cmd in batch {
         match cmd {
-            Command::FillBlock {
+            Command::Forward {
                 inst_id: _,
                 stream_id: _,
-                last_block_len,
-                context,
-                inputs,
-                outputs,
+                kv_page_last_len: last_block_len,
+                kv_pages: context,
+                input_embeds: inputs,
+                output_embeds: outputs,
             } => {
                 let pb = pb_bindings::FillBlock {
                     last_block_len: last_block_len,
@@ -1524,8 +1527,8 @@ fn encode_pb_batch_forward_text(
             Command::ForwardText {
                 inst_id: _,
                 stream_id: _,
-                last_block_len,
-                context,
+                kv_page_last_len: last_block_len,
+                kv_pages: context,
                 text,
                 positions,
                 output_indices,
@@ -1560,11 +1563,11 @@ fn encode_pb_batch_copy_block(
     let mut items = Vec::new();
     for cmd in batch {
         match cmd {
-            Command::CopyBlock {
+            Command::CopyKvPage {
                 inst_id: _,
                 stream_id: _,
-                src_block,
-                dst_block,
+                src_kv_page: src_block,
+                dst_kv_page: dst_block,
                 src_token_offset,
                 dst_token_offset,
                 size,
@@ -1597,10 +1600,10 @@ fn encode_pb_batch_mask_block(
     let mut items = Vec::new();
     for cmd in batch {
         match cmd {
-            Command::MaskBlock {
+            Command::MaskKvPage {
                 inst_id: _,
                 stream_id: _,
-                block,
+                kv_page: block,
                 mask,
             } => {
                 let pb = pb_bindings::MaskBlock {
