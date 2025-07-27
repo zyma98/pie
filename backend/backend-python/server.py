@@ -123,8 +123,7 @@ def load_model(config: dict):
     metadata.architecture.dtype = getattr(torch, config.get('dtype', 'bfloat16'))
 
     model = L4maForCausalLM(metadata.architecture)
-    # ================= ELEGANT FUSION HANDLING: SETUP =================
-    print("Generating weight fusion map...")
+
     # 1. Map fused tensor names to their original sources
     fusion_map = create_fusion_map(model)
 
@@ -142,14 +141,14 @@ def load_model(config: dict):
     model_state_keys = set(model.state_dict().keys())
     loaded_keys = set()
 
-    print(f"Found {len(metadata.parameters)} parameter file(s) to load.")
+    # print(f"Found {len(metadata.parameters)} parameter file(s) to load.")
 
     try:
         for param_file in metadata.parameters:
             weights_path = os.path.join(model_path, model_name, param_file)
             # ... (existing file existence check) ...
 
-            print(f"Loading weights from ztensor file: {param_file}")
+            # print(f"Loading weights from ztensor file: {param_file}")
             with ztensor.Reader(weights_path) as reader:
                 tensors_in_file = reader.get_tensor_names()
 
@@ -172,8 +171,8 @@ def load_model(config: dict):
                         loaded_keys.add(name)
 
         # ================= ELEGANT FUSION HANDLING: PROCESSING =================
-        print("\nProcessing fused tensors...")
-        for target_name, details in tqdm(fusion_map.items(), desc="Fusing weights"):
+        # print("\nProcessing fused tensors...")
+        for target_name, details in fusion_map.items():
             source_names = details["sources"]
 
             # Check if all required source tensors have been collected
@@ -244,14 +243,14 @@ def start_service(config, model, model_metadata):
 
     # ===================================================================
     # RUN THE TEST ROUTINE AT STARTUP
-    run_test_routine(engine)
+    # run_test_routine(engine)
     # ===================================================================
 
     context = zmq.Context()
     router = context.socket(zmq.ROUTER)
     router.bind(real_endpoint)
 
-    print(f"Server listening on {endpoint}")
+    # print(f"Server listening on {endpoint}")
 
     # Create and start the ZMQ server thread
     zmq_thread = threading.Thread(
