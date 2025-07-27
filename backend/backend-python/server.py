@@ -15,7 +15,7 @@ import l4m_vision_pb2
 import ping_pb2
 from config import parse_model_metadata
 from driver import Driver
-from l4ma import L4maForCausalLM
+from l4ma import L4maForCausalLM, create_fusion_map
 import ztensor
 from tqdm import tqdm
 import threading  # Import the threading module
@@ -123,54 +123,78 @@ def load_model(config: dict):
     metadata.architecture.dtype = getattr(torch, config.get('dtype', 'bfloat16'))
 
     model = L4maForCausalLM(metadata.architecture)
+    # ================= ELEGANT FUSION HANDLING: SETUP =================
+    print("Generating weight fusion map...")
+    # 1. Map fused tensor names to their original sources
+    fusion_map = create_fusion_map(model)
 
-    # Get all tensor names that the model expects
+    # 2. Create a reverse map for fast lookups (original source -> fused target)
+    source_to_fusion_target = {
+        source: target
+        for target, details in fusion_map.items()
+        for source in details["sources"]
+    }
+
+    # 3. Buffer to hold source tensors until they are all collected
+    pending_fusion_tensors = {}
+    # ===================================================================
+
     model_state_keys = set(model.state_dict().keys())
     loaded_keys = set()
 
     print(f"Found {len(metadata.parameters)} parameter file(s) to load.")
 
     try:
-        # Iterate over all parameter files listed in the metadata
         for param_file in metadata.parameters:
             weights_path = os.path.join(model_path, model_name, param_file)
-            if not os.path.exists(weights_path):
-                print(f"Warning: A specified weights file was not found: {weights_path}. Skipping.")
-                continue
+            # ... (existing file existence check) ...
 
             print(f"Loading weights from ztensor file: {param_file}")
-
             with ztensor.Reader(weights_path) as reader:
-                # Get tensor names available in the current file
                 tensors_in_file = reader.get_tensor_names()
 
-                # Use tqdm for a progress bar
                 for name in tqdm(tensors_in_file, desc=f"Loading {param_file}", unit="tensors"):
-                    # Check if the tensor is needed by the model and not already loaded
+                    # Check if this tensor from the file is part of a planned fusion
+                    if name in source_to_fusion_target:
+                        tensor_data = reader.read_tensor(name, to="torch")
+                        pending_fusion_tensors[name] = tensor_data
+                        continue  # Skip direct loading, we'll fuse it later
+
+                    # This is a standard, non-fused tensor
                     if name in model_state_keys and name not in loaded_keys:
-                        try:
-                            # Read tensor data into a PyTorch tensor
-                            tensor_data_torch = reader.read_tensor(name, to="torch")
+                        param = model.state_dict()[name]
+                        tensor_data = reader.read_tensor(name, to="torch")
+                        if tensor_data.shape != param.shape:
+                            print(f"    Warning: Shape mismatch for tensor '{name}'. Skipping.")
+                            continue
+                        with torch.no_grad():
+                            param.copy_(tensor_data, non_blocking=True)
+                        loaded_keys.add(name)
 
-                            # Get the target parameter/buffer from the model's state dict
-                            param = model.state_dict()[name]
+        # ================= ELEGANT FUSION HANDLING: PROCESSING =================
+        print("\nProcessing fused tensors...")
+        for target_name, details in tqdm(fusion_map.items(), desc="Fusing weights"):
+            source_names = details["sources"]
 
-                            # Check if shapes match before copying
-                            if tensor_data_torch.shape != param.shape:
-                                print(f"    Warning: Shape mismatch for tensor '{name}'. ZT: {tensor_data_torch.shape}, Model: {param.shape}. Skipping.")
-                                continue
+            # Check if all required source tensors have been collected
+            if all(s in pending_fusion_tensors for s in source_names):
+                # Collect tensors in the correct order
+                tensors_to_fuse = [pending_fusion_tensors[s] for s in source_names]
 
-                            # Load the data into the model parameter
-                            with torch.no_grad():
-                                param.copy_(tensor_data_torch, non_blocking=True)
+                # Concatenate them along the specified dimension
+                fused_tensor = torch.cat(tensors_to_fuse, dim=details["dim"])
 
-                            # Mark this tensor as loaded
-                            loaded_keys.add(name)
+                # Load the newly created fused tensor into the model
+                param = model.state_dict()[target_name]
+                if fused_tensor.shape != param.shape:
+                    print(f"    Warning: Shape mismatch for fused tensor '{target_name}'. ZT: {fused_tensor.shape}, Model: {param.shape}. Skipping.")
+                    continue
 
-                        except ztensor.ZTensorError as e:
-                            print(f"    Warning: Could not read tensor '{name}' from {param_file}. Error: {e}")
-                        except Exception as e:
-                            print(f"    An unexpected error occurred while loading tensor '{name}': {e}")
+                with torch.no_grad():
+                    param.copy_(fused_tensor, non_blocking=True)
+
+                loaded_keys.add(target_name)
+        # ========================================================================
 
         # L4ma models often reuse the embed_tokens for the lm_head, so we need to copy it explicitly
         if "lm_head.weight" in model_state_keys:
