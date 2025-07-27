@@ -229,6 +229,39 @@ impl Model {
         Context::new(self)
     }
 
+    /// Retrieves a value from the persistent store for a given key.
+    ///
+    /// Returns `Some(value)` if the key exists, or `None` if it does not.
+    pub fn store_get(&self, key: &str) -> Option<String> {
+        core::store_get(key)
+    }
+
+    /// Sets a value in the persistent store for a given key.
+    ///
+    /// This will create a new entry or overwrite an existing one.
+    pub fn store_set(&self, key: &str, value: &str) {
+        core::store_set(key, value)
+    }
+
+    /// Deletes a key-value pair from the store.
+    ///
+    /// If the key does not exist, this function does nothing.
+    pub fn store_delete(&self, key: &str) {
+        core::store_delete(key)
+    }
+
+    /// Checks if a key exists in the store.
+    ///
+    /// Returns `true` if the key exists, and `false` otherwise.
+    pub fn store_exists(&self, key: &str) -> bool {
+        core::store_exists(key)
+    }
+
+    /// Returns a list of all keys currently in the store.
+    pub fn store_list_keys(&self) -> Vec<String> {
+        core::store_list_keys()
+    }
+
     /// Sends a debug message directly to the model and returns the response.
     pub fn debug_query(&self, query: &str) -> String {
         self.inner.debug_query(query)
