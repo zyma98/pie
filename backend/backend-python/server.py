@@ -198,7 +198,6 @@ def load_model(config: dict):
         print(f"An unexpected fatal error occurred: {e}")
 
 
-
 def start_service(config, model, model_metadata):
     """
     Initializes and starts the service, including the ZMQ server and registration threads.
@@ -355,6 +354,9 @@ def run_zmq_server(router, engine, config, model_metadata):
                     elif command == "fill_block":
                         res = engine.fill_block(request.fill_block)
                         response = l4m_pb2.Response(correlation_id=request.correlation_id, batch_sync=res)
+                    elif command == "forward_text":
+                        res = engine.forward_text(request.forward_text)
+                        response = l4m_pb2.Response(correlation_id=request.correlation_id, forward_text=res)
                     elif command == "mask_block":
                         engine.mask_block(request.mask_block)
                     elif command == "copy_block":
@@ -422,6 +424,7 @@ def run_zmq_server(router, engine, config, model_metadata):
             else:
                 raise
 
+
 def run_test_routine(engine: Driver):
     """
     Runs a simple test routine to verify the fill_block functionality,
@@ -448,7 +451,6 @@ def run_test_routine(engine: Driver):
     engine.allocate(batch_allocate_request)
     print(f"Allocated block with ID: {block_id}")
 
-
     # 3. Create text embeddings
     # The engine.embed_text method expects a single BatchEmbedText object.
     print("\n[Step 2] Creating Text Embeddings...")
@@ -466,7 +468,6 @@ def run_test_routine(engine: Driver):
     engine.embed_text(batch_embed_request)
     print(f"Created {len(list_of_embed_commands)} embeddings.")
 
-
     # 4. Call fill_block for a single forward pass
     # The engine.fill_block method expects a single BatchFillBlock object.
     print("\n[Step 3] Calling fill_block for a forward pass...")
@@ -479,7 +480,6 @@ def run_test_routine(engine: Driver):
     batch_fill_request = l4m_pb2.BatchFillBlock(items=[fill_command])
     engine.fill_block(batch_fill_request)
     print("fill_block completed.")
-
 
     # 5. Verify the output by sampling
     # The engine.sample_top_k_request method expects a BatchSampleTopKRequest.
@@ -501,6 +501,7 @@ def run_test_routine(engine: Driver):
         print("Test Error: Failed to get sampling results.")
 
     print("\n--- [END] Corrected Python Test Routine Finished ---\n")
+
 
 if __name__ == "__main__":
     fire.Fire(main)

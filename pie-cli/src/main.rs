@@ -252,6 +252,7 @@ async fn start_interactive_session(
 
             let mut cmd = if backend_type == "python" {
                 let mut cmd = TokioCommand::new("python");
+                cmd.arg("-u");
                 cmd.arg(exec_path);
                 cmd
             } else {
