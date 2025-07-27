@@ -447,6 +447,7 @@ pub struct L4m {
     event_loop_handle: tokio::task::JoinHandle<()>,
     exported_blocks: HashMap<String, ExportedBlocks>,
     objects: ObjectManager<InstanceId, ManagedTypes>,
+    instance_launch_order: Vec<InstanceId>,
     stream_priorities: HashMap<Stream, StreamPriority>,
     info: Info,
     stats: L4mStat,
@@ -459,6 +460,9 @@ impl Service for L4m {
     async fn handle(&mut self, cmd: Self::Command) {
         self.stats.total_calls += 1;
         if let Command::Destroy { inst_id } = cmd {
+            // Remove the instance from the launch order tracking.
+            self.instance_launch_order.retain(|&id| id != inst_id);
+
             for cmd in self.get_cleanup_cmds(inst_id) {
                 self.handle_cmd(cmd).await;
             }
@@ -493,7 +497,7 @@ impl L4m {
         let info = info_rx.await.unwrap();
 
         tracing::info!(
-            "L4m service started: version={}, model_name={}, kv_page_size={}, num_kv_pages={}, num_embeddings={}, num_distributions={}",
+            "Backend service started: version={}, model_name={}, kv_page_size={}, num_kv_pages={}, num_embeddings={}, num_distributions={}",
             info.version,
             info.model_name,
             info.kv_page_size,
@@ -516,6 +520,7 @@ impl L4m {
             event_loop_handle,
             exported_blocks: HashMap::new(),
             objects,
+            instance_launch_order: Vec::new(),
             stream_priorities: HashMap::new(),
             info,
             stats: L4mStat { total_calls: 0 },
@@ -621,11 +626,66 @@ impl L4m {
                 ids,
             } => {
                 // check available space
-                if self.objects.available(ty).unwrap() < ids.len() {
-                    runtime::trap(
-                        inst_id,
-                        "l4m::allocation failed. not enough available space",
-                    );
+                if !self.instance_launch_order.contains(&inst_id) {
+                    self.instance_launch_order.push(inst_id);
+                }
+
+                // Loop to free resources if the initial check fails.
+                // TODO: implement better resource management like CPU page swapping.
+                while self.objects.available(ty).unwrap() < ids.len() {
+                    let requester_index = self
+                        .instance_launch_order
+                        .iter()
+                        .position(|&id| id == inst_id)
+                        .unwrap(); // Requester is guaranteed to be in the list.
+
+                    let victim_to_terminate = self
+                        .instance_launch_order
+                        .iter()
+                        .enumerate()
+                        .rev() // Start search from the newest instance.
+                        .find(|(index, _id)| *index > requester_index);
+
+                    if let Some((victim_index, &victim_id)) = victim_to_terminate {
+                        tracing::warn!(
+                            "Resource contention: Instance {:?} is terminating newer instance {:?} to free resources.",
+                            inst_id,
+                            victim_id
+                        );
+
+                        // Deallocate all resources for the victim instance.
+                        for resource_type in [ManagedTypes::KvBlock, ManagedTypes::TokenEmb] {
+                            if let Ok(victim_ids) = self.objects.all_names(resource_type, victim_id)
+                            {
+                                if !victim_ids.is_empty() {
+                                    if let Ok(physical_ids) = self.objects.destroy_many(
+                                        resource_type,
+                                        victim_id,
+                                        &victim_ids,
+                                    ) {
+                                        let dealloc_cmd = Command::Deallocate {
+                                            inst_id: victim_id,
+                                            stream_id: 0,
+                                            ty: resource_type,
+                                            ids: physical_ids,
+                                        };
+                                        let stream = Stream::new(victim_id, 0);
+                                        self.scheduler.try_send((stream, dealloc_cmd)).ok();
+                                    }
+                                }
+                            }
+                        }
+
+                        self.instance_launch_order.remove(victim_index);
+
+                        runtime::trap(victim_id, "terminated due to resource contention");
+                    } else {
+                        runtime::trap(
+                            inst_id,
+                            "l4m::allocation failed. Not enough available space, and no newer instances to terminate.",
+                        );
+                        return None;
+                    }
                 }
 
                 let ids = try_trap!(
