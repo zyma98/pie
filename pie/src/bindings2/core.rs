@@ -101,8 +101,7 @@ impl bindings2::pie::inferlet::core::Host for InstanceState {
     }
 
     async fn get_arguments(&mut self) -> anyhow::Result<Vec<String>> {
-        // Placeholder: Return empty args
-        Ok(vec![])
+        Ok(self.arguments().to_vec())
     }
 
     async fn debug_query(&mut self, _query: String) -> anyhow::Result<String> {
