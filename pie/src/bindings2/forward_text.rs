@@ -36,6 +36,7 @@ impl bindings2::pie::inferlet::forward_text::Host for InstanceState {
         kv_page_ids: Vec<IdRepr>,
         tokens: Vec<u32>,
         positions: Vec<u32>,
+        mask: Vec<Vec<u32>>,
         output_indices: Vec<u32>,
     ) -> anyhow::Result<Resource<DistributionResult>> {
         let inst_id = self.id();
@@ -71,6 +72,7 @@ impl bindings2::pie::inferlet::forward_text::Host for InstanceState {
         kv_page_ids: Vec<IdRepr>,
         tokens: Vec<u32>,
         positions: Vec<u32>,
+        mask: Vec<Vec<u32>>,
     ) -> anyhow::Result<()> {
         let inst_id = self.id();
         let q = self.table().get(&queue)?;
