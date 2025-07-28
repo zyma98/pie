@@ -55,12 +55,62 @@ impl Context {
         }
     }
 
+    /// Creates a new Context from previously exported and now imported KV pages.
+    /// This is used to restore a context's state from a cache.
+    pub fn from_imported_state(
+        model: &Model,
+        imported_page_ids: Vec<u32>,
+        prefix_tokens: Vec<u32>,
+        kv_page_last_len: usize,
+    ) -> Self {
+        let queue = model.create_queue();
+        let kv_page_size = queue.get_kv_page_size() as usize;
+        let tokenizer = queue.get_tokenizer();
+
+        assert_eq!(
+            prefix_tokens.len(),
+            (imported_page_ids.len() - 1) * kv_page_size + kv_page_last_len,
+        );
+
+        // The new context takes ownership of the imported pages.
+        // It's assumed the state in these pages corresponds exactly
+        // to the provided prefix_tokens and kv_page_last_len.
+        Context {
+            queue,
+            model: model.clone(),
+            tokenizer,
+            token_ids: prefix_tokens,
+            token_ids_pending: Vec::new(), // Starts empty, ready for the next fill.
+            kv_page_ids: imported_page_ids,
+            kv_page_last_len,
+            kv_page_size,
+        }
+    }
+
+    pub fn model(&self) -> &Model {
+        &self.model
+    }
+
+    pub fn queue(&self) -> &Queue {
+        &self.queue
+    }
+
     pub fn get_token_ids(&self) -> &[u32] {
         &self.token_ids
     }
 
     pub fn get_text(&self) -> String {
         self.tokenizer.detokenize(&self.token_ids)
+    }
+
+    /// Returns the unique IDs of the KV cache pages currently in use.
+    pub fn get_kv_page_ids(&self) -> &[u32] {
+        &self.kv_page_ids
+    }
+
+    /// Returns the number of tokens stored in the last KV cache page.
+    pub fn get_kv_page_last_len(&self) -> usize {
+        self.kv_page_last_len
     }
 
     /// Creates a safe, copy-on-write fork of the context.
@@ -127,21 +177,6 @@ impl Context {
             token_ids_pending: new_pending,
             kv_page_ids: new_kv_pages,
             kv_page_last_len: new_last_len,
-            kv_page_size: self.kv_page_size,
-        }
-    }
-
-    fn clone_unsafe(&self) -> Self {
-        self.queue.increase_ref_count(&self.kv_page_ids);
-
-        Context {
-            queue: self.queue.clone(),
-            model: self.model.clone(),
-            tokenizer: self.tokenizer.clone(),
-            token_ids: self.token_ids.clone(),
-            token_ids_pending: self.token_ids_pending.clone(),
-            kv_page_ids: self.kv_page_ids.clone(),
-            kv_page_last_len: self.kv_page_last_len,
             kv_page_size: self.kv_page_size,
         }
     }
