@@ -51,6 +51,7 @@ impl bindings2::pie::inferlet::forward_text::Host for InstanceState {
             kv_pages: kv_page_ids,
             text: tokens,
             positions,
+            mask,
             output_indices,
             handle: Some(tx),
         }
@@ -84,6 +85,7 @@ impl bindings2::pie::inferlet::forward_text::Host for InstanceState {
             kv_pages: kv_page_ids,
             text: tokens,
             positions,
+            mask,
             output_indices: vec![],
             handle: None,
         }

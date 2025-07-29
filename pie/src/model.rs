@@ -294,6 +294,7 @@ pub enum Command {
         kv_pages: Vec<IdRepr>,
         text: Vec<u32>,
         positions: Vec<u32>,
+        mask: Vec<Vec<u32>>,
         output_indices: Vec<u32>,
         handle: Option<oneshot::Sender<Vec<(Vec<u32>, Vec<f32>)>>>,
     },
@@ -830,6 +831,7 @@ impl L4m {
                 mut kv_pages,
                 text,
                 positions,
+                mask,
                 output_indices,
                 handle,
             } => {
@@ -848,6 +850,7 @@ impl L4m {
                         kv_pages,
                         text,
                         positions,
+                        mask,
                         output_indices,
                         handle,
                     },
@@ -1623,19 +1626,26 @@ fn encode_pb_batch_forward_text(
             Command::ForwardText {
                 inst_id: _,
                 stream_id: _,
-                kv_page_last_len: last_block_len,
-                kv_pages: context,
+                kv_page_last_len,
+                kv_pages: kv_page_ids,
                 text,
                 positions,
+                mask,
                 output_indices,
                 handle,
             } => {
+                let mask = mask
+                    .into_iter()
+                    .map(|b| pb_bindings::BrleBuffer { buffer: b })
+                    .collect();
+
                 let pb = pb_bindings::ForwardText {
-                    last_block_len: last_block_len,
-                    context_block_ids: context,
+                    kv_page_ids,
+                    kv_page_last_len,
                     token_ids: text,
                     position_ids: positions,
-                    output_indices: output_indices,
+                    mask,
+                    output_indices,
                 };
                 items.push(pb);
                 events.push(Event::ForwardText(handle));

@@ -182,6 +182,7 @@ impl Context {
             &self.kv_page_ids,
             &pending_token_ids,
             &position_ids,
+            &[],
         );
 
         self.token_ids.extend(pending_token_ids);
@@ -253,6 +254,7 @@ pub async fn generate_with_parallel_jacobi_decoding<S: Sampler, C: StopCondition
                     &draft_context.kv_page_ids,
                     &draft_input_tokens,
                     &draft_input_positions,
+                    &[],
                     &output_indices,
                 )
                 .await;
@@ -288,6 +290,7 @@ pub async fn generate_with_parallel_jacobi_decoding<S: Sampler, C: StopCondition
                 &ctx.kv_page_ids,
                 &verification_batch_tokens,
                 &verification_batch_positions,
+                &[],
                 &(0..verification_batch_tokens.len() as u32).collect::<Vec<u32>>(),
             )
             .await;
