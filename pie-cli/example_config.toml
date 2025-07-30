@@ -1,7 +1,7 @@
 # Sample config.toml
 host = "127.0.0.1"
 port = 8080
-enable_auth = true
+enable_auth = false
 auth_secret = "hello"
 verbose = true
 log = "pie.log"
