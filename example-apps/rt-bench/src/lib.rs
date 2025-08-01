@@ -1,10 +1,8 @@
-
 #[inferlet::main]
 async fn main() -> Result<(), String> {
+    let msg = inferlet::receive().await;
 
-    let msg = inferlet::messaging_async::receive().await;
-
-    inferlet::messaging::send(&msg);
+    inferlet::send(&msg);
 
     Ok(())
 }

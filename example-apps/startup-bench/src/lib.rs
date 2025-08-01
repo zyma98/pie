@@ -2,8 +2,7 @@ use std::time::{Duration, Instant};
 
 #[inferlet::main]
 async fn main() -> Result<(), String> {
-
-    let flag = inferlet::messaging_async::receive().await;
+    let flag = inferlet::receive().await;
 
     let mut total_duration = Duration::ZERO;
 
@@ -11,7 +10,7 @@ async fn main() -> Result<(), String> {
 
     for i in 1..=PING_COUNT {
         let start = Instant::now();
-        let resp = inferlet::ping::ping("hello");
+        let resp = inferlet::debug_query("hello");
         let elapsed = start.elapsed();
         total_duration += elapsed;
     }
@@ -19,10 +18,10 @@ async fn main() -> Result<(), String> {
     let avg_latency = total_duration / PING_COUNT as u32;
 
     // if print_output {
-    //     
+    //
     // }
 
-    inferlet::messaging::send(&avg_latency.as_micros().to_string());
+    inferlet::send(&avg_latency.as_micros().to_string());
     //println!("Average Latency: {:?}", avg_latency);
 
     Ok(())
