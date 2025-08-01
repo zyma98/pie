@@ -17,7 +17,7 @@ use std::sync::atomic::AtomicBool;
 use serde::Serialize;
 use tokio::sync::RwLock;
 
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, oneshot};
@@ -63,12 +63,12 @@ pub enum BatchingStrategyConfiguration {
     Adaptive,
 }
 
-static FORWARD_STRATEGY: LazyLock<RwLock<BatchingStrategyConfiguration>> =
-    LazyLock::new(|| RwLock::new(BatchingStrategyConfiguration::Adaptive));
+static FORWARD_STRATEGY: OnceLock<BatchingStrategyConfiguration> = OnceLock::new();
 
-pub fn set_batching_strategy(strategy: BatchingStrategyConfiguration) {
-    let mut guard = FORWARD_STRATEGY.blocking_write();
-    *guard = strategy;
+pub fn set_batching_strategy(
+    strategy: BatchingStrategyConfiguration,
+) -> Result<(), BatchingStrategyConfiguration> {
+    FORWARD_STRATEGY.set(strategy)
 }
 
 /// Holds shared triggers for manual batching strategies.
@@ -403,7 +403,9 @@ impl Batchable<BatchGroup> for Command {
                 //     TRIGGERS.fill_block_trigger.clone(),
                 // ));
 
-                let config = FORWARD_STRATEGY.blocking_read();
+                let config = FORWARD_STRATEGY
+                    .get()
+                    .unwrap_or(&BatchingStrategyConfiguration::Adaptive);
                 match *config {
                     BatchingStrategyConfiguration::TOnly { t } => batching::t_only(t),
                     BatchingStrategyConfiguration::KOnly { k } => batching::k_only(k, None),
@@ -425,7 +427,9 @@ impl Batchable<BatchGroup> for Command {
                 //     TRIGGERS.forward_text_trigger.clone(),
                 // ))
 
-                let config = FORWARD_STRATEGY.blocking_read();
+                let config = FORWARD_STRATEGY
+                    .get()
+                    .unwrap_or(&BatchingStrategyConfiguration::Adaptive);
                 match *config {
                     BatchingStrategyConfiguration::TOnly { t } => batching::t_only(t),
                     BatchingStrategyConfiguration::KOnly { k } => batching::k_only(k, None),
