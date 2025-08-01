@@ -261,6 +261,7 @@ impl Service for Runtime {
                         .send(self.cache_dir.to_string_lossy().to_string())
                         .unwrap();
                 }
+
                 _ => {
                     event.send(format!("Unknown query: {}", query)).unwrap();
                 }
