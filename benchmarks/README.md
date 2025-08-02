@@ -54,7 +54,7 @@ We pre-download models to ensure consistency and avoid issues with gated access 
 
 ### Step 4: Compile PIE Inferlets
 
-The benchmark applications, or "inferlets," need to be compiled from their Rust source code.
+The benchmark applications (inferlets) need to be compiled from their Rust source code.
 
 ```bash
 cd ../example-apps
