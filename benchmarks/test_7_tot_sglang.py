@@ -148,14 +148,14 @@ if __name__ == "__main__":
 
     # --- Benchmark Configuration ---
     benchmark_group = parser.add_argument_group('Benchmark Configuration')
-    benchmark_group.add_argument("--num-requests", type=int, default=10, help="Total number of tree-search instances to run.")
-    benchmark_group.add_argument("--num-branches", type=int, default=3, help="Number of branches to explore at each stage (plan, execute, reflect).")
-    benchmark_group.add_argument("--temperature", type=float, default=0.3, help="The temperature for generation. Use a low value for more deterministic results.")
+    benchmark_group.add_argument("--num-requests", type=int, default=64, help="Total number of tree-search instances to run.")
+    benchmark_group.add_argument("--num-branches", type=int, default=2, help="Number of branches to explore at each stage (plan, execute, reflect).")
+    benchmark_group.add_argument("--temperature", type=float, default=0.0, help="The temperature for generation. Use a low value for more deterministic results.")
 
     # --- Generation Arguments ---
     gen_group = parser.add_argument_group('Generation Arguments')
-    gen_group.add_argument("--max-tokens-plan", type=int, default=80, help="Max new tokens for the planning step.")
-    gen_group.add_argument("--max-tokens-execute", type=int, default=256, help="Max new tokens for the execution step.")
+    gen_group.add_argument("--max-tokens-plan", type=int, default=64, help="Max new tokens for the planning step.")
+    gen_group.add_argument("--max-tokens-execute", type=int, default=64, help="Max new tokens for the execution step.")
     gen_group.add_argument("--max-tokens-reflect", type=int, default=64, help="Max new tokens for the reflection step.")
 
     args = parser.parse_args()

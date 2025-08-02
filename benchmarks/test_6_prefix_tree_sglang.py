@@ -152,18 +152,15 @@ def main(args: argparse.Namespace):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="A benchmark script for SGLang using a native prefix tree to replicate a specific 8-prompt workload.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
-    # --- Server Configuration ---
     server_group = parser.add_argument_group('Server Configuration')
     server_group.add_argument("--host", type=str, default="http://127.0.0.1", help="The host of the SGLang server.")
     server_group.add_argument("--port", type=int, default=8000, help="The port of the SGLang server.")
 
-    # --- Benchmark Configuration ---
     benchmark_group = parser.add_argument_group('Benchmark Configuration')
-    benchmark_group.add_argument("--num-requests", type=int, default=32, help="Total number of prompts to send. MUST be a multiple of 8.")
+    benchmark_group.add_argument("--num-requests", type=int, default=64, help="Total number of prompts to send. MUST be a multiple of 8.")
     benchmark_group.add_argument("--max-tokens", type=int, default=32, help="Maximum number of new tokens to generate per prompt.")
     benchmark_group.add_argument("--temperature", type=float, default=0.0, help="The temperature for generation. 0.0 for deterministic output.")
 
