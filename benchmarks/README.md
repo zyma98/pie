@@ -25,8 +25,6 @@ You'll need Docker, the NVIDIA Container Toolkit, and the Rust toolchain.
     * <https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html>
 3.  **Install Rust & WASM target:** Our system components ("inferlets") are written in Rust and compiled to WASM.
     ```bash
-    # Install rustup (if you don't have it)
-    curl --proto '=https' --tlsv1.2 -sSf [https://sh.rustup.rs](https://sh.rustup.rs) | sh
     # Add the required compilation target
     rustup target add wasm32-wasip2
     ```
@@ -151,14 +149,14 @@ This should complete without errors with an output something like this, and gene
 #### Figures 6 & 7: Agent Benchmarks
 
 * **ReAct Agent**
-    * **PIE:** `python test_1_agent_react_pie.py`
-    * **Baseline:** `python test_1_agent_react_baseline.py`
+    * PIE: `python test_1_agent_react_pie.py`
+    * Baseline: `python test_1_agent_react_baseline.py`
 * **CodeAct Agent**
-    * **PIE:** `python test_2_agent_codeact_pie.py`
-    * **Baseline:** `python test_2_agent_codeact_baseline.py`
+    * PIE: `python test_2_agent_codeact_pie.py`
+    * Baseline: `python test_2_agent_codeact_baseline.py`
 * **Swarm Agent**
-    * **PIE:** `python test_3_agent_swarm_pie.py`
-    * **Baseline:** `python test_3_agent_swarm_baseline.py`
+    * PIE: `python test_3_agent_swarm_pie.py`
+    * Baseline: `python test_3_agent_swarm_baseline.py`
 * **Figure 7 (Case Study: ReAct Optimization)**
   ```bash
   # This script automates running the PIE experiments with different optimizations
@@ -241,7 +239,7 @@ For each task, run the `_pie.py` script against a running PIE instance and the `
 
 -----
 
-## Interactive Exploration (Optional)
+### Interactive Exploration (Optional)
 
 You can also run inferlets interactively using the `pie-cli` shell for debugging or experimentation. After starting PIE, you can use the `run` command in the shell:
 
