@@ -19,7 +19,7 @@ pub use wstd;
 
 pub mod bindings {
     wit_bindgen::generate!({
-        path: "../wit",
+        path: "wit",
         world: "imports",
         pub_export_macro: true,
         with: {
@@ -31,7 +31,7 @@ pub mod bindings {
 
 pub mod bindings_app {
     wit_bindgen::generate!({
-        path: "../wit",
+        path: "wit",
         world: "inferlet",
         pub_export_macro: true,
         default_bindings_module: "pie::bindings",
@@ -43,7 +43,7 @@ pub mod bindings_app {
 
 pub mod bindings_server {
     wit_bindgen::generate!({
-        path: "../wit",
+        path: "wit",
         world: "inferlet-server",
         pub_export_macro: true,
         default_bindings_module: "pie::bindings",
