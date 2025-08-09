@@ -184,7 +184,7 @@ class MutableAdapter(BaseAdapter):
                  mu_fraction: float = 0.5,
                  initial_sigma: float = 0.02,
                  dtype: torch.dtype = torch.float32,
-                 device: torch.device = None):
+                 device: torch.device | str = None):
 
         super().__init__(num_layers, in_features, out_features, rank, alpha)
 
@@ -240,17 +240,17 @@ class MutableAdapter(BaseAdapter):
         top_seeds = seeds_tensor[best_indices[:self.mu]].tolist()
 
         # --- OPTIMIZED: Step 1 - Generate all noise in a batch ---
-        z_down_shape = self.base_weight_down.shape[1:]
-        z_up_shape = self.base_weight_up.shape[1:]
-        all_z_down = torch.empty((self.mu, self.num_layers, *z_down_shape), device=device, dtype=dtype)
-        all_z_up = torch.empty((self.mu, self.num_layers, *z_up_shape), device=device, dtype=dtype)
+        z_down_shape = self.base_weight_down.shape
+        z_up_shape = self.base_weight_up.shape
+        all_z_down = torch.empty((self.mu, *z_down_shape), device=device, dtype=dtype)
+        all_z_up = torch.empty((self.mu, *z_up_shape), device=device, dtype=dtype)
         generator = torch.Generator(device=device)
 
         for i, seed in enumerate(top_seeds):
             generator.manual_seed(seed)
             # Generate noise for all layers for the i-th individual at once
-            all_z_down[i] = torch.randn(self.num_layers, *z_down_shape, generator=generator)
-            all_z_up[i] = torch.randn(self.num_layers, *z_up_shape, generator=generator)
+            all_z_down[i] = torch.randn(*z_down_shape, generator=generator)
+            all_z_up[i] = torch.randn(*z_up_shape, generator=generator)
 
         # --- Step 2 - Loop through layers to apply updates ---
         for layer_idx in range(self.num_layers):
@@ -325,7 +325,6 @@ class AdapterWithMutation(Adapter):
         self.adapter = adapter
         self.seed = seed
 
-        num_layers = self.adapter.num_layers
         device = self.adapter.base_weight_down.device
         dtype = self.adapter.base_weight_down.dtype
         generator = torch.Generator(device=device).manual_seed(self.seed)
