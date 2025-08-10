@@ -44,7 +44,8 @@ TEST_TARGETS := \
 	test_gemm \
 	test_tensor_view \
 	test_add_residual_full \
-	test_act_and_mul_full
+	test_act_and_mul_full \
+	test_forward_text_full
 
 unit-tests: build
 	@echo "Building unit test executables..."
