@@ -1,5 +1,5 @@
 """TODO: Add module docstring."""
-
+import gc
 import time
 from dataclasses import dataclass
 from typing import Union
@@ -803,6 +803,13 @@ class Driver:
 
         # torch.cuda.synchronize()
         # print(f"forward_text time {(time.time() - start_time) * 1000}ms  ")
+
+        # clear all pytorch caches
+        del all_adapters
+        # invoke gc
+        gc.collect()
+        torch.cuda.empty_cache()
+
         return BatchForwardTextResponse(
             items=responses
         )

@@ -92,7 +92,7 @@ async fn main() -> Result<(), String> {
         // Get a new model instance for each seed.
         let mut model = inferlet::get_auto_model();
         // Apply the adapter with the current seed.
-        model.set_adapter(&name, seed);
+        //model.set_adapter(&name, seed);
 
         // Create the base context from scratch using the provided prefix.
         let mut base_ctx = model.create_context();

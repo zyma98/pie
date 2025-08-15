@@ -28,8 +28,8 @@ SERVER_URIS = [
 SCRIPT_DIR = Path(__file__).resolve().parent
 # NOTE: Update this path to your actual inferlet dependency location
 INFERLET_DEPS = [
-    'inferlet={ path = "/home/ingim/Workspace/pie/inferlet" }',
-    'inferlet-macros={ path = "/home/ingim/Workspace/pie/inferlet-macros" }',
+    'inferlet={ path = "/root/Workspace/pie/inferlet" }',
+    'inferlet-macros={ path = "/root/Workspace/pie/inferlet-macros" }',
     'pico-args = "0.5.0"',
     'futures = "0.3.31"',
     'serde = { version = "1.0", features = ["derive"] }',
@@ -44,9 +44,9 @@ INFERLET_SRC_FILES = [
 # --- ES Hyperparameters ---
 ADAPTER_NAME = "evo-countdown-v1"
 TRAINING_STEPS = 100
-POPULATION_SIZE = 16  # Total number of seeds per step across all clients
-TASKS_PER_SEED = 4  # Number of tasks to evaluate for each seed
-NUM_ROLLOUT_WORKERS = 1  # Number of inferlets PER CLIENT
+POPULATION_SIZE = 512  # Total number of seeds per step across all clients
+TASKS_PER_SEED = 5  # Number of tasks to evaluate for each seed
+NUM_ROLLOUT_WORKERS = 8  # Number of inferlets PER CLIENT
 LORA_RANK = 8
 LORA_ALPHA = 16.0
 INITIAL_SIGMA = 0.0001
@@ -203,9 +203,14 @@ async def main():
                 worker_seed_chunks = np.array_split(client_seeds, NUM_ROLLOUT_WORKERS)
                 worker_batch_chunks = np.array_split(client_batch, NUM_ROLLOUT_WORKERS)
 
+                #print('len client seeds', len(client_seeds))
+
                 for worker_idx in range(NUM_ROLLOUT_WORKERS):
                     worker_seeds = worker_seed_chunks[worker_idx]
                     worker_batch = worker_batch_chunks[worker_idx]
+
+                    #print('len worker_seeds seeds', len(worker_seeds))
+
                     if len(worker_seeds) == 0: continue
 
                     worker_task_prompts = [
@@ -224,6 +229,7 @@ async def main():
 
                     # Create a unique ID for logging: C for Client, W for Worker
                     descriptive_worker_id = f"C{client_idx}-W{worker_idx}"
+                    #print(descriptive_worker_id)
                     rollout_tasks.append(
                         launch_and_get_result(client, program_hashes["es-rollout"], rollout_args, worker_id=descriptive_worker_id)
                     )
@@ -266,7 +272,7 @@ async def main():
                 "--seeds", ",".join(map(str, seeds)),
                 "--scores", ",".join(map(str, aggregated_scores)),
             ]
-            # MODIFIED: Run update on all clients in parallel to keep them synchronized.
+            #MODIFIED: Run update on all clients in parallel to keep them synchronized.
             update_tasks = [
                 launch_and_get_result(client, program_hashes["es-update"], update_args, worker_id=f"C{i}-Update")
                 for i, client in enumerate(clients)
