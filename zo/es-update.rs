@@ -14,6 +14,7 @@ Options:
       --name <STRING>            The name of the adapter to update.
       --seeds <I64,...>          A comma-separated list of i64 seeds corresponding to the rollouts.
       --scores <F32,...>         A comma-separated list of f32 scores for each rollout.
+      --max-sigma <F32>          The maximum sigma to use when updating the adapter.
   -h, --help                     Print this help information.
 "#;
 
@@ -54,6 +55,11 @@ async fn main() -> Result<(), String> {
         })
         .map_err(|e| e.to_string())?;
 
+    // Parse max sigma (required float).
+    let max_sigma: f32 = args
+        .value_from_str("--max-sigma")
+        .map_err(|e| e.to_string())?;
+
     // --- 2. Input Validation ---
     if seeds.is_empty() {
         return Err("At least one seed and score must be provided.".to_string());
@@ -67,18 +73,19 @@ async fn main() -> Result<(), String> {
     }
 
     // --- 3. Adapter Update ---
-    println!("🔧 Initializing model and queue to update adapter '{}'...", name);
+    println!("🔧 Initializing model and queue to update adapter '{}'...", &name);
     let model = inferlet::get_auto_model();
     let queue = model.create_queue();
 
     println!(
-        "Updating adapter '{}' with {} scores...",
-        name,
-        scores.len()
+        "Updating adapter '{}' with {} scores (max_sigma = {})...",
+        &name,
+        scores.len(),
+        max_sigma
     );
 
-    // Perform the update operation.
-    queue.update_adapter(&name, &scores, &seeds);
+    // Perform the update operation with max_sigma.
+    queue.update_adapter(&name, &scores, &seeds, max_sigma);
 
     // sleep for 100ms
     inferlet::wstd::task::sleep(Duration::from_millis(100)).await;

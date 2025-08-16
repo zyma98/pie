@@ -9,10 +9,44 @@ use wasmtime::component::Resource;
 use wasmtime_wasi::p2::IoView;
 
 impl bindings::pie::inferlet::optimize::Host for InstanceState {
-    async fn create_adapter(
+    async fn allocate_adapters(
         &mut self,
         queue: Resource<Queue>,
-        name: String,
+        adapters: Vec<ObjectId>,
+    ) -> anyhow::Result<()> {
+        let inst_id = self.id();
+        let q = self.table().get(&queue)?;
+        Command::AllocateAdapters {
+            inst_id,
+            stream_id: q.stream_id,
+            adapters,
+        }
+        .dispatch(q.service_id)?;
+
+        Ok(())
+    }
+
+    async fn deallocate_adapters(
+        &mut self,
+        queue: Resource<Queue>,
+        adapters: Vec<ObjectId>,
+    ) -> anyhow::Result<()> {
+        let inst_id = self.id();
+        let q = self.table().get(&queue)?;
+        Command::DeallocateAdapters {
+            inst_id,
+            stream_id: q.stream_id,
+            adapters,
+        }
+        .dispatch(q.service_id)?;
+
+        Ok(())
+    }
+
+    async fn initialize_adapter(
+        &mut self,
+        queue: Resource<Queue>,
+        adapter: ObjectId,
         rank: u32,
         alpha: f32,
         population_size: u32,
@@ -21,10 +55,10 @@ impl bindings::pie::inferlet::optimize::Host for InstanceState {
     ) -> anyhow::Result<()> {
         let inst_id = self.id();
         let q = self.table().get(&queue)?;
-        Command::CreateAdapter {
+        Command::InitializeAdapter {
             inst_id,
             stream_id: q.stream_id,
-            name,
+            adapter,
             rank,
             alpha,
             population_size,
@@ -36,17 +70,21 @@ impl bindings::pie::inferlet::optimize::Host for InstanceState {
         Ok(())
     }
 
-    async fn destroy_adapter(
+    async fn mutate_adapters(
         &mut self,
         queue: Resource<Queue>,
-        name: String,
+        adapters: Vec<ObjectId>,
+        parent: ObjectId,
+        seeds: Vec<i64>,
     ) -> anyhow::Result<()> {
         let inst_id = self.id();
         let q = self.table().get(&queue)?;
-        Command::DestroyAdapter {
+        Command::MutateAdapters {
             inst_id,
             stream_id: q.stream_id,
-            name,
+            adapters,
+            parent,
+            seeds,
         }
         .dispatch(q.service_id)?;
 
@@ -56,29 +94,30 @@ impl bindings::pie::inferlet::optimize::Host for InstanceState {
     async fn update_adapter(
         &mut self,
         queue: Resource<Queue>,
-        name: String,
+        adapter: ObjectId,
         scores: Vec<f32>,
         seeds: Vec<i64>,
+        max_sigma: f32,
     ) -> anyhow::Result<()> {
         let inst_id = self.id();
         let q = self.table().get(&queue)?;
         Command::UpdateAdapter {
             inst_id,
             stream_id: q.stream_id,
-            name,
+            adapter,
             scores,
             seeds,
+            max_sigma,
         }
         .dispatch(q.service_id)?;
 
         Ok(())
     }
 
-    async fn forward_with_mutation(
+    async fn forward_with_adapter(
         &mut self,
         queue: Resource<Queue>,
-        adapter: String,
-        seed: i64,
+        adapter: ObjectId,
         last_kv_page_len: u32,
         kv_page_ids: Vec<ObjectId>,
         tokens: Vec<u32>,
@@ -90,11 +129,10 @@ impl bindings::pie::inferlet::optimize::Host for InstanceState {
         let q = self.table().get(&queue)?;
 
         if output_indices.is_empty() {
-            Command::ForwardWithMutation {
+            Command::ForwardWithAdapter {
                 inst_id,
                 stream_id: q.stream_id,
                 adapter,
-                seed,
                 kv_page_last_len: last_kv_page_len,
                 kv_pages: kv_page_ids,
                 text: tokens,
@@ -109,11 +147,10 @@ impl bindings::pie::inferlet::optimize::Host for InstanceState {
         } else {
             let (tx, rx) = oneshot::channel();
 
-            Command::ForwardWithMutation {
+            Command::ForwardWithAdapter {
                 inst_id,
                 stream_id: q.stream_id,
                 adapter,
-                seed,
                 kv_page_last_len: last_kv_page_len,
                 kv_pages: kv_page_ids,
                 text: tokens,

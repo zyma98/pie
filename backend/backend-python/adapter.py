@@ -1,3 +1,5 @@
+import time
+
 import torch
 import torch.nn as nn
 import math
@@ -96,11 +98,25 @@ class AdapterBuffer:
 
     @torch.inference_mode()
     def compute_lora_delta(self, layer_idx: int, x: torch.Tensor) -> torch.Tensor:
+
+        start_time = time.time()
+
+        # print the shape of x.
+
+
         # first update the buffers with the current adapter weights
         for i in range(len(self.adapters)):
             adapter = self.adapters[i]
             self.down_proj_buffer[i].copy_(adapter.down_proj(layer_idx))
             self.up_proj_buffer[i].copy_(adapter.up_proj(layer_idx))
+
+        if layer_idx == 0:
+            print('x.shape', x.shape)
+            print('num_adapters', len(self.adapters))
+            torch.cuda.synchronize()
+            elapsed_ms = (time.time() - start_time) * 1000
+            print(f"Adapter memcpy time: {elapsed_ms:.3f} ms")
+            start_time = time.time()
 
         # print out all tensor shapes
         # print('down_proj_buffer', self.down_proj_buffer.shape)
@@ -125,6 +141,12 @@ class AdapterBuffer:
             seg_indptr=self.x_indptr,
             weight_indices=self.adapter_indices
         )
+
+        if layer_idx == 0:
+            torch.cuda.synchronize()
+            elapsed_ms = (time.time() - start_time) * 1000
+            print(f"upgemm time: {elapsed_ms:.3f} ms")
+            start_time = time.time()
 
         # if torch.isnan(x).any():
         #     print('x is nan2', x)
@@ -174,12 +196,17 @@ class AdapterBuffer:
                 weights=up_proj_buffer_by_grp[i].contiguous(),
                 batch_size=self.num_segments,
                 weight_column_major=False,
-                # out=up_buffer_by_grp[i],
+                #out=up_buffer_by_grp[i],
                 seg_indptr=self.x_indptr,
                 weight_indices=self.adapter_indices
             )
             up_buffer_by_grp[i].copy_(out)
 
+        if layer_idx == 0:
+            torch.cuda.synchronize()
+            elapsed_ms = (time.time() - start_time) * 1000
+            print(f"downgemm time: {elapsed_ms:.3f} ms")
+            start_time = time.time()
         scale = self.adapters[0].alpha / self.adapters[0].rank
 
         return scale * self.up_buffer
@@ -301,7 +328,7 @@ class MutableAdapter(BaseAdapter):
         self.chiN = self.d ** 0.5 * (1 - 1 / (4 * self.d) + 1 / (21 * self.d ** 2))
 
     @torch.no_grad()
-    def update(self, scores: list[float], seeds: list[int]) -> None:
+    def update(self, scores: list[float], seeds: list[int], max_sigma: float) -> None:
         if len(scores) != self.population_size or len(seeds) != self.population_size:
             raise ValueError(f"Expected scores and seeds for {self.population_size} individuals.")
 
@@ -362,6 +389,9 @@ class MutableAdapter(BaseAdapter):
 
             norm_ps = torch.sqrt(torch.sum(self.ps_down[layer_idx] ** 2) + torch.sum(self.ps_up[layer_idx] ** 2))
             self.sigma[layer_idx] *= torch.exp((self.cs / self.damps) * (norm_ps / self.chiN - 1))
+
+            if max_sigma > 0:
+                self.sigma[layer_idx] = torch.clamp(self.sigma[layer_idx], max=max_sigma)
 
             h_sigma_cond = (norm_ps / torch.sqrt(1 - (1 - self.cs) ** (2 * (self.population_size + 1)))) < (1.4 + 2 / (self.d + 1)) * self.chiN
             h_sigma = 1.0 if h_sigma_cond else 0.0

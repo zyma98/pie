@@ -594,6 +594,7 @@ class Driver:
             items=responses
         )
 
+    @torch.inference_mode()
     def create_adapter(self, cmd: CreateAdapter):
 
         cfg = self.lm.config
@@ -615,13 +616,15 @@ class Driver:
         if cmd.name in self.adapters:
             del self.adapters[cmd.name]
 
+    @torch.inference_mode()
     def update_adapter(self, cmd: UpdateAdapter):
 
         if cmd.name in self.adapters:
             adapter = self.adapters[cmd.name]
             if isinstance(adapter, MutableAdapter):
-                adapter.update(cmd.scores, cmd.seeds)
+                adapter.update(cmd.scores, cmd.seeds, cmd.max_sigma)
 
+    @torch.inference_mode()
     def forward_with_mutation(self, cmds: BatchForwardWithMutation):
 
         all_adapters = []
@@ -641,7 +644,7 @@ class Driver:
         all_output_indices = []
         all_output_indices_ptr = [0]
         single_token_inference_mode = True
-
+        start_time = time.time()
         for cmd in cmds.items:
 
             if cmd.adapter not in self.adapters:
@@ -801,14 +804,12 @@ class Driver:
                     )
                     responses.append(res)
 
-        # torch.cuda.synchronize()
-        # print(f"forward_text time {(time.time() - start_time) * 1000}ms  ")
+        torch.cuda.synchronize()
+        print(f"forward_text time {(time.time() - start_time) * 1000}ms  ")
 
         # clear all pytorch caches
         del all_adapters
-        # invoke gc
-        gc.collect()
-        torch.cuda.empty_cache()
+
 
         return BatchForwardTextResponse(
             items=responses

@@ -358,10 +358,24 @@ pub enum Command {
     },
 
     /// ---- Optimizer -----
-    CreateAdapter {
+    ///
+    ///
+    AllocateAdapters {
         inst_id: InstanceId,
         stream_id: LocalStreamId,
-        name: String,
+        adapters: Vec<IdRepr>,
+    },
+
+    DeallocateAdapters {
+        inst_id: InstanceId,
+        stream_id: LocalStreamId,
+        adapters: Vec<IdRepr>,
+    },
+
+    InitializeAdapter {
+        inst_id: InstanceId,
+        stream_id: LocalStreamId,
+        adapter: IdRepr,
         rank: u32,
         alpha: f32,
         population_size: u32,
@@ -369,25 +383,27 @@ pub enum Command {
         initial_sigma: f32,
     },
 
-    DestroyAdapter {
+    MutateAdapters {
         inst_id: InstanceId,
         stream_id: LocalStreamId,
-        name: String,
+        adapters: Vec<IdRepr>,
+        parent: IdRepr,
+        seeds: Vec<i64>,
     },
 
     UpdateAdapter {
         inst_id: InstanceId,
         stream_id: LocalStreamId,
-        name: String,
+        adapter: IdRepr,
         scores: Vec<f32>,
         seeds: Vec<i64>,
+        max_sigma: f32,
     },
 
-    ForwardWithMutation {
+    ForwardWithAdapter {
         inst_id: InstanceId,
         stream_id: LocalStreamId,
-        adapter: String,
-        seed: i64,
+        adapter: IdRepr,
         kv_page_last_len: u32,
         kv_pages: Vec<IdRepr>,
         text: Vec<u32>,
@@ -418,10 +434,13 @@ enum BatchGroup {
     Synchronize,
     EmbedImage,
     DebugQuery,
-    CreateAdapter,
-    DestroyAdapter,
+    //
+    AllocateAdapters,
+    DeallocateAdapters,
+    InitializeAdapter,
+    MutateAdapters,
     UpdateAdapter,
-    ForwardWithMutation,
+    ForwardWithAdapter,
 }
 
 impl Batchable<BatchGroup> for Command {
@@ -493,10 +512,12 @@ impl Batchable<BatchGroup> for Command {
             Command::Synchronize { .. } => batching::eager(),
             Command::EmbedImage { .. } => batching::eager(),
             Command::DebugQuery { .. } => batching::eager(),
-            Command::CreateAdapter { .. } => batching::eager(),
-            Command::DestroyAdapter { .. } => batching::eager(),
+            Command::AllocateAdapters { .. } => batching::eager(),
+            Command::DeallocateAdapters { .. } => batching::eager(),
+            Command::InitializeAdapter { .. } => batching::eager(),
+            Command::MutateAdapters { .. } => batching::eager(),
             Command::UpdateAdapter { .. } => batching::eager(),
-            Command::ForwardWithMutation { .. } => Box::new(batching::ManualStrategy::new(
+            Command::ForwardWithAdapter { .. } => Box::new(batching::ManualStrategy::new(
                 TRIGGERS.forward_text_trigger.clone(),
             )),
             _ => unreachable!(),
@@ -517,10 +538,13 @@ impl Batchable<BatchGroup> for Command {
             Command::Synchronize { .. } => BatchGroup::Synchronize,
             Command::EmbedImage { .. } => BatchGroup::EmbedImage,
             Command::DebugQuery { .. } => BatchGroup::DebugQuery,
-            Command::CreateAdapter { .. } => BatchGroup::CreateAdapter,
-            Command::DestroyAdapter { .. } => BatchGroup::DestroyAdapter,
+            Command::AllocateAdapters { .. } => BatchGroup::AllocateAdapters,
+            Command::DeallocateAdapters { .. } => BatchGroup::DeallocateAdapters,
+            Command::InitializeAdapter { .. } => BatchGroup::InitializeAdapter,
+            Command::MutateAdapters { .. } => BatchGroup::MutateAdapters,
             Command::UpdateAdapter { .. } => BatchGroup::UpdateAdapter,
-            Command::ForwardWithMutation { .. } => BatchGroup::ForwardWithMutation,
+            Command::ForwardWithAdapter { .. } => BatchGroup::ForwardWithAdapter,
+
             _ => unreachable!(),
         }
     }
@@ -1275,20 +1299,45 @@ impl L4m {
                 ))
             }
 
-            Command::CreateAdapter {
+            Command::AllocateAdapters {
                 inst_id,
                 stream_id,
-                name,
+                adapters,
+            } => Some((
+                Command::AllocateAdapters {
+                    inst_id,
+                    stream_id,
+                    adapters,
+                },
+                Stream::new(inst_id, stream_id),
+            )),
+            Command::DeallocateAdapters {
+                inst_id,
+                stream_id,
+                adapters,
+            } => Some((
+                Command::DeallocateAdapters {
+                    inst_id,
+                    stream_id,
+                    adapters,
+                },
+                Stream::new(inst_id, stream_id),
+            )),
+
+            Command::InitializeAdapter {
+                inst_id,
+                stream_id,
+                adapter,
                 rank,
                 alpha,
                 population_size,
                 mu_fraction,
                 initial_sigma,
             } => Some((
-                Command::CreateAdapter {
+                Command::InitializeAdapter {
                     inst_id,
                     stream_id,
-                    name,
+                    adapter,
                     rank,
                     alpha,
                     population_size,
@@ -1298,15 +1347,19 @@ impl L4m {
                 Stream::new(inst_id, stream_id),
             )),
 
-            Command::DestroyAdapter {
+            Command::MutateAdapters {
                 inst_id,
                 stream_id,
-                name,
+                adapters,
+                parent,
+                seeds,
             } => Some((
-                Command::DestroyAdapter {
+                Command::MutateAdapters {
                     inst_id,
                     stream_id,
-                    name,
+                    adapters,
+                    parent,
+                    seeds,
                 },
                 Stream::new(inst_id, stream_id),
             )),
@@ -1314,25 +1367,26 @@ impl L4m {
             Command::UpdateAdapter {
                 inst_id,
                 stream_id,
-                name,
+                adapter,
                 scores,
                 seeds,
+                max_sigma,
             } => Some((
                 Command::UpdateAdapter {
                     inst_id,
                     stream_id,
-                    name,
+                    adapter,
                     scores,
                     seeds,
+                    max_sigma,
                 },
                 Stream::new(inst_id, stream_id),
             )),
 
-            Command::ForwardWithMutation {
+            Command::ForwardWithAdapter {
                 inst_id,
                 stream_id,
                 adapter,
-                seed,
                 kv_page_last_len,
                 mut kv_pages,
                 text,
@@ -1349,11 +1403,10 @@ impl L4m {
                 );
 
                 Some((
-                    Command::ForwardWithMutation {
+                    Command::ForwardWithAdapter {
                         inst_id,
                         stream_id,
                         adapter,
-                        seed,
                         kv_page_last_len,
                         kv_pages,
                         text,
@@ -1587,11 +1640,19 @@ where
             }
             BatchGroup::EmbedImage => encode_pb_batch_embed_image(correlation_id, batch),
             BatchGroup::DebugQuery => encode_pb_batch_debug_query(correlation_id, batch),
-            BatchGroup::CreateAdapter => encode_pb_create_adapter(correlation_id, batch),
-            BatchGroup::DestroyAdapter => encode_pb_destroy_adapter(correlation_id, batch),
-            BatchGroup::UpdateAdapter => encode_pb_update_adapter(correlation_id, batch),
-            BatchGroup::ForwardWithMutation => {
-                encode_pb_batch_forward_with_mutation(correlation_id, batch)
+            BatchGroup::AllocateAdapters => {
+                encode_pb_batch_allocate_adapters(correlation_id, batch)
+            }
+            BatchGroup::DeallocateAdapters => {
+                encode_pb_batch_deallocate_adapters(correlation_id, batch)
+            }
+            BatchGroup::InitializeAdapter => {
+                encode_pb_batch_initialize_adapter(correlation_id, batch)
+            }
+            BatchGroup::MutateAdapters => encode_pb_batch_mutate_adapters(correlation_id, batch),
+            BatchGroup::UpdateAdapter => encode_pb_batch_update_adapter(correlation_id, batch),
+            BatchGroup::ForwardWithAdapter => {
+                encode_pb_batch_forward_with_adapter(correlation_id, batch)
             } // _ => unreachable!(),
         };
 
@@ -2109,78 +2170,20 @@ fn encode_pb_batch_debug_query(
     ((PROTOCOL_BASE, payload), Some(events))
 }
 
-fn encode_pb_create_adapter(
+fn encode_pb_batch_allocate_adapters(
     correlation_id: u32,
     batch: Vec<Command>,
 ) -> ((usize, Vec<u8>), Option<Vec<Event>>) {
-    let mut adapter_name = None;
-    let mut adapter_rank = None;
-    let mut adapter_alpha = None;
-    let mut adapter_population_size = None;
-    let mut adapter_mu_fraction = None;
-    let mut adapter_initial_sigma = None;
-    for cmd in batch {
-        match cmd {
-            Command::CreateAdapter {
-                inst_id: _,
-                stream_id: _,
-                name,
-                rank,
-                alpha,
-                population_size,
-                mu_fraction,
-                initial_sigma,
-            } => {
-                adapter_name = Some(name);
-                adapter_rank = Some(rank);
-                adapter_alpha = Some(alpha);
-                adapter_population_size = Some(population_size);
-                adapter_mu_fraction = Some(mu_fraction);
-                adapter_initial_sigma = Some(initial_sigma);
-
-                break;
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    let cmd = pb_bindings::request::Command::CreateAdapter(pb_bindings::CreateAdapter {
-        name: adapter_name.unwrap(),
-        rank: adapter_rank.unwrap(),
-        alpha: adapter_alpha.unwrap(),
-        population_size: adapter_population_size.unwrap(),
-        mu_fraction: adapter_mu_fraction.unwrap(),
-        initial_sigma: adapter_initial_sigma.unwrap(),
-    });
-    let payload = pb_bindings::Request {
-        correlation_id,
-        command: Some(cmd),
-    }
-    .encode_to_vec();
-    ((PROTOCOL_BASE, payload), None)
-}
-
-fn encode_pb_destroy_adapter(
-    correlation_id: u32,
-    batch: Vec<Command>,
-) -> ((usize, Vec<u8>), Option<Vec<Event>>) {
-    let mut adapter_name = None;
-    for cmd in batch {
-        match cmd {
-            Command::DestroyAdapter {
-                inst_id: _,
-                stream_id: _,
-                name,
-            } => {
-                adapter_name = Some(name);
-                break;
-            }
-            _ => unreachable!(),
-        }
-    }
-    let cmd = pb_bindings::request::Command::DestroyAdapter(pb_bindings::DestroyAdapter {
-        name: adapter_name.unwrap(),
-    });
+    let cmd = match batch.into_iter().next().unwrap() {
+        Command::AllocateAdapters {
+            inst_id,
+            stream_id,
+            adapters,
+        } => pb_bindings::request::Command::AllocateAdapters(pb_bindings::AllocateAdapters {
+            adapters,
+        }),
+        _ => unreachable!(),
+    };
 
     let payload = pb_bindings::Request {
         correlation_id,
@@ -2190,36 +2193,20 @@ fn encode_pb_destroy_adapter(
     ((PROTOCOL_BASE, payload), None)
 }
 
-fn encode_pb_update_adapter(
+fn encode_pb_batch_deallocate_adapters(
     correlation_id: u32,
     batch: Vec<Command>,
 ) -> ((usize, Vec<u8>), Option<Vec<Event>>) {
-    let mut adapter_name = None;
-    let mut adapter_scores = None;
-    let mut adapter_seeds = None;
-    for cmd in batch {
-        match cmd {
-            Command::UpdateAdapter {
-                inst_id: _,
-                stream_id: _,
-                name,
-                scores,
-                seeds,
-            } => {
-                adapter_name = Some(name);
-                adapter_scores = Some(scores);
-                adapter_seeds = Some(seeds);
-                break;
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    let cmd = pb_bindings::request::Command::UpdateAdapter(pb_bindings::UpdateAdapter {
-        name: adapter_name.unwrap(),
-        scores: adapter_scores.unwrap(),
-        seeds: adapter_seeds.unwrap(),
-    });
+    let cmd = match batch.into_iter().next().unwrap() {
+        Command::DeallocateAdapters {
+            inst_id,
+            stream_id,
+            adapters,
+        } => pb_bindings::request::Command::DeallocateAdapters(pb_bindings::DeallocateAdapters {
+            adapters,
+        }),
+        _ => unreachable!(),
+    };
 
     let payload = pb_bindings::Request {
         correlation_id,
@@ -2229,7 +2216,90 @@ fn encode_pb_update_adapter(
     ((PROTOCOL_BASE, payload), None)
 }
 
-fn encode_pb_batch_forward_with_mutation(
+fn encode_pb_batch_initialize_adapter(
+    correlation_id: u32,
+    batch: Vec<Command>,
+) -> ((usize, Vec<u8>), Option<Vec<Event>>) {
+    let cmd = match batch.into_iter().next().unwrap() {
+        Command::InitializeAdapter {
+            inst_id,
+            stream_id,
+            adapter,
+            rank,
+            alpha,
+            population_size,
+            mu_fraction,
+            initial_sigma,
+        } => pb_bindings::request::Command::InitializeAdapter(pb_bindings::InitializeAdapter {
+            adapter,
+            rank,
+            alpha,
+            population_size,
+            mu_fraction,
+            initial_sigma,
+        }),
+        _ => unreachable!(),
+    };
+
+    let payload = pb_bindings::Request {
+        correlation_id,
+        command: Some(cmd),
+    }
+    .encode_to_vec();
+    ((PROTOCOL_BASE, payload), None)
+}
+
+
+
+fn encode_pb_batch_mutate_adapters(
+    correlation_id: u32,
+    batch: Vec<Command>,
+) -> ((usize, Vec<u8>), Option<Vec<Event>>) {
+    let cmd = match batch.into_iter().next().unwrap() {
+        Command::MutateAdapters {
+            inst_id, stream_id, adapters, parent, seeds
+        } => pb_bindings::request::Command::MutateAdapters(pb_bindings::MutateAdapters {
+            adapters, parent, seeds
+        }),
+        _ => unreachable!(),
+    };
+
+    let payload = pb_bindings::Request {
+        correlation_id,
+        command: Some(cmd),
+    }
+        .encode_to_vec();
+    ((PROTOCOL_BASE, payload), None)
+}
+
+
+
+
+fn encode_pb_batch_update_adapter(
+    correlation_id: u32,
+    batch: Vec<Command>,
+) -> ((usize, Vec<u8>), Option<Vec<Event>>) {
+    let cmd = match batch.into_iter().next().unwrap() {
+        Command::UpdateAdapter {
+            inst_id, stream_id, adapter, scores, seeds, max_sigma
+        } => pb_bindings::request::Command::UpdateAdapter(pb_bindings::UpdateAdapter {
+            adapter, scores, seeds, max_sigma
+        }),
+        _ => unreachable!(),
+    };
+
+    let payload = pb_bindings::Request {
+        correlation_id,
+        command: Some(cmd),
+    }
+        .encode_to_vec();
+    ((PROTOCOL_BASE, payload), None)
+}
+
+
+
+
+fn encode_pb_batch_forward_with_adapter(
     correlation_id: u32,
     batch: Vec<Command>,
 ) -> ((usize, Vec<u8>), Option<Vec<Event>>) {
@@ -2237,11 +2307,10 @@ fn encode_pb_batch_forward_with_mutation(
     let mut events = Vec::new();
     for cmd in batch {
         match cmd {
-            Command::ForwardWithMutation {
+            Command::ForwardWithAdapter {
                 inst_id: _,
                 stream_id: _,
                 adapter,
-                seed,
                 kv_page_last_len,
                 kv_pages: kv_page_ids,
                 text,
@@ -2255,9 +2324,8 @@ fn encode_pb_batch_forward_with_mutation(
                     .map(|b| pb_bindings::BrleBuffer { buffer: b })
                     .collect();
 
-                let pb = pb_bindings::ForwardWithMutation {
+                let pb = pb_bindings::ForwardWithAdapter {
                     adapter,
-                    seed,
                     kv_page_ids,
                     kv_page_last_len,
                     token_ids: text,
@@ -2272,7 +2340,7 @@ fn encode_pb_batch_forward_with_mutation(
         }
     }
     let cmd =
-        pb_bindings::request::Command::ForwardWithMutation(pb_bindings::BatchForwardWithMutation {
+        pb_bindings::request::Command::ForwardWithAdapter(pb_bindings::BatchForwardWithAdapter {
             items,
         });
     let payload = pb_bindings::Request {

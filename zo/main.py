@@ -24,13 +24,13 @@ from countdown import CountdownTasksDataset, reward_function, SYSTEM_MESSAGE, US
 # --- Server and Paths ---
 SERVER_URIS = [
     "ws://127.0.0.1:8080",
-    "ws://127.0.0.1:8081",
-    "ws://127.0.0.1:8082",
-    "ws://127.0.0.1:8083",
-    "ws://127.0.0.1:8084",
-    "ws://127.0.0.1:8085",
-    "ws://127.0.0.1:8086",
-    "ws://127.0.0.1:8087",
+    # "ws://127.0.0.1:8081",
+    # "ws://127.0.0.1:8082",
+    # "ws://127.0.0.1:8083",
+    # "ws://127.0.0.1:8084",
+    # "ws://127.0.0.1:8085",
+    # "ws://127.0.0.1:8086",
+    # "ws://127.0.0.1:8087",
 ]
 SCRIPT_DIR = Path(__file__).resolve().parent
 # NOTE: Update this path to your actual inferlet dependency location
@@ -51,12 +51,13 @@ INFERLET_SRC_FILES = [
 # --- ES Hyperparameters ---
 ADAPTER_NAME = "evo-countdown-v1"
 TRAINING_STEPS = 10000
-POPULATION_SIZE = 512 * 8  # Total number of seeds per step across all clients
+POPULATION_SIZE = 512  # Total number of seeds per step across all clients
 TASKS_PER_SEED = 4        # Number of tasks to evaluate for each seed
 NUM_ROLLOUT_WORKERS = 8   # Number of inferlets PER CLIENT
 LORA_RANK = 8
 LORA_ALPHA = 16.0
 INITIAL_SIGMA = 0.005
+MAX_SIGMA = 0.014
 MU_FRACTION = 0.5
 MAX_TOKENS_GEN = 512
 
@@ -301,6 +302,13 @@ async def main():
                     }, step=step)
                     continue
 
+                # --- Output length stats ---
+                # Approximate "token" length via whitespace split (no tokenizer dependency).
+                out_lens_chars = [len(t) for t in generated_texts]
+                out_lens_ws_tokens = [len(t.split()) for t in generated_texts]
+                avg_len_chars = float(np.mean(out_lens_chars))
+                avg_len_ws_tokens = float(np.mean(out_lens_ws_tokens))
+
                 # --- 4b. Scoring Phase ---
                 print("Phase: Scoring")
                 scores = [
@@ -365,6 +373,7 @@ async def main():
                     "--name", ADAPTER_NAME,
                     "--seeds", ",".join(map(str, seeds)),
                     "--scores", ",".join(map(str, aggregated_scores)),
+                    "--max-sigma", str(MAX_SIGMA),
                 ]
                 update_tasks = [
                     launch_and_get_result(client, program_hashes["es-update"], update_args, worker_id=f"C{i}-Update")
@@ -382,6 +391,8 @@ async def main():
                         "train/mean_score": step_mean,
                         "train/max_score": step_max,
                         "train/min_score": step_min,
+                        "train/avg_output_len_chars": avg_len_chars,
+                        "train/avg_output_len_ws_tokens": avg_len_ws_tokens,
                         "train/reward_hist": wandb.Histogram(scores),
                         "train/aggregated_reward_hist": wandb.Histogram(aggregated_scores),
                         "perf/step_duration_sec": float(step_duration),

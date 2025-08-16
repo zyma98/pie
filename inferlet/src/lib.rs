@@ -59,7 +59,7 @@ pub mod bindings_server {
 }
 
 use crate::bindings::pie::inferlet::{
-    allocate, core, forward, forward_text, input_image, input_text, output_text, tokenize,
+    allocate, core, forward, forward_text, input_image, input_text, optimize, output_text, tokenize,
 };
 
 pub use crate::bindings_app::{export, exports::pie::inferlet::run::Guest as RunSync};
@@ -79,14 +79,7 @@ pub struct Queue {
 #[derive(Clone, Debug)]
 pub struct Model {
     pub(crate) inner: Rc<core::Model>,
-    pub(crate) adapter: Option<Adapter>,
-}
-
-/// Represents a specific model instance, providing access to its metadata and functionality.
-#[derive(Clone, Debug)]
-pub struct Adapter {
-    pub name: String,
-    pub seed: i64,
+    pub(crate) adapter: Option<u32>,
 }
 
 /// Returns the runtime version string.
@@ -275,15 +268,12 @@ impl Model {
         Context::new(self)
     }
 
-    pub fn set_adapter(&mut self, name: &str, seed: i64) {
-        self.adapter = Some(Adapter {
-            name: name.to_string(),
-            seed
-        })
+    pub fn set_adapter(&mut self, adapter_id: u32) {
+        self.adapter = Some(adapter_id)
     }
 
-    pub fn get_adapter(&self) -> Option<&Adapter> {
-        self.adapter.as_ref()
+    pub fn get_adapter(&self) -> Option<u32> {
+        self.adapter
     }
 
     pub fn remove_adapter(&mut self) {

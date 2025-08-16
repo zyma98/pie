@@ -292,6 +292,7 @@ class L4maModel(nn.Module):
             self.workspace_buffer
         )
 
+    @torch.inference_mode()
     def forward(
             self,
             adapters: list[Adapter] | None,
@@ -321,6 +322,9 @@ class L4maModel(nn.Module):
         # concat all weights for segment gemm.
         # we assume requests are sorted such that initial n requests are the ones with adapters
         if adapters is not None:
+
+            #print('forward!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+
             adapter_buffer = AdapterBuffer(
                 adapters=adapters,
                 adapter_indices=adapter_indices,
