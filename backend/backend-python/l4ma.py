@@ -142,7 +142,6 @@ class L4maAttention(nn.Module):
 
         # apply adapters if provided
         if adapter_buffer is not None:
-
             delta = adapter_buffer.compute_lora_delta(self.layer_idx, hidden_states)
             q_delta = delta[0]
             k_delta = delta[1]

@@ -659,7 +659,7 @@ class Driver:
         if cmd.adapter in self.adapters:
             adapter = self.adapters[cmd.adapter]
             if isinstance(adapter, CmaesAdapter):
-                adapter.update(self.adapter_at_layer, cmd.scores, cmd.seeds, cmd.max_sigma)
+                adapter.update(cmd.scores, cmd.seeds, cmd.max_sigma)
 
     @torch.inference_mode()
     def forward_with_adapter(self, cmds: BatchForwardWithAdapter):
@@ -829,8 +829,8 @@ class Driver:
                     )
                     responses.append(res)
 
-        torch.cuda.synchronize()
-        print(f"forward_text time {(time.time() - start_time) * 1000}ms  ")
+        #torch.cuda.synchronize()
+        #print(f"forward_text time {(time.time() - start_time) * 1000}ms  ")
 
         return BatchForwardTextResponse(
             items=responses
