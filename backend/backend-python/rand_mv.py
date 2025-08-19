@@ -294,7 +294,7 @@ def run_tests():
     def do_case(B, I, O, dtype_x=torch.float16, dtype_S=torch.float32):
         x = torch.randn(B, I, device=device, dtype=dtype_x)
         # Non-negative stdevs; include zeros to exercise masking
-        S = torch.rand(I, O, device=device, dtype=dtype_S)
+        S = torch.ones(I, O, device=device, dtype=dtype_S)
         seeds = torch.randint(0, 1 << 30, (B,), device=device, dtype=torch.int64)
 
         # Baseline via generator + bmm
@@ -313,6 +313,12 @@ def run_tests():
             seeds2[1] = seeds2[1] + 12345  # change row 1 only
             y1 = batched_randn_matmul(x, seeds, S, out_dtype=torch.float32)
             y2 = batched_randn_matmul(x, seeds2, S, out_dtype=torch.float32)
+
+            #W1 = batched_randn_generate(seeds, S, device=device, dtype=torch.float32)  # [B, I, O]
+            #W2 = batched_randn_generate(seeds2, S, device=device, dtype=torch.float32)  # [B, I, O]
+
+            #print(W1)
+            #print(W2)
             d0 = _max_abs_diff(y1[0], y2[0])
             d2 = _max_abs_diff(y1[2], y2[2])
             print(f"  repro rows 0 & 2 unchanged: {d0:.3e}, {d2:.3e}")

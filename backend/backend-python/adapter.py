@@ -361,8 +361,10 @@ class AdapterBuffer:
         v_mean = v_down @ Wv
 
         # ===== 3) Combine mean + noise =====
-        q_final = q_mean + q_noise_up
-        k_final = k_mean + k_noise_up
-        v_final = v_mean + v_noise_up
+        scaling = self.adapter.alpha / float(rank)
+
+        q_final = scaling * (q_mean + q_noise_up)
+        k_final = scaling * (k_mean + k_noise_up)
+        v_final = scaling * (v_mean + v_noise_up)
 
         return [q_final, k_final, v_final]

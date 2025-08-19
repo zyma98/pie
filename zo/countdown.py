@@ -12,10 +12,20 @@ SYSTEM_MESSAGE = (
 USER_TEMPLATE = (
     "Using the numbers {numbers}, create an equation that equals {target}. "
     "You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. "
-    "Show your work in <think> </think> tags. "
-    "And return the final answer in <answer> </answer> tags, for example <answer> (1 + 2) / 3 </answer>."
+    "Return the final answer in <answer> </answer> tags, for example <answer> (1 + 2) / 3 </answer>."
 )
-RESPONSE_PROMPT = "Let me solve this step by step.\n<think>"
+RESPONSE_PROMPT = "Let me solve this step by step."
+
+
+def format_prompt(numbers: list[int], target: int) -> str:
+    """Prefix is the *actual* input to the model."""
+    user_message = USER_TEMPLATE.format(numbers=numbers, target=target)
+
+    prompt = "<|begin_of_text|>"
+    prompt += f"<|start_header_id|>system<|end_header_id|>\n\n{SYSTEM_MESSAGE}<|eot_id|>"
+    prompt += f"<|start_header_id|>user<|end_header_id|>\n\n{user_message}<|eot_id|>"
+    prompt += f"<|start_header_id|>assistant<|end_header_id|>\n\n{RESPONSE_PROMPT}"
+    return prompt
 
 
 class CountdownTasksDataset(Dataset):
@@ -38,21 +48,10 @@ class CountdownTasksDataset(Dataset):
 
     def __getitem__(self, idx):
         item = self.data.iloc[idx].to_dict()
-        item.update(self.get_prompt(item["nums"], item["target"]))
+        item.update({
+            "prompt": format_prompt(item["nums"], item["target"])
+        })
         return item
-
-    def get_prompt(self, numbers: list[int], target: int):
-        """Prefix is the *actual* input to the model."""
-        user_message = USER_TEMPLATE.format(numbers=numbers, target=target)
-
-        prefix = "<|begin_of_text|>"
-        prefix += f"<|start_header_id|>system<|end_header_id|>\n\n{SYSTEM_MESSAGE}<|eot_id|>"
-        task = f"<|start_header_id|>user<|end_header_id|>\n\n{user_message}<|eot_id|>"
-        task += f"<|start_header_id|>assistant<|end_header_id|>\n\n{RESPONSE_PROMPT}"
-        return {
-            "prefix": prefix,
-            "task": task
-        }
 
 
 def format_reward_function(response: str, end_token: str | None = None) -> float:
@@ -130,12 +129,11 @@ def reward_function(
 
     Total reward = 0.1 * format_reward + answer_reward
     """
-    format_reward = format_reward_function("<think>" + response, end_token)
     answer_reward = answer_reward_function(response, numbers, target)
     return {
-        "reward": format_reward * 0.1 + answer_reward,
+        "reward": answer_reward,
         "reward_info": {
-            "format_reward": format_reward,
+            "format_reward": 0.0,
             "answer_reward": answer_reward,
         },
     }

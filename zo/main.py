@@ -1,11 +1,13 @@
 import asyncio
-import csv
+# import csv  # W&B CHANGE: no longer needed (seed-score artifacts removed)
 import json
 import os
 import time
 from pathlib import Path
 from typing import Any, Optional
 from contextlib import AsyncExitStack
+import html  # W&B CHANGE: for wandb.Html logging
+from collections import defaultdict  # >>> CHANGED
 
 from blake3 import blake3
 import numpy as np
@@ -51,9 +53,9 @@ INFERLET_SRC_FILES = [
 # --- ES Hyperparameters ---
 ADAPTER_NAME = "evo-countdown-v1"
 TRAINING_STEPS = 10000
-POPULATION_SIZE = 512 * 8  # Total number of seeds per step across all clients
+POPULATION_SIZE = 128 * 8 #512 * 8  # Total number of seeds per step across all clients
 TASKS_PER_SEED = 4        # Number of tasks to evaluate for each seed
-NUM_ROLLOUT_WORKERS = 8   # Number of inferlets PER CLIENT
+NUM_ROLLOUT_WORKERS = 8#8   # Number of inferlets PER CLIENT
 LORA_RANK = 8
 LORA_ALPHA = 16.0
 INITIAL_SIGMA = 0.005
@@ -65,7 +67,7 @@ MAX_TOKENS_GEN = 512
 DATA_PATH = "./Countdown-Tasks-3to4"
 
 # --- W&B Config ---
-WANDB_PROJECT = os.getenv("WANDB_PROJECT", "pie-es-v2")
+WANDB_PROJECT = os.getenv("WANDB_PROJECT", "pie-es-v4")
 WANDB_ENTITY = os.getenv("WANDB_ENTITY")
 WANDB_MODE = os.getenv("WANDB_MODE")  # e.g., "offline"
 WANDB_TAGS = ["es", "countdown", "lora"]
@@ -145,6 +147,7 @@ async def main():
             "lora_alpha": LORA_ALPHA,
             "initial_sigma": INITIAL_SIGMA,
             "mu_fraction": MU_FRACTION,
+            "max_sigma": MAX_SIGMA,  # W&B CHANGE: include max sigma
             "max_tokens_gen": MAX_TOKENS_GEN,
             "server_uris": SERVER_URIS,
             "data_path": DATA_PATH,
@@ -154,9 +157,9 @@ async def main():
         settings=wandb.Settings(start_method="thread", _disable_stats=False),
         mode=WANDB_MODE if WANDB_MODE else None,
     )
+    # W&B CHANGE: simplify metric definitions and drive everything by `step`
     wandb.define_metric("step")
-    wandb.define_metric("train/*", step_metric="step")
-    wandb.define_metric("perf/*", step_metric="step")
+    wandb.define_metric("*", step_metric="step")
 
     try:
         # Optionally snapshot the code directory
@@ -228,17 +231,25 @@ async def main():
 
                 # --- 4a. Rollout Phase (Distributed) ---
                 print(f"Phase: Rollout across {num_clients} clients")
-                seeds = np.random.randint(-2**63, 2**63 - 1, size=POPULATION_SIZE, dtype=np.int64)
+
+                # >>> CHANGED: draw base seeds, repeat per task; sample tasks per seed
+                base_seeds = np.random.randint(-2**63, 2**63 - 1, size=POPULATION_SIZE, dtype=np.int64)  # seeds per population member
                 num_total_tasks = POPULATION_SIZE * TASKS_PER_SEED
-                sample_indices = np.random.choice(len(dataset), size=num_total_tasks, replace=True)
-                batch = [dataset[i] for i in sample_indices]
-                prefix = f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{SYSTEM_MESSAGE}<|eot_id|>"
 
-                # Distribute work among clients
-                client_seed_chunks = np.array_split(seeds, num_clients)
-                client_batch_chunks = np.array_split(np.array(batch, dtype=object), num_clients)
+                # sample TASKS_PER_SEED tasks for each seed, then flatten
+                task_idx_matrix = np.random.choice(len(dataset), size=(POPULATION_SIZE, TASKS_PER_SEED), replace=True)
+                all_tasks = [dataset[i] for i in task_idx_matrix.reshape(-1)]
 
-                rollout_tasks = []
+                # repeat each seed TASKS_PER_SEED times to match tasks (len(seeds) == len(tasks))
+                repeated_seeds = np.repeat(base_seeds, TASKS_PER_SEED)  # len == num_total_tasks
+
+                # Distribute parallel arrays among clients
+                client_seed_chunks = np.array_split(repeated_seeds, num_clients)
+                client_batch_chunks = np.array_split(np.array(all_tasks, dtype=object), num_clients)
+
+                rollout_futures = []  # >>> CHANGED: keep metadata to rebuild seed->score mapping
+                rollout_meta = []
+
                 for client_idx, client in enumerate(clients):
                     client_seeds = client_seed_chunks[client_idx]
                     client_batch = client_batch_chunks[client_idx]
@@ -255,37 +266,50 @@ async def main():
                         if len(worker_seeds) == 0:
                             continue
 
-                        worker_task_prompts = [
-                            f"<|start_header_id|>user<|end_header_id|>\n\n{USER_TEMPLATE.format(numbers=item['nums'], target=item['target'])}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n{RESPONSE_PROMPT}"
-                            for item in worker_batch
-                        ]
-                        worker_tasks_json = json.dumps(worker_task_prompts)
+                        # build prompts for this worker's tasks
+                        worker_tasks_json = json.dumps([item["prompt"] for item in worker_batch])
 
                         rollout_args = [
                             "--name", ADAPTER_NAME,
-                            "--prefix", prefix,
-                            "--seeds", ",".join(map(str, worker_seeds)),
+                            "--seeds", ",".join(map(str, worker_seeds)),  # >>> CHANGED: seeds list matches tasks
                             "--tasks-json", worker_tasks_json,
                             "--max-num-outputs", str(MAX_TOKENS_GEN),
                         ]
                         descriptive_worker_id = f"C{client_idx}-W{worker_idx}"
-                        rollout_tasks.append(
-                            launch_and_get_result(client, program_hashes["es-rollout"], rollout_args, worker_id=descriptive_worker_id)
-                        )
+                        fut = launch_and_get_result(client, program_hashes["es-rollout"], rollout_args, worker_id=descriptive_worker_id)
+                        rollout_futures.append(fut)
+                        # store seeds + tasks for alignment after gather
+                        rollout_meta.append({
+                            "seeds": worker_seeds.tolist(),
+                            "tasks": list(worker_batch),
+                            "who": descriptive_worker_id,
+                        })
 
-                worker_results_json = await asyncio.gather(*rollout_tasks)
-
-                # Combine results
+                worker_results_json = await asyncio.gather(*rollout_futures)
+                #print(worker_results_json)
+                # Combine results + aligned seeds/tasks
                 generated_texts = []
-                for res_json in worker_results_json:
-                    if res_json:
-                        generated_texts.extend(json.loads(res_json))
-                    else:
-                        print("⚠️ Warning: A rollout worker did not return a result.")
+                generated_seeds = []  # >>> CHANGED
+                generated_tasks = []  # >>> CHANGED
+                mismatch = False
 
-                if len(generated_texts) != num_total_tasks:
-                    msg = (f"Mismatch in expected tasks ({num_total_tasks}) and "
-                           f"generated texts ({len(generated_texts)}). Skipping step.")
+                for res_json, meta in zip(worker_results_json, rollout_meta):
+                    if res_json:
+                        texts = json.loads(res_json)
+                        if len(texts) != len(meta["seeds"]) or len(texts) != len(meta["tasks"]):
+                            print(f"⚠️ Warning: Worker {meta['who']} returned {len(texts)} outputs "
+                                  f"but had {len(meta['seeds'])} seeds / {len(meta['tasks'])} tasks.")
+                            mismatch = True
+                        generated_texts.extend(texts)
+                        generated_seeds.extend(meta["seeds"])
+                        generated_tasks.extend(meta["tasks"])
+                    else:
+                        print(f"⚠️ Warning: A rollout worker ({meta['who']}) did not return a result.")
+                        mismatch = True
+
+                if mismatch or len(generated_texts) != num_total_tasks or len(generated_seeds) != num_total_tasks:
+                    msg = (f"Mismatch in expected tasks ({num_total_tasks}) vs "
+                           f"generated_texts ({len(generated_texts)}), seeds ({len(generated_seeds)}). Skipping step.")
                     print(f"❌ Error: {msg}")
                     try:
                         wandb.alert(title="Rollout mismatch", text=msg, level=wandb.AlertLevel.WARN)
@@ -293,17 +317,11 @@ async def main():
                         pass
                     wandb.log({
                         "step": step,
-                        "perf/num_clients": num_clients,
-                        "perf/workers_per_client": NUM_ROLLOUT_WORKERS,
-                        "perf/population_size": POPULATION_SIZE,
-                        "perf/tasks_per_seed": TASKS_PER_SEED,
-                        "perf/rollout_tasks": len(rollout_tasks),
-                        "perf/generated_texts": len(generated_texts),
+                        "perf/step_duration_sec": float(time.time() - start_time),
                     }, step=step)
                     continue
 
                 # --- Output length stats ---
-                # Approximate "token" length via whitespace split (no tokenizer dependency).
                 out_lens_chars = [len(t) for t in generated_texts]
                 out_lens_ws_tokens = [len(t.split()) for t in generated_texts]
                 avg_len_chars = float(np.mean(out_lens_chars))
@@ -311,68 +329,50 @@ async def main():
 
                 # --- 4b. Scoring Phase ---
                 print("Phase: Scoring")
-                scores = [
-                    reward_function(text, batch[i]["nums"], batch[i]["target"], end_token="<|eot_id|>")["reward"]
+                reward_infos = [
+                    reward_function(text, generated_tasks[i]["nums"], generated_tasks[i]["target"], end_token="<|eot_id|>")  # >>> CHANGED: use aligned tasks
                     for i, text in enumerate(generated_texts)
                 ]
+                scores = [float(ri.get("reward", 0.0)) for ri in reward_infos]
+                answer_rewards = [float(ri.get("answer_reward", 0.0)) for ri in reward_infos]
+                format_rewards = [float(ri.get("format_reward", 0.0)) for ri in reward_infos]
 
                 # --- 4c. Aggregation Phase ---
                 print("Phase: Aggregating Scores")
-                aggregated_scores = [
-                    float(np.mean(scores[i * TASKS_PER_SEED: (i + 1) * TASKS_PER_SEED]))
-                    for i in range(POPULATION_SIZE)
-                ]
+                # >>> CHANGED: value-based grouping by actual seed values
+                scores_by_seed: dict[int, list[float]] = defaultdict(list)
+                for s, sc in zip(generated_seeds, scores):
+                    scores_by_seed[int(s)].append(float(sc))
+
+                # average per base seed, preserving base_seeds' order for update
+                aggregated_scores = [float(np.mean(scores_by_seed[int(s)])) for s in base_seeds]  # len == POPULATION_SIZE
+
                 step_mean = float(np.mean(scores))
+                step_std = float(np.std(scores))
                 step_max = float(np.max(scores))
                 step_min = float(np.min(scores))
-                print(f"Average reward for this step: {step_mean:.4f}")
+                success_rate_train = float(np.mean(answer_rewards)) if len(answer_rewards) else 0.0
 
-                # --- Save per-seed scores (CSV + W&B artifact, not visualized) ---
-                csv_dir = Path(wandb.run.dir) / "seed_scores"
-                csv_dir.mkdir(parents=True, exist_ok=True)
-                csv_path = csv_dir / f"seed_scores_step_{step:05d}.csv"
-                with csv_path.open("w", newline="") as f:
-                    writer = csv.writer(f)
-                    writer.writerow(["step", "seed", "aggregated_score", "task_scores"])
-                    for i, seed in enumerate(seeds):
-                        seg = scores[i * TASKS_PER_SEED: (i + 1) * TASKS_PER_SEED]
-                        writer.writerow([
-                            step,
-                            int(seed),
-                            float(aggregated_scores[i]),
-                            json.dumps([float(s) for s in seg]),
-                        ])
-                artifact = wandb.Artifact(
-                    name=f"{wandb.run.id}_seed_scores_step_{step:05d}",
-                    type="seed-scores",
-                    metadata={
-                        "step": step,
-                        "population_size": int(POPULATION_SIZE),
-                        "tasks_per_seed": int(TASKS_PER_SEED),
-                    },
-                )
-                artifact.add_file(str(csv_path))
-                run.log_artifact(artifact)
+                mean_population_score = float(np.mean(aggregated_scores))
+                mu_k = max(1, int(np.ceil(MU_FRACTION * POPULATION_SIZE)))
+                top_mu_mean = float(np.mean(sorted(aggregated_scores, reverse=True)[:mu_k]))
 
-                # --- (Optional) Log a small qualitative sample ---
-                sample_count = min(10, len(generated_texts))
-                sample_idxs = np.random.choice(len(generated_texts), size=sample_count, replace=False)
-                sample_table = wandb.Table(columns=["i", "nums", "target", "prediction", "score"])
-                for idx in sample_idxs:
-                    sample_table.add_data(
-                        int(idx),
-                        str(batch[idx]["nums"]),
-                        int(batch[idx]["target"]),
-                        generated_texts[idx][:512],
-                        float(scores[idx]),
+                # --- (New) Log a small qualitative HTML sample like script #2 ---
+                num_to_log = min(5, len(generated_texts))
+                if num_to_log > 0:
+                    episode_html = "<br><hr><br>".join(
+                        f"<pre>{html.escape(generated_texts[idx][:2048])}</pre>"
+                        for idx in np.random.choice(len(generated_texts), size=num_to_log, replace=False)
                     )
+                else:
+                    episode_html = "<pre>No predictions</pre>"
 
                 # --- 4d. Update Phase (Distributed) ---
                 print("Phase: Update")
                 update_args = [
                     "--name", ADAPTER_NAME,
-                    "--seeds", ",".join(map(str, seeds)),
-                    "--scores", ",".join(map(str, aggregated_scores)),
+                    "--seeds", ",".join(map(str, base_seeds)),          # >>> CHANGED: one score per unique/base seed
+                    "--scores", ",".join(map(str, aggregated_scores)),  # aligned with base_seeds order
                     "--max-sigma", str(MAX_SIGMA),
                 ]
                 update_tasks = [
@@ -388,27 +388,27 @@ async def main():
                 wandb.log(
                     {
                         "step": step,
-                        "train/mean_score": step_mean,
-                        "train/max_score": step_max,
-                        "train/min_score": step_min,
-                        "train/avg_output_len_chars": avg_len_chars,
-                        "train/avg_output_len_ws_tokens": avg_len_ws_tokens,
-                        "train/reward_hist": wandb.Histogram(scores),
-                        "train/aggregated_reward_hist": wandb.Histogram(aggregated_scores),
+                        "mean_reward": step_mean,
+                        "std_reward": step_std,
+                        "success_rate/train": success_rate_train,
+                        "duration_seconds": float(step_duration),
                         "perf/step_duration_sec": float(step_duration),
-                        "perf/num_clients": num_clients,
-                        "perf/workers_per_client": NUM_ROLLOUT_WORKERS,
-                        "perf/population_size": POPULATION_SIZE,
-                        "perf/tasks_per_seed": TASKS_PER_SEED,
+                        "num_finished_episodes": int(len(generated_texts)),
+                        "mean_response_len": float(avg_len_ws_tokens),
+                        "answer_reward/mean": float(np.mean(answer_rewards)) if answer_rewards else 0.0,
+                        "format_reward/mean": float(np.mean(format_rewards)) if format_rewards else 0.0,
+                        "es/mean_population_score": mean_population_score,
+                        "es/mean_fittest_score": top_mu_mean,
+                        "episodes_text": wandb.Html(episode_html),
                     },
                     step=step,
                 )
-                wandb.log({"samples/predictions": sample_table}, step=step)
 
             print("\nTraining finished!")
             wandb.summary["final_mean_score"] = step_mean
             wandb.summary["final_max_score"] = step_max
             wandb.summary["final_min_score"] = step_min
+            wandb.summary["final_success_rate_train"] = success_rate_train  # W&B CHANGE
 
     except KeyboardInterrupt:
         print("\nTraining interrupted by user.")

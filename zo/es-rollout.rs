@@ -19,7 +19,6 @@ unique seed to the model for each batch of tasks and generates outputs.
 
 Options:
       --name <STRING>            The name of the adapter to use.
-      --prefix <STRING>          The text prefix to use for all tasks.
       --seeds <I64,...>          A comma-separated list of i64 seeds for the adapter.
       --tasks-json <JSON_STRING> A JSON string representing an array of task prompts.
       --max-num-outputs <INT>    The maximum number of new tokens to generate per task.
@@ -45,9 +44,7 @@ async fn main() -> Result<(), String> {
     let name: String = args
         .value_from_str("--name")
         .map_err(|e| e.to_string())?;
-    let prefix: String = args
-        .value_from_str("--prefix")
-        .map_err(|e| e.to_string())?;
+
     let max_num_outputs: usize = args
         .value_from_str("--max-num-outputs")
         .map_err(|e| e.to_string())?;
@@ -69,21 +66,14 @@ async fn main() -> Result<(), String> {
         .map_err(|e| format!("Failed to parse tasks JSON: {}", e))?;
 
 
-    // --- 2. Input Validation ---
-    if seeds.is_empty() {
-        return Err("At least one seed must be provided.".to_string());
-    }
-    // This check ensures that the tasks can be evenly distributed among the seeds.
-    if tasks.len() % seeds.len() != 0 {
+    if tasks.len() != seeds.len() {
         return Err(format!(
-            "The number of tasks ({}) must be a multiple of the number of seeds ({}).",
+            "The number of tasks ({}) must the same as the number of seeds ({}).",
             tasks.len(),
             seeds.len()
         ));
     }
 
-    // --- 3. Parallel Rollout ---
-    let num_tasks_per_seed = tasks.len() / seeds.len();
     // The futures vector for a single-threaded (Wasm) environment does not need the `Send` bound.
     let mut futures: Vec<Pin<Box<dyn Future<Output = String>>>> = vec![];
 
@@ -91,41 +81,31 @@ async fn main() -> Result<(), String> {
     let model = inferlet::get_auto_model();
     let queue = model.create_queue();
 
-    let es_adapter = queue.import_adapter("es-adapter");
+    let es_adapter = queue.import_adapter(&name);
 
     println!("🚀 Starting parallel rollout...");
     for i in 0..seeds.len() {
+
+        let task = tasks[i].clone();
+        let seed = seeds[i].clone();
+
+        //println!("task: {}", &task);
+
         // Get a new model instance for each seed.
         let mut model_with_adapter = model.clone();
+        model_with_adapter.set_adapter(es_adapter, seed);
 
-        // Apply the adapter with the current seed.
-        model_with_adapter.set_adapter(es_adapter, seeds[i].clone());
+        let mut ctx = model_with_adapter.create_context();
 
-        // Create the base context from scratch using the provided prefix.
-        let mut base_ctx = model_with_adapter.create_context();
-        base_ctx.fill(&prefix);
-        //base_ctx.flush(); // Ensure the prefix KV cache is computed before forking.
+        // Create an async block that owns the forked context and the task string.
+        let generation_future = async move {
+            ctx.fill(&task);
+            ctx.generate_until("<|eot_id|>", max_num_outputs).await
+        };
 
-        // Get the slice of tasks assigned to this seed.
-        let start_index = i * num_tasks_per_seed;
-        let end_index = (i + 1) * num_tasks_per_seed;
-        let assigned_tasks = &tasks[start_index..end_index];
+        // Box the future to store it in the vector with other futures.
+        futures.push(Box::pin(generation_future));
 
-        // For each task, create a future that owns its context.
-        for task in assigned_tasks {
-            let mut forked_ctx = base_ctx.fork();
-            let task_owned = task.clone(); // Clone the task to move it into the async block.
-
-            // Create an async block that owns the forked context and the task string.
-            // This solves the lifetime problem.
-            let generation_future = async move {
-                forked_ctx.fill(&task_owned);
-                forked_ctx.generate_until("<|eot_id|>", max_num_outputs).await
-            };
-
-            // Box the future to store it in the vector with other futures.
-            futures.push(Box::pin(generation_future));
-        }
     }
 
     // --- 4. Collect Results and Send ---

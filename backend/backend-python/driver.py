@@ -635,6 +635,24 @@ class Driver:
 
         cfg = self.lm.config
 
+        print("Creating CmaesAdapter with:")
+        print("  rank:", cmd.rank)
+        print("  alpha:", cmd.alpha)
+        print("  in_features:", cfg.hidden_size)
+        print("  out_features:", [
+            cfg.head_size * cfg.num_query_heads,
+            cfg.head_size * cfg.num_key_value_heads,
+            cfg.head_size * cfg.num_key_value_heads
+        ])
+        print("  num_layers:", cfg.num_layers)
+        print("  population_size:", cmd.population_size)
+        print("  mu_fraction:", cmd.mu_fraction)
+        print("  initial_sigma:", cmd.initial_sigma)
+        print("  min_sigma:", 1e-7)
+        print("  min_var:", 1e-8)
+        print("  max_var:", 1e4)
+        print("  device:", self.device)
+
         self.adapters[cmd.adapter] = CmaesAdapter(
             rank=cmd.rank,
             alpha=cmd.alpha,
@@ -659,6 +677,15 @@ class Driver:
         if cmd.adapter in self.adapters:
             adapter = self.adapters[cmd.adapter]
             if isinstance(adapter, CmaesAdapter):
+
+                print("Updating CmaesAdapter with:")
+                print("  rank:", adapter.rank)
+                print("  alpha:", adapter.alpha)
+                print("  in_features:", adapter.in_features)
+                print("  scores:", cmd.scores)
+                print("  seeds:", cmd.seeds)
+                print("  max_sigma:", cmd.max_sigma)
+
                 adapter.update(cmd.scores, cmd.seeds, cmd.max_sigma)
 
     @torch.inference_mode()
@@ -784,6 +811,7 @@ class Driver:
         # print('new_position_ids', new_position_ids)
 
         responses = []
+        #print(pt_seeds)
 
         with torch.cuda.device(self.device):
 

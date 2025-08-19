@@ -83,7 +83,7 @@ async fn main() -> Result<(), String> {
         scores.len(),
         max_sigma
     );
-    let es_adapter = queue.import_adapter("es-adapter");
+    let es_adapter = queue.import_adapter(&name);
 
     // Perform the update operation with max_sigma.
     queue.update_adapter(es_adapter, &scores, &seeds, max_sigma);

@@ -25,16 +25,6 @@ Options:
   -h, --help                     Print this help information.
 "#;
 
-
-/// Represents the state of the cached prefix that gets stored persistently.
-/// This includes the token IDs and information about the KV cache pages,
-/// allowing the context to be perfectly reconstructed later.
-#[derive(Serialize, Deserialize)]
-struct CachedPrefixState {
-    token_ids: Vec<u32>,
-    kv_page_last_len: usize,
-}
-
 #[inferlet::main]
 async fn main() -> Result<(), String> {
     // --- 1. Argument Parsing ---
@@ -100,7 +90,7 @@ async fn main() -> Result<(), String> {
         initial_sigma,
     );
 
-    queue.export_adapter(adapter_id, "es-adapter");
+    queue.export_adapter(adapter_id, &name);
 
     inferlet::wstd::task::sleep(Duration::from_millis(100)).await;
     println!("✅ Adapter '{}' created successfully.", name);
