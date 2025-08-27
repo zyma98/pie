@@ -2,6 +2,7 @@ use anyhow::{Context, Result, anyhow};
 use clap::{Args, Parser, Subcommand};
 use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
+use nix;
 use pie::{
     BatchingStrategyConfiguration, Config as EngineConfig,
     auth::{create_jwt, init_secret},
@@ -303,6 +304,14 @@ async fn start_interactive_session(
                     .arg(value.to_string().trim_matches('"').to_string());
             }
 
+            // Make sure the backend process is a process group leader.
+            unsafe {
+                cmd.pre_exec(|| {
+                    nix::unistd::setsid()?;
+                    Ok(())
+                });
+            }
+
             println!("- Spawning backend: {}", exec_path);
             let mut child = cmd
                 .stdout(Stdio::piped())
@@ -394,11 +403,14 @@ async fn start_interactive_session(
         eprintln!("Warning: Failed to save command history: {}", err);
     }
 
-    for mut child in backend_processes {
+    for child in backend_processes {
         if let Some(pid) = child.id() {
-            println!("- Terminating backend process with PID: {}", pid);
-            if let Err(e) = child.kill().await {
-                eprintln!("  Failed to terminate process {}: {}", pid, e);
+            println!("- Terminating backend process group with PID: {}", pid);
+            if let Err(e) = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(pid as i32),
+                nix::sys::signal::Signal::SIGTERM,
+            ) {
+                eprintln!("  Failed to terminate process group {}: {}", pid, e);
             }
         }
     }
