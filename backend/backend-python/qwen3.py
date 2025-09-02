@@ -181,6 +181,10 @@ class Qwen3Attention(nn.Module):
             pos_ids=position_ids,
             rope_theta=self.config.rope_theta
         )
+        
+        # Ensure query_states matches the configured dtype for FlashInfer plan
+        if query_states.dtype != self.config.dtype:
+            query_states = query_states.to(self.config.dtype)
 
         ops.append_paged_kv_cache(
             append_key=key_states,
@@ -341,7 +345,7 @@ class Qwen3Model(nn.Module):
                 head_dim=self.config.head_size,
                 page_size=page_size,
                 pos_encoding_mode="NONE",
-                q_data_type=torch.bfloat16,
+                q_data_type=self.config.dtype,
             )
             wrapper = self.wrapper_decode
         else:
@@ -355,7 +359,7 @@ class Qwen3Model(nn.Module):
                 head_dim_qk=self.config.head_size,
                 page_size=page_size,
                 custom_mask=custom_mask,
-                q_data_type=torch.bfloat16,
+                q_data_type=self.config.dtype,
             )
             wrapper = self.wrapper_append
 

@@ -151,6 +151,10 @@ class L4maAttention(nn.Module):
         ops.apply_llama31_rope_pos_ids_inplace(
             q=query_states, k=key_states, pos_ids=position_ids
         )
+        
+        # Ensure query_states matches the configured dtype for FlashInfer plan
+        if query_states.dtype != self.config.dtype:
+            query_states = query_states.to(self.config.dtype)
 
         ops.append_paged_kv_cache(
             append_key=key_states,
@@ -311,7 +315,7 @@ class L4maModel(nn.Module):
                 head_dim=self.config.hidden_size // self.config.num_query_heads,
                 page_size=page_size,
                 pos_encoding_mode="NONE",
-                q_data_type=torch.bfloat16,
+                q_data_type=self.config.dtype,
             )
             wrapper = self.wrapper_decode
         else:
@@ -325,7 +329,7 @@ class L4maModel(nn.Module):
                 head_dim_qk=self.config.hidden_size // self.config.num_query_heads,
                 page_size=page_size,
                 custom_mask=custom_mask,
-                q_data_type=torch.bfloat16,
+                q_data_type=self.config.dtype,
             )
             wrapper = self.wrapper_append
 
