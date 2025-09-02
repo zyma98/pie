@@ -215,7 +215,8 @@ def load_model(config: dict):
         else:
             print("\nSuccessfully loaded all expected model weights.")
 
-        # Move the entire model to the specified device
+        # Move the entire model to the specified device and dtype
+        model.to(device=metadata.architecture.device, dtype=metadata.architecture.dtype)
         model.eval()  # Set the model to evaluation mode
 
         return model, metadata
@@ -408,8 +409,14 @@ def run_zmq_server(router, engine, config, model_metadata):
                             num_available_embeddings=config.get("max_num_embeds"),
                             num_available_distributions=0,
                             tokenizer=l4m_pb2.Tokenizer(
-                                merge_table=model_metadata.tokenizer.merge_table,
-                                special_tokens=model_metadata.tokenizer.special_tokens,
+                                merge_table=[
+                                    l4m_pb2.Tokenizer.MergeTableEntry(key=k, value=v)
+                                    for k, v in model_metadata.tokenizer.merge_table.items()
+                                ],
+                                special_tokens=[
+                                    l4m_pb2.Tokenizer.SpecialTokensEntry(key=k, value=v)
+                                    for k, v in model_metadata.tokenizer.special_tokens.items()
+                                ],
                                 split_regex=model_metadata.tokenizer.split_regex,
                                 escape_non_printable=model_metadata.tokenizer.escape_non_printable,
                             )
