@@ -52,7 +52,7 @@ pub async fn generate_with_pjd<S: Sampler, C: StopCondition>(
             .queue
             .forward_text(
                 ctx.kv_page_last_len as u32,
-                &ctx.kv_page_ids,
+                &ctx.kv_pages,
                 &batch_tokens,
                 &batch_positions,
                 &masks_for_batch,

@@ -137,10 +137,9 @@ impl ResourceManager {
             .ok_or(ResourceError::PoolNotFound { type_id })?;
 
         for ptr in ptrs {
-            if !allocated.remove(&ptr) {
-                return Err(ResourceError::PointerNotAllocated { ptr, inst_id });
+            if allocated.remove(&ptr) {
+                pool.release(ptr).unwrap();
             }
-            pool.release(ptr).unwrap();
         }
 
         Ok(())

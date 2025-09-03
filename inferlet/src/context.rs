@@ -2,17 +2,12 @@ use crate::brle::Brle;
 use crate::drafter::Drafter;
 use crate::sampler::Sampler;
 use crate::stop_condition::StopCondition;
-use crate::traits::allocate::Allocate;
-use crate::traits::forward::Forward;
-use crate::traits::forward_text::ForwardText;
-use crate::traits::input_text::InputText;
-use crate::traits::optimize::Optimize;
-use crate::traits::output_text::{Distribution, OutputText};
+use crate::traits::forward::{Forward, KvPage};
 use crate::traits::tokenize::{Tokenize, Tokenizer};
 use crate::{Model, Queue, sampler, stop_condition};
+use futures::future::join_all;
 use std::cmp::Ordering;
 use std::mem;
-use wit_bindgen::rt::async_support::futures::future::join_all;
 
 #[derive(Debug)]
 pub struct Context {
@@ -28,26 +23,16 @@ pub struct Context {
 
     pub position_ids: Vec<u32>,
 
-    pub kv_page_ids: Vec<u32>,
+    pub kv_pages: Vec<KvPage>,
     pub kv_page_last_len: usize,
     pub kv_page_size: usize,
 }
 
-impl Drop for Context {
-    fn drop(&mut self) {
-        self.queue.deallocate_kv_pages(&self.kv_page_ids);
-    }
-}
-
 impl Context {
     pub fn new(model: &Model) -> Self {
-        if !model.has_traits(&["input_text", "tokenize", "output_text"]) {
-            panic!("Model must have input_text, tokenize, and output_text traits");
-        }
-
         let queue = model.create_queue();
-        let kv_page_size = queue.get_kv_page_size() as usize;
-        let tokenizer = queue.get_tokenizer();
+        let kv_page_size = model.get_kv_page_size() as usize;
+        let tokenizer = model.get_tokenizer();
 
         Context {
             queue,
@@ -58,7 +43,7 @@ impl Context {
             token_mask_pending: Vec::new(),
             token_mask_current: Brle::new(0),
             position_ids: Vec::new(),
-            kv_page_ids: Vec::new(),
+            kv_pages: Vec::new(),
             kv_page_last_len: 0,
             kv_page_size,
         }
@@ -68,17 +53,17 @@ impl Context {
     /// This is used to restore a context's state from a cache.
     pub fn from_imported_state(
         model: &Model,
-        imported_page_ids: Vec<u32>,
+        kv_pages: Vec<KvPage>,
         prefix_tokens: Vec<u32>,
         kv_page_last_len: usize,
     ) -> Self {
         let queue = model.create_queue();
-        let kv_page_size = queue.get_kv_page_size() as usize;
-        let tokenizer = queue.get_tokenizer();
+        let kv_page_size = model.get_kv_page_size() as usize;
+        let tokenizer = model.get_tokenizer();
 
         assert_eq!(
             prefix_tokens.len(),
-            (imported_page_ids.len() - 1) * kv_page_size + kv_page_last_len,
+            (kv_pages.len() - 1) * kv_page_size + kv_page_last_len,
         );
 
         let num_tokens = prefix_tokens.len();
@@ -94,7 +79,7 @@ impl Context {
             token_mask_pending: Vec::new(),
             token_mask_current: Brle::new(num_tokens),
             position_ids: (0..num_tokens as u32).collect(),
-            kv_page_ids: imported_page_ids,
+            kv_pages,
             kv_page_last_len,
             kv_page_size,
         }
@@ -117,8 +102,8 @@ impl Context {
     }
 
     /// Returns the unique IDs of the KV cache pages currently in use.
-    pub fn get_kv_page_ids(&self) -> &[u32] {
-        &self.kv_page_ids
+    pub fn get_kv_page_ptrs(&self) -> Vec<u32> {
+        self.kv_pages.iter().map(|p| p.ptr()).collect()
     }
 
     /// Returns the number of tokens stored in the last KV cache page.
@@ -134,61 +119,65 @@ impl Context {
     ///
     /// This function will flush any pending tokens in the current context before forking.
     pub fn fork(&self) -> Self {
-        let (new_tokens, new_pending, new_kv_pages, new_last_len, new_pos_ids, new_mask_pending) =
-            if self.kv_page_last_len == self.kv_page_size {
-                // Easy case: the last page is full, we can share everything.
-                (
-                    self.token_ids.clone(),
-                    self.token_ids_pending.clone(),
-                    self.kv_page_ids.clone(),
-                    self.kv_page_last_len,
-                    self.position_ids.clone(), // Clone position_ids
-                    self.token_mask_pending.clone(),
-                )
+        let (
+            new_tokens,
+            new_pending,
+            new_kv_page_ptrs,
+            new_kv_page_last_len,
+            new_pos_ids,
+            new_mask_pending,
+        ) = if self.kv_page_last_len == self.kv_page_size {
+            // Easy case: the last page is full, we can share everything.
+            (
+                self.token_ids.clone(),
+                self.token_ids_pending.clone(),
+                self.kv_pages.clone(),
+                self.kv_page_last_len,
+                self.position_ids.clone(), // Clone position_ids
+                self.token_mask_pending.clone(),
+            )
+        } else {
+            // Hard case: the last page is partially full and must be recomputed.
+            let kept_kv_page_len = self.kv_pages.len().saturating_sub(1);
+            let kept_tokens_len = kept_kv_page_len * self.kv_page_size;
+
+            let forked_token_ids = self.token_ids[..kept_tokens_len].to_vec();
+            let forked_kv_page_ptrs = self.kv_pages[..kept_kv_page_len].to_vec();
+            let forked_pos_ids = self.position_ids[..kept_tokens_len].to_vec();
+
+            let forked_pending_token_ids = [
+                &self.token_ids[kept_tokens_len..],
+                &self.token_ids_pending[..],
+            ]
+            .concat();
+
+            let forked_last_kv_page_len = if !forked_kv_page_ptrs.is_empty() {
+                self.kv_page_size
             } else {
-                // Hard case: the last page is partially full and must be recomputed.
-                let kept_kv_page_len = self.kv_page_ids.len().saturating_sub(1);
-                let kept_tokens_len = kept_kv_page_len * self.kv_page_size;
-
-                let forked_token_ids = self.token_ids[..kept_tokens_len].to_vec();
-                let forked_kv_page_ids = self.kv_page_ids[..kept_kv_page_len].to_vec();
-                let forked_pos_ids = self.position_ids[..kept_tokens_len].to_vec();
-
-                let forked_pending_token_ids = [
-                    &self.token_ids[kept_tokens_len..],
-                    &self.token_ids_pending[..],
-                ]
-                .concat();
-
-                let forked_last_kv_page_len = if !forked_kv_page_ids.is_empty() {
-                    self.kv_page_size
-                } else {
-                    0
-                };
-
-                let mut mask_builder = self.token_mask_current.clone();
-                let parent_total_mask_len = self.token_ids.len() + self.token_ids_pending.len();
-                mask_builder.remove_range(kept_tokens_len, parent_total_mask_len);
-
-                // 2. Iteratively build the pending masks, appending `false` for each new
-                // pending token, which mimics the `fill_tokens` behavior.
-                let mut forked_mask_pending = Vec::with_capacity(forked_pending_token_ids.len());
-                for _ in 0..forked_pending_token_ids.len() {
-                    mask_builder.append(false);
-                    forked_mask_pending.push(mask_builder.clone());
-                }
-
-                (
-                    forked_token_ids,
-                    forked_pending_token_ids,
-                    forked_kv_page_ids,
-                    forked_last_kv_page_len,
-                    forked_pos_ids,
-                    forked_mask_pending,
-                )
+                0
             };
 
-        self.queue.increase_ref_count(&new_kv_pages);
+            let mut mask_builder = self.token_mask_current.clone();
+            let parent_total_mask_len = self.token_ids.len() + self.token_ids_pending.len();
+            mask_builder.remove_range(kept_tokens_len, parent_total_mask_len);
+
+            // 2. Iteratively build the pending masks, appending `false` for each new
+            // pending token, which mimics the `fill_tokens` behavior.
+            let mut forked_mask_pending = Vec::with_capacity(forked_pending_token_ids.len());
+            for _ in 0..forked_pending_token_ids.len() {
+                mask_builder.append(false);
+                forked_mask_pending.push(mask_builder.clone());
+            }
+
+            (
+                forked_token_ids,
+                forked_pending_token_ids,
+                forked_kv_page_ptrs,
+                forked_last_kv_page_len,
+                forked_pos_ids,
+                forked_mask_pending,
+            )
+        };
 
         Context {
             queue: self.model.create_queue(),
@@ -199,8 +188,8 @@ impl Context {
             token_mask_pending: new_mask_pending,
             token_mask_current: self.token_mask_current.clone(),
             position_ids: new_pos_ids,
-            kv_page_ids: new_kv_pages,
-            kv_page_last_len: new_last_len,
+            kv_pages: new_kv_page_ptrs,
+            kv_page_last_len: new_kv_page_last_len,
             kv_page_size: self.kv_page_size,
         }
     }
@@ -281,8 +270,7 @@ impl Context {
                 // This page is fully masked and can be dropped.
 
                 // 1. Remove the page ID and deallocate the physical page.
-                let page_id_to_drop = self.kv_page_ids.remove(i);
-                self.queue.deallocate_kv_pages(&[page_id_to_drop]);
+                self.kv_pages.remove(i);
 
                 // 2. Remove the corresponding token range from the main token list.
                 self.token_ids
@@ -328,10 +316,10 @@ impl Context {
             return;
         }
 
-        let current_tokens = if self.kv_page_ids.is_empty() {
+        let current_tokens = if self.kv_pages.is_empty() {
             self.kv_page_last_len
         } else {
-            (self.kv_page_ids.len() - 1) * self.kv_page_size + self.kv_page_last_len
+            (self.kv_pages.len() - 1) * self.kv_page_size + self.kv_page_last_len
         };
 
         // Safely calculate the new total number of tokens after the adjustment.
@@ -340,20 +328,19 @@ impl Context {
             None => panic!("Token count adjustment resulted in underflow"),
         };
 
-        let current_pages = self.kv_page_ids.len();
+        let current_pages = self.kv_pages.len();
         let required_pages = new_total_tokens.div_ceil(self.kv_page_size);
 
         match required_pages.cmp(&current_pages) {
             Ordering::Greater => {
                 // Grow: Allocate new pages if more are needed.
                 let new_pages_needed = required_pages - current_pages;
-                let new_kv_page_ids = self.queue.allocate_kv_pages(new_pages_needed);
-                self.kv_page_ids.extend(new_kv_page_ids);
+                let new_kv_page_ids = self.queue.new_kv_pages(new_pages_needed);
+                self.kv_pages.extend(new_kv_page_ids);
             }
             Ordering::Less => {
                 // Shrink: Deallocate pages that are no longer needed.
-                let redundant_page_ids = self.kv_page_ids.split_off(required_pages);
-                self.queue.deallocate_kv_pages(&redundant_page_ids);
+                let _ = self.kv_pages.split_off(required_pages);
             }
             Ordering::Equal => {
                 // No change in the number of pages is required.
@@ -422,7 +409,7 @@ impl Context {
 
         self.queue.forward_text_no_output(
             self.kv_page_last_len as u32,
-            &self.kv_page_ids,
+            &self.kv_pages,
             &pending_token_ids,
             &position_ids,
             &mask,
@@ -478,7 +465,7 @@ impl Context {
                     adapter_id,
                     seed,
                     self.kv_page_last_len as u32,
-                    &self.kv_page_ids,
+                    &self.kv_pages,
                     &pending_token_ids,
                     &position_ids,
                     &mask,
@@ -490,7 +477,7 @@ impl Context {
             self.queue
                 .forward_text(
                     self.kv_page_last_len as u32,
-                    &self.kv_page_ids,
+                    &self.kv_pages,
                     &pending_token_ids,
                     &position_ids,
                     &mask,
@@ -611,17 +598,16 @@ impl Context {
                 beams.iter().find(|(_, g, _)| stop_condition.should_stop(g))
             {
                 // Deallocate the pages previously held by `self`.
-                let old_pages = mem::take(&mut self.kv_page_ids);
-                self.queue.deallocate_kv_pages(&old_pages);
+                let _ = mem::take(&mut self.kv_pages);
 
                 // Adopt the state from the winning beam.
                 self.kv_page_last_len = beam.kv_page_last_len;
                 self.token_ids = beam.token_ids.clone();
                 self.token_ids_pending = beam.token_ids_pending.clone();
-                self.kv_page_ids = beam.kv_page_ids.clone();
+                self.kv_pages = beam.kv_pages.clone();
 
                 // Increment the ref count for the newly adopted pages, as `self` is a new owner.
-                self.queue.increase_ref_count(&self.kv_page_ids);
+                //self.queue.increase_ref_count(&self.kv_page_ptrs);
 
                 return self.tokenizer.detokenize(generated_tokens);
             }
@@ -762,15 +748,15 @@ impl Context {
 
             // Allocate resources and expand the KV cache to accommodate the entire batch.
             self.grow_kv_pages(batch_tokens.len());
-            let input_embeds = self.queue.allocate_embeds(batch_tokens.len());
-            let output_embeds = self.queue.allocate_embeds(batch_tokens.len());
+            let input_embeds = self.queue.allocate_embed_ptrs(batch_tokens.len());
+            let output_embeds = self.queue.allocate_embed_ptrs(batch_tokens.len());
 
             // Run a single, efficient forward pass on the main model with the combined tokens.
             self.queue
                 .embed_text(&input_embeds, &batch_tokens, &batch_positions);
             self.queue.forward(
                 self.kv_page_last_len as u32,
-                &self.kv_page_ids,
+                &self.kv_pages,
                 &input_embeds,
                 &output_embeds,
             );
@@ -858,8 +844,8 @@ impl Context {
             self.fill_tokens(accepted_tokens[num_retained_draft_tokens..].to_owned());
 
             // Clean up allocated resources for this step.
-            self.queue.deallocate_embeds(&input_embeds);
-            self.queue.deallocate_embeds(&output_embeds);
+            self.queue.deallocate_embed_ptrs(&input_embeds);
+            self.queue.deallocate_embed_ptrs(&output_embeds);
 
             // Check if the stop condition has been met after the step is complete.
             if stop_condition.should_stop(&all_generated_tokens) {

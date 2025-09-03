@@ -122,17 +122,28 @@ impl bindings::pie::inferlet::core::Host for InstanceState {
         Ok(self.arguments().to_vec())
     }
 
-    async fn debug_query(&mut self, query: String) -> anyhow::Result<Resource<DebugQueryResult>> {
-        let (tx, rx) = oneshot::channel();
+    async fn get_model(&mut self, name: String) -> anyhow::Result<Option<Resource<Model>>> {
+        if let Some(service_id) = model::model_service_id(&name) {
+            let (tx, rx) = oneshot::channel();
+            model::Command::GetInfo { response: tx }.dispatch(service_id)?;
+            let info = rx.await?;
+            let model = Model { service_id, info };
+            let res = self.ctx().table.push(model)?;
+            return Ok(Some(res));
+        }
+        Ok(None)
+    }
 
-        let res = DebugQueryResult {
-            receiver: rx,
-            result: None,
-            done: false,
-        };
+    async fn get_all_models(&mut self) -> anyhow::Result<Vec<String>> {
+        Ok(model::registered_models())
+    }
 
-        crate::runtime::Command::DebugQuery { query, event: tx }.dispatch()?;
-        Ok(self.ctx().table.push(res)?)
+    async fn get_all_models_with_traits(
+        &mut self,
+        _traits: Vec<String>,
+    ) -> anyhow::Result<Vec<String>> {
+        // Placeholder: Implement trait filtering logic
+        Ok(model::registered_models())
     }
 
     async fn send(&mut self, message: String) -> anyhow::Result<()> {
@@ -182,34 +193,6 @@ impl bindings::pie::inferlet::core::Host for InstanceState {
         Ok(self.ctx().table.push(sub)?)
     }
 
-    async fn get_model(&mut self, name: String) -> anyhow::Result<Option<Resource<Model>>> {
-        if let Some(service_id) = model::model_service_id(&name) {
-            let (tx, rx) = oneshot::channel();
-            model::Command::GetInfo { response: tx }.dispatch(service_id)?;
-            let info = rx.await?;
-            let model = Model { service_id, info };
-            let res = self.ctx().table.push(model)?;
-            return Ok(Some(res));
-        }
-        Ok(None)
-    }
-
-    async fn get_all_models(&mut self) -> anyhow::Result<Vec<String>> {
-        Ok(model::registered_models())
-    }
-
-    async fn get_all_models_with_traits(
-        &mut self,
-        _traits: Vec<String>,
-    ) -> anyhow::Result<Vec<String>> {
-        // Placeholder: Implement trait filtering logic
-        Ok(model::registered_models())
-    }
-
-    async fn store_set(&mut self, key: String, value: String) -> anyhow::Result<()> {
-        kvs::dispatch(kvs::Command::Set { key, value })?;
-        Ok(())
-    }
     async fn store_get(&mut self, key: String) -> anyhow::Result<Option<String>> {
         let (tx, rx) = oneshot::channel();
         kvs::dispatch(kvs::Command::Get { key, response: tx })?;
@@ -217,6 +200,10 @@ impl bindings::pie::inferlet::core::Host for InstanceState {
         Ok(res)
     }
 
+    async fn store_set(&mut self, key: String, value: String) -> anyhow::Result<()> {
+        kvs::dispatch(kvs::Command::Set { key, value })?;
+        Ok(())
+    }
     async fn store_delete(&mut self, key: String) -> anyhow::Result<()> {
         kvs::dispatch(kvs::Command::Delete { key })?;
         Ok(())
@@ -228,34 +215,24 @@ impl bindings::pie::inferlet::core::Host for InstanceState {
         let res = rx.await?;
         Ok(res)
     }
+
     async fn store_list_keys(&mut self) -> anyhow::Result<Vec<String>> {
         let (tx, rx) = oneshot::channel();
         kvs::dispatch(kvs::Command::ListKeys { response: tx })?;
         let res = rx.await?;
         Ok(res)
     }
-
-    async fn get_all_exported_resources(
-        &mut self,
-        queue: Resource<Queue>,
-        resource_type: ResourceTypeId,
-    ) -> anyhow::Result<Vec<(String, u32)>> {
-        let q = self.ctx().table.get(&queue)?;
+    async fn debug_query(&mut self, query: String) -> anyhow::Result<Resource<DebugQueryResult>> {
         let (tx, rx) = oneshot::channel();
-        model::Command::GetAllExported {
-            type_id: resource_type,
-            response: tx,
-        }
-        .dispatch(q.service_id)?;
 
-        // convert list of phys ptrs -> size
-        let c = rx
-            .await?
-            .into_iter()
-            .map(|(s, v)| (s, v.len() as u32))
-            .collect();
+        let res = DebugQueryResult {
+            receiver: rx,
+            result: None,
+            done: false,
+        };
 
-        Ok(c)
+        crate::runtime::Command::DebugQuery { query, event: tx }.dispatch()?;
+        Ok(self.ctx().table.push(res)?)
     }
 
     async fn allocate_resources(
@@ -302,6 +279,29 @@ impl bindings::pie::inferlet::core::Host for InstanceState {
         Ok(())
     }
 
+    async fn get_all_exported_resources(
+        &mut self,
+        queue: Resource<Queue>,
+        resource_type: ResourceTypeId,
+    ) -> anyhow::Result<Vec<(String, u32)>> {
+        let q = self.ctx().table.get(&queue)?;
+        let (tx, rx) = oneshot::channel();
+        model::Command::GetAllExported {
+            type_id: resource_type,
+            response: tx,
+        }
+        .dispatch(q.service_id)?;
+
+        // convert list of phys ptrs -> size
+        let c = rx
+            .await?
+            .into_iter()
+            .map(|(s, v)| (s, v.len() as u32))
+            .collect();
+
+        Ok(c)
+    }
+
     async fn export_resources(
         &mut self,
         queue: Resource<Queue>,
@@ -322,7 +322,7 @@ impl bindings::pie::inferlet::core::Host for InstanceState {
         Ok(())
     }
 
-    async fn unexport_resources(
+    async fn release_exported_resources(
         &mut self,
         queue: Resource<Queue>,
         resource_type: ResourceTypeId,

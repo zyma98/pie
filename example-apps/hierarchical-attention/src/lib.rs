@@ -129,7 +129,7 @@ pub async fn prefill_with_hierarchical_attention(ctx: &mut Context, xml_text: &s
 
     ctx.queue.forward_text_no_output(
         ctx.kv_page_last_len as u32,
-        &ctx.kv_page_ids,
+        &ctx.kv_pages,
         &pending_token_ids,
         &position_ids,
         &attention_masks_rle,

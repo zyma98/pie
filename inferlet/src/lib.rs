@@ -1,11 +1,6 @@
-pub mod brle;
-pub mod context;
-pub mod drafter;
-mod pool;
-pub mod sampler;
-pub mod stop_condition;
-pub mod traits;
-
+pub use crate::bindings::pie::inferlet::core::Priority;
+use crate::bindings::pie::inferlet::{adapter, core, evolve, forward, image, tokenize};
+pub use crate::bindings_app::{export, exports::pie::inferlet::run::Guest as RunSync};
 pub use crate::context::Context;
 use crate::wstd::runtime::AsyncPollable;
 pub use anyhow::Result;
@@ -16,6 +11,14 @@ use std::rc::Rc;
 pub use wasi;
 use wasi::exports::http::incoming_handler::{IncomingRequest, ResponseOutparam};
 pub use wstd;
+
+pub mod brle;
+pub mod context;
+pub mod drafter;
+mod pool;
+pub mod sampler;
+pub mod stop_condition;
+pub mod traits;
 
 pub mod bindings {
     wit_bindgen::generate!({
@@ -58,12 +61,6 @@ pub mod bindings_server {
     });
 }
 
-use crate::bindings::pie::inferlet::{
-    allocate, core, forward, forward_text, input_image, input_text, optimize, output_text, tokenize,
-};
-
-pub use crate::bindings_app::{export, exports::pie::inferlet::run::Guest as RunSync};
-
 //// --------------------------------- Core wrappers -------------------------------
 
 /// Represents a command queue for a model instance.
@@ -80,6 +77,12 @@ pub struct Queue {
 pub struct Model {
     pub(crate) inner: Rc<core::Model>,
     pub(crate) adapter: Option<(u32, i64)>,
+}
+
+pub enum Resource {
+    KvPage = 0,
+    Embed = 1,
+    Adapter = 2,
 }
 
 /// Returns the runtime version string.
@@ -231,16 +234,6 @@ impl Model {
         self.inner.get_description()
     }
 
-    /// Returns the model version string (e.g. "1.0").
-    pub fn get_version(&self) -> String {
-        self.inner.get_version()
-    }
-
-    /// Returns the license name (e.g. "Llama").
-    pub fn get_license(&self) -> String {
-        self.inner.get_license()
-    }
-
     /// Returns the prompt formatting template in Tera format.
     pub fn get_prompt_template(&self) -> String {
         self.inner.get_prompt_template()
@@ -251,9 +244,8 @@ impl Model {
         self.inner.get_service_id()
     }
 
-    pub fn get_tokenizer(&self) -> Tokenizer {
-        let queue = self.create_queue();
-        queue.get_tokenizer()
+    pub fn get_kv_page_size(&self) -> u32 {
+        self.inner.get_kv_page_size()
     }
 
     /// Create a new command queue for this model.
@@ -281,11 +273,6 @@ impl Model {
     }
 }
 
-/// Defines task priority levels.
-pub use crate::bindings::pie::inferlet::core::Priority;
-use crate::traits::Tokenize;
-use crate::traits::tokenize::Tokenizer;
-
 impl Queue {
     /// Gets the service ID for the queue.
     pub fn get_service_id(&self) -> u32 {
@@ -311,6 +298,32 @@ impl Queue {
         AsyncPollable::new(pollable).wait_for().await;
         future.get().unwrap()
     }
+
+    pub fn allocate_resources(&self, resource: Resource, count: u32) -> Vec<u32> {
+        core::allocate_resources(&self.inner, resource as u32, count)
+    }
+
+    pub fn deallocate_resources(&self, resource: Resource, ptrs: &[u32]) {
+        core::deallocate_resources(&self.inner, resource as u32, ptrs)
+    }
+
+    pub fn export_resource(&self, resource: Resource, ptrs: &[u32], name: &str) {
+        core::export_resources(&self.inner, resource as u32, ptrs, name)
+    }
+
+    pub fn import_resource(&self, resource: Resource, name: &str) -> Vec<u32> {
+        core::import_resources(&self.inner, resource as u32, name)
+    }
+
+    pub fn get_all_exported_resources(&self, resource: Resource) -> Vec<(String, u32)> {
+        core::get_all_exported_resources(&self.inner, resource as u32)
+    }
+
+    pub fn release_exported_resources(&self, resource: Resource, name: &str) {
+        core::release_exported_resources(&self.inner, resource as u32, name)
+    }
+
+
 }
 
 /// --------------------------------------------------------------------------------

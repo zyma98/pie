@@ -1,8 +1,8 @@
 use crate::Queue;
-use crate::input_image;
+use crate::image;
 
 /// Provides the ability to embed images into model-compatible embeddings.
-pub trait InputImage {
+pub trait Image {
     /// Embeds an image blob into the provided embedding IDs.
     ///
     /// # Arguments
@@ -27,12 +27,12 @@ pub trait InputImage {
     fn calculate_embed_size(&self, image_width: u32, image_height: u32) -> u32;
 }
 
-impl InputImage for Queue {
+impl Image for Queue {
     fn embed_image(&self, embed_ids: &[u32], image: &[u8], position_offset: u32) {
-        input_image::embed_image(&self.inner, embed_ids, image, position_offset)
+        image::embed_image(&self.inner, embed_ids, image, position_offset)
     }
 
     fn calculate_embed_size(&self, image_width: u32, image_height: u32) -> u32 {
-        input_image::calculate_embed_size(&self.inner, image_width, image_height)
+        image::calculate_embed_size(&self.inner, image_width, image_height)
     }
 }

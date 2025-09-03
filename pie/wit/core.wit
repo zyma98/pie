@@ -56,7 +56,6 @@ interface core {
     debug-query: func(query: string) -> debug-query-result;
 
     // resources
-
     allocate-resources: func(
         queue: borrow<queue>,
         resource-type: u32,
@@ -75,6 +74,11 @@ interface core {
         resource-type: u32,
     ) -> list<tuple<string, u32>>;
 
+    release-exported-resources: func(
+        queue: borrow<queue>,
+        resource-type: u32,
+        name: string
+    );
 
     export-resources: func(
         queue: borrow<queue>,
@@ -82,13 +86,6 @@ interface core {
         ptrs: list<pointer>,
         name: string
     );
-
-    unexport-resources: func(
-        queue: borrow<queue>,
-        resource-type: u32,
-        name: string
-    );
-
 
     import-resources: func(
         queue: borrow<queue>,

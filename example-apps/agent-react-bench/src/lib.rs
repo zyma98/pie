@@ -187,7 +187,7 @@ async fn main() -> Result<(), String> {
             prefill_ctx.fill(&full_system_prompt);
             prefill_ctx.flush();
 
-            let page_ids = prefill_ctx.get_kv_page_ids().to_vec();
+            let page_ids = prefill_ctx.get_kv_page_ptrs().to_vec();
             let state_to_cache = CachedPrefixState {
                 token_ids: prefill_ctx.get_token_ids().to_vec(),
                 kv_page_last_len: prefill_ctx.get_kv_page_last_len(),
