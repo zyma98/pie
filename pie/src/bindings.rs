@@ -5,7 +5,6 @@ use crate::handler::{adapter, core, evolve, forward, image, tokenize};
 wasmtime::component::bindgen!({
     path: "wit",
     world: "inferlet",
-    async: true,
     with: {
         "wasi:io/poll": wasmtime_wasi::p2::bindings::io::poll,
         "pie:inferlet/core/subscription": core::Subscription,
@@ -18,7 +17,8 @@ wasmtime::component::bindgen!({
         "pie:inferlet/forward/forward-pass-result": forward::ForwardPassResult,
         "pie:inferlet/tokenize/tokenizer": tokenize::Tokenizer,
     },
-    trappable_imports: true,
+    imports: { default: async | trappable },
+    exports: { default: async },
 });
 
 pub fn add_to_linker<T>(linker: &mut wasmtime::component::Linker<T>) -> Result<(), wasmtime::Error>

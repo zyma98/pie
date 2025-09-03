@@ -1,14 +1,13 @@
-use crate::instance::InstanceId as InstanceId;
+use crate::instance::InstanceId;
 use crate::messaging::dispatch_u2i;
-use crate::model_old::attach_new_remote_backend;
+use crate::model::Model;
 use crate::runtime::RuntimeError;
-use crate::service::{Service, ServiceError};
+use crate::service::{Service, ServiceError, install_service};
 use crate::utils::IdPool;
-use crate::{auth, messaging, model_old, runtime, service};
+use crate::{auth, messaging, model, runtime, service};
 use anyhow::Result;
 use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
-use rmp_serde::decode;
 use serde::{Deserialize, Serialize};
 use std::mem;
 use std::sync::{Arc, OnceLock};
@@ -295,7 +294,7 @@ impl Client {
                 match msg {
                     Message::Binary(bin) => {
                         // Decode via rmp-serde
-                        match decode::from_slice::<ClientMessage>(&bin) {
+                        match rmp_serde::decode::from_slice::<ClientMessage>(&bin) {
                             Ok(client_message) => {
                                 incoming_tx
                                     .send(ClientCommand::FromClient(client_message))
@@ -547,9 +546,10 @@ impl Client {
             }
             QUERY_MODEL_STATUS => {
                 // gather model status from all attached backends
-                let l4m_stats = model_old::gather_stats().await;
+                let runtime_stats = model::runtime_stats().await;
+                let runtime_stats_json = serde_json::to_string(&runtime_stats).unwrap();
 
-                self.send_response(corr_id, true, l4m_stats).await;
+                self.send_response(corr_id, true, runtime_stats_json).await;
             }
             _ => {
                 println!("Unknown query subject: {}", subject);
@@ -732,33 +732,47 @@ impl Client {
         service_name: String,
     ) {
         if !self.authenticated {
-            self.send_response(corr_id, false, "Not authenticated".to_string())
+            self.send_response(corr_id, false, "Not authenticated".into())
                 .await;
+            return;
         }
+
         match service_type.as_str() {
-            "l4m" => {
-                if attach_new_remote_backend(&service_name, endpoint)
-                    .await
-                    .is_some()
-                {
-                    self.send_response(corr_id, true, "Attached to L4M backend".to_string())
+            "model" => {
+                // Try to create the model; fail fast on error.
+                let model = match Model::new(&endpoint).await {
+                    Ok(m) => m,
+                    Err(_) => {
+                        self.send_response(
+                            corr_id,
+                            false,
+                            "Failed to attach to L4M backend".into(),
+                        )
                         .await;
-                } else {
-                    self.send_response(
-                        corr_id,
-                        false,
-                        "Failed to attach to L4M backend".to_string(),
-                    )
-                    .await;
-                }
-            }
-            _ => {
+                        return;
+                    }
+                };
+
+                // Try to install; fail fast on error.
+                let Some(service_id) = install_service(&service_name, model) else {
+                    self.send_response(corr_id, false, "Failed to register to L4M backend".into())
+                        .await;
+                    return;
+                };
+
+                // Success path.
+                model::register_model(service_name, service_id);
                 self.send_response(
                     corr_id,
-                    false,
-                    format!("Unknown service type: {}", service_type),
+                    true,
+                    "Model service registration successful".into(),
                 )
                 .await;
+            }
+
+            other => {
+                self.send_response(corr_id, false, format!("Unknown service type: {other}"))
+                    .await;
             }
         }
     }

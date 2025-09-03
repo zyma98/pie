@@ -6,7 +6,7 @@ use crate::resource::ResourceId;
 use crate::{bindings, model, resource};
 use bytes::Bytes;
 use wasmtime::component::Resource;
-use wasmtime_wasi::p2::IoView;
+use wasmtime_wasi::WasiView;
 
 impl bindings::pie::inferlet::evolve::Host for InstanceState {
     async fn set_adapter_seed(
@@ -14,7 +14,7 @@ impl bindings::pie::inferlet::evolve::Host for InstanceState {
         pass: Resource<ForwardPass>,
         seed: i64,
     ) -> anyhow::Result<()> {
-        let pass = self.table().get_mut(&pass)?;
+        let pass = self.ctx().table.get_mut(&pass)?;
 
         if pass.adapter.is_some() {
             pass.adapter_seed = Some(seed);
@@ -34,7 +34,7 @@ impl bindings::pie::inferlet::evolve::Host for InstanceState {
         mu_fraction: f32,
         initial_sigma: f32,
     ) -> anyhow::Result<()> {
-        let svc_id = self.table().get(&queue)?.service_id;
+        let svc_id = self.ctx().table.get(&queue)?.service_id;
         let phys_adapter_ptr = self
             .translate_resource_ptr(svc_id, resource::ADAPTER_TYPE_ID, adapter_ptr)
             .ok_or_else(|| {
@@ -42,7 +42,7 @@ impl bindings::pie::inferlet::evolve::Host for InstanceState {
             })?;
 
         let inst_id = self.id();
-        let q = self.table().get(&queue)?;
+        let q = self.ctx().table.get(&queue)?;
 
         let req = InitializeAdapterRequest {
             adapter_ptr: phys_adapter_ptr,
@@ -74,7 +74,7 @@ impl bindings::pie::inferlet::evolve::Host for InstanceState {
         seeds: Vec<i64>,
         max_sigma: f32,
     ) -> anyhow::Result<()> {
-        let svc_id = self.table().get(&queue)?.service_id;
+        let svc_id = self.ctx().table.get(&queue)?.service_id;
         let phys_adapter_ptr = self
             .translate_resource_ptr(svc_id, resource::ADAPTER_TYPE_ID, adapter_ptr)
             .ok_or_else(|| {
@@ -82,7 +82,7 @@ impl bindings::pie::inferlet::evolve::Host for InstanceState {
             })?;
 
         let inst_id = self.id();
-        let q = self.table().get(&queue)?;
+        let q = self.ctx().table.get(&queue)?;
 
         let req = UpdateAdapterRequest {
             adapter_ptr: phys_adapter_ptr,

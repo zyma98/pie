@@ -300,4 +300,38 @@ impl ResourceManager {
             })
             .unwrap_or_default()
     }
+
+    /// Appends detailed statistics about the resource manager's state to a given HashMap.
+    pub fn append_stats_to(&self, stats: &mut HashMap<String, String>) {
+        // Report on each resource pool
+        for (type_id, pool) in &self.res_pool {
+            let capacity = pool.capacity() as usize;
+            let available = pool.available();
+            let used = capacity - available;
+
+            stats.insert(
+                format!("resource.{}.capacity", type_id),
+                capacity.to_string(),
+            );
+            stats.insert(
+                format!("resource.{}.available", type_id),
+                available.to_string(),
+            );
+            stats.insert(format!("resource.{}.used", type_id), used.to_string());
+        }
+
+        // Report on active instances
+        stats.insert(
+            "instances.active_count".to_string(),
+            self.inst_start_time.len().to_string(),
+        );
+
+        // Report on exported resources
+        for (type_id, exports) in &self.res_exported {
+            stats.insert(
+                format!("resource.{}.exported_count", type_id),
+                exports.len().to_string(),
+            );
+        }
+    }
 }

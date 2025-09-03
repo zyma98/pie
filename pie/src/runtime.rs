@@ -1,22 +1,19 @@
+use crate::instance::{InstanceId, InstanceState};
+use crate::service::{Service, ServiceError};
+use crate::{bindings, model, server, service};
 use bytes::Bytes;
 use dashmap::DashMap;
 use hyper::server::conn::http1;
 use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock};
+use thiserror::Error;
+use tokio::sync::oneshot;
 use uuid::Uuid;
+use wasmtime::component::Resource;
 use wasmtime::{
     Config, Engine, InstanceAllocationStrategy, PoolingAllocationConfig, Store,
     component::Component, component::Linker,
 };
-
-use crate::instance::{InstanceId, InstanceState};
-use crate::{bindings, model_old, server, service};
-
-use crate::model_old::cleanup_instance;
-use crate::service::{Service, ServiceError};
-use thiserror::Error;
-use tokio::sync::oneshot;
-use wasmtime::component::Resource;
 use wasmtime_wasi_http::WasiHttpView;
 use wasmtime_wasi_http::bindings::exports::wasi::http::incoming_handler::{
     IncomingRequest, ResponseOutparam,
@@ -441,7 +438,7 @@ impl Runtime {
         if let Some((_, handle)) = self.running_instances.remove(&instance_id) {
             handle.join_handle.abort();
 
-            model_old::cleanup_instance(instance_id.clone());
+            model::cleanup_instance(instance_id.clone());
 
             let (termination_code, message) = match cause {
                 TerminationCause::Normal => (0, "Normal termination".to_string()),
@@ -641,6 +638,6 @@ impl Runtime {
         }
 
         // force cleanup of the remaining resources
-        cleanup_instance(instance_id);
+        model::cleanup_instance(instance_id);
     }
 }

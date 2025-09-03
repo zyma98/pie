@@ -5,7 +5,7 @@ use crate::resource::ResourceId;
 use crate::{bindings, model, resource};
 use bytes::Bytes;
 use wasmtime::component::Resource;
-use wasmtime_wasi::p2::IoView;
+use wasmtime_wasi::WasiView;
 
 impl bindings::pie::inferlet::image::Host for InstanceState {
     async fn embed_image(
@@ -15,7 +15,7 @@ impl bindings::pie::inferlet::image::Host for InstanceState {
         image_blob: Vec<u8>,
         position_offset: u32,
     ) -> anyhow::Result<()> {
-        let svc_id = self.table().get(&queue)?.service_id;
+        let svc_id = self.ctx().table.get(&queue)?.service_id;
         emb_ptrs.iter_mut().try_for_each(|emb_ptr| {
             *emb_ptr = self
                 .translate_resource_ptr(svc_id, resource::EMBED_TYPE_ID, *emb_ptr)
@@ -29,7 +29,7 @@ impl bindings::pie::inferlet::image::Host for InstanceState {
         })?;
 
         let inst_id = self.id();
-        let q = self.table().get(&queue)?;
+        let q = self.ctx().table.get(&queue)?;
 
         let req = EmbedImageRequest {
             embed_ptrs: emb_ptrs,

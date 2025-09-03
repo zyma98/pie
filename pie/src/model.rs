@@ -6,13 +6,13 @@ use crate::runtime::trap_exception;
 use crate::service::{self, Service, ServiceError};
 use crate::tokenizer::BytePairEncoder;
 use bytes::Bytes;
+use futures::future;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
-use tokio::sync::oneshot;
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use zeromq::{DealerSocket, Socket, SocketRecv, SocketSend, ZmqMessage};
 
@@ -20,13 +20,6 @@ pub type HandlerId = u32;
 
 pub type CmdQueueId = u32;
 
-static SERVICE_ID_KVS: OnceLock<usize> = OnceLock::new();
-
-/// Dispatches a command to the key-value store service.
-pub fn dispatch(command: Command) -> Result<(), ServiceError> {
-    let service_id = *SERVICE_ID_KVS.get_or_init(|| service::get_service_id("resource").unwrap());
-    service::dispatch(service_id, command)
-}
 static REGISTERED_MODELS: std::sync::LazyLock<boxcar::Vec<(String, usize)>> =
     std::sync::LazyLock::new(boxcar::Vec::new);
 
@@ -54,15 +47,55 @@ pub fn cleanup_instance(inst_id: InstanceId) {
     })
 }
 
-pub async fn query(service_id: usize, query: &'static str) -> String {
-    let (tx, rx) = oneshot::channel();
-    Command::Query {
-        query,
-        response: tx,
+/// Asynchronously collects runtime statistics from all registered models.
+pub async fn runtime_stats() -> HashMap<String, String> {
+    let mut aggregated_stats = HashMap::new();
+    let mut futures = Vec::new();
+
+    // Dispatch requests to all models concurrently.
+    for (_, (model_name, service_id)) in REGISTERED_MODELS.iter() {
+        let (tx, rx) = oneshot::channel();
+        let cmd = Command::GetRuntimeStats { response: tx };
+
+        if cmd.dispatch(*service_id).is_ok() {
+            // Store the model name and the future for its response.
+            futures.push((model_name.clone(), rx));
+        } else {
+            // Handle cases where the service is unavailable immediately.
+            aggregated_stats.insert(
+                format!("{}.error", model_name),
+                "failed to dispatch command to service".to_string(),
+            );
+        }
     }
-    .dispatch(service_id)
-    .unwrap();
-    rx.await.unwrap()
+
+    // Await all responses in parallel.
+    let results = future::join_all(
+        futures
+            .into_iter()
+            .map(async move |(name, rx)| (name, rx.await)),
+    )
+    .await;
+
+    // Process the results.
+    for (model_name, result) in results {
+        match result {
+            Ok(model_stats) => {
+                for (key, value) in model_stats {
+                    aggregated_stats.insert(format!("{}.{}", model_name, key), value);
+                }
+            }
+            Err(e) => {
+                // The service might have crashed or failed to respond.
+                aggregated_stats.insert(
+                    format!("{}.error", model_name),
+                    format!("failed to receive stats from service: {}", e),
+                );
+            }
+        }
+    }
+
+    aggregated_stats
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -72,21 +105,14 @@ pub struct HandshakeRequest {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HandshakeResponse {
-    // backend metadata
     version: String,
-
-    // model metadata
     model_name: String,
     model_traits: Vec<String>,
     model_description: String,
-    model_template: String,
-    model_template_type: String,
-
-    // resources
+    prompt_template: String,
+    prompt_template_type: String,
     kv_page_size: u32,
-    resources: Vec<(u32, u32)>, // (id, capacity)
-
-    // tokenizer
+    resources: Vec<(u32, u32)>,
     tokenizer_merge_table: Vec<(u32, Vec<u8>)>,
     tokenizer_special_tokens: Vec<(String, u32)>,
     tokenizer_split_regex: String,
@@ -103,48 +129,42 @@ pub enum Command {
         data: Bytes,
         response: Option<oneshot::Sender<Bytes>>,
     },
-
-    Query {
-        query: &'static str,
-        response: oneshot::Sender<String>,
+    GetInfo {
+        response: oneshot::Sender<ModelInfo>,
     },
-
+    GetRuntimeStats {
+        response: oneshot::Sender<HashMap<String, String>>,
+    },
     Allocate {
         inst_id: InstanceId,
         type_id: ResourceTypeId,
         count: usize,
-        response: oneshot::Sender<Vec<ResourceId>>, // physical ids
+        response: oneshot::Sender<Vec<ResourceId>>,
     },
-
     Deallocate {
         inst_id: InstanceId,
         type_id: ResourceTypeId,
-        ptrs: Vec<ResourceId>, // physical ids
+        ptrs: Vec<ResourceId>,
     },
-
     Cleanup {
         inst_id: InstanceId,
     },
-
     GetAllExported {
         type_id: ResourceTypeId,
         response: oneshot::Sender<Vec<(String, Vec<ResourceId>)>>,
     },
-
     Export {
         inst_id: InstanceId,
         type_id: ResourceTypeId,
         ptrs: Vec<ResourceId>,
         name: String,
     },
-
     Import {
         inst_id: InstanceId,
         type_id: ResourceTypeId,
         name: String,
         response: oneshot::Sender<Vec<ResourceId>>,
     },
-
     ReleaseExported {
         inst_id: InstanceId,
         type_id: ResourceTypeId,
@@ -158,34 +178,32 @@ impl Command {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ModelInfo {
+    pub name: String,
+    pub traits: Vec<String>,
+    pub description: String,
+    pub prompt_template: String,
+    pub prompt_template_type: String,
+    pub tokenizer: Arc<BytePairEncoder>,
+    pub kv_page_size: u32,
+}
+
 /// An in-memory key-value store service.
 #[derive(Debug)]
 pub struct Model {
-    // model info
-    model_name: String,
-    model_traits: Vec<String>,
-    model_description: String,
-    model_template: String,
-    model_template_type: String,
-
-    // resources
+    info: ModelInfo,
     resource_manager: ResourceManager,
 
-    // tokenizer
-    tokenizer: Arc<BytePairEncoder>,
-
-    // page size
-    kv_page_size: u32,
-
-    // event loops
-    scheduler_tx: UnboundedSender<(Handler, CmdQueueId, Option<oneshot::Sender<Bytes>>, Bytes)>,
-    scheduling_worker_handle: JoinHandle<()>,
-    backend_worker_handle: JoinHandle<()>,
+    shutdown_tx: broadcast::Sender<()>,
+    scheduler_tx:
+        mpsc::UnboundedSender<(Handler, CmdQueueId, Option<oneshot::Sender<Bytes>>, Bytes)>,
+    scheduling_worker_handle: Option<JoinHandle<()>>,
+    backend_worker_handle: Option<JoinHandle<()>>,
 }
 
 impl Model {
     pub async fn new(endpoint: &str) -> anyhow::Result<Self> {
-        // --- This setup logic is largely the same, but initializes ResourceManager ---
         let mut socket = DealerSocket::new();
         socket.connect(endpoint).await?;
 
@@ -199,15 +217,23 @@ impl Model {
             }
         }
 
-        let (backend_tx, backend_rx) = unbounded_channel();
-        let (scheduler_tx, scheduler_rx) = unbounded_channel();
+        let (backend_tx, backend_rx) = mpsc::unbounded_channel();
+        let (scheduler_tx, scheduler_rx) = mpsc::unbounded_channel();
 
-        let backend_worker_handle =
-            tokio::spawn(Self::backend_worker(socket, backend_rx, batch_triggers));
+        // NEW: Shutdown channel for workers.
+        let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
+
+        let backend_worker_handle = tokio::spawn(Self::backend_worker(
+            socket,
+            backend_rx,
+            batch_triggers,
+            shutdown_rx,
+        ));
         let scheduling_worker_handle = tokio::spawn(Self::scheduling_worker(
             batching_config,
             scheduler_rx,
             backend_tx,
+            shutdown_tx.subscribe(),
         ));
 
         let (handshake_tx, handshake_rx) = oneshot::channel();
@@ -215,235 +241,224 @@ impl Model {
             Handler::Handshake,
             0,
             Some(handshake_tx),
-            Bytes::from(
-                rmp_serde::to_vec_named(&HandshakeRequest {
-                    version: "0.1.0".to_string(),
-                })
-                .unwrap(),
-            ),
+            Bytes::from(rmp_serde::to_vec_named(&HandshakeRequest {
+                version: "0.1.0".to_string(),
+            })?),
         ))?;
 
         let handshake_info =
             rmp_serde::from_slice::<HandshakeResponse>(&handshake_rx.await?.to_vec())?;
 
-        let merge_table = handshake_info.tokenizer_merge_table.into_iter().collect();
-        let special_tokens = handshake_info
-            .tokenizer_special_tokens
-            .into_iter()
-            .collect();
-        let pattern = handshake_info.tokenizer_split_regex;
-        let escape_non_printable = handshake_info.tokenizer_escape_non_printable;
-
         let tokenizer = Arc::new(BytePairEncoder::new(
-            merge_table,
-            special_tokens,
-            &pattern,
-            escape_non_printable,
+            handshake_info.tokenizer_merge_table.into_iter().collect(),
+            handshake_info
+                .tokenizer_special_tokens
+                .into_iter()
+                .collect(),
+            &handshake_info.tokenizer_split_regex,
+            handshake_info.tokenizer_escape_non_printable,
         ));
 
-        // Initialize the ResourceManager with information from the handshake
+        let info = ModelInfo {
+            name: handshake_info.model_name,
+            traits: handshake_info.model_traits,
+            description: handshake_info.model_description,
+            prompt_template: handshake_info.prompt_template,
+            prompt_template_type: handshake_info.prompt_template_type,
+            tokenizer,
+            kv_page_size: handshake_info.kv_page_size,
+        };
+
         let resource_manager =
             ResourceManager::new(handshake_info.resources.iter().cloned().collect());
 
         Ok(Model {
-            model_name: handshake_info.model_name,
-            model_traits: handshake_info.model_traits,
-            model_description: handshake_info.model_description,
-            model_template: handshake_info.model_template,
-            model_template_type: handshake_info.model_template_type,
+            info,
             resource_manager,
-            tokenizer,
-            kv_page_size: handshake_info.kv_page_size,
             scheduler_tx,
-            scheduling_worker_handle,
-            backend_worker_handle,
+            shutdown_tx,
+            scheduling_worker_handle: Some(scheduling_worker_handle),
+            backend_worker_handle: Some(backend_worker_handle),
         })
+    }
+
+    // NEW: Graceful shutdown method.
+    pub async fn shutdown(mut self) -> anyhow::Result<()> {
+        println!("[Info] Shutting down model service...");
+        self.shutdown_tx.send(())?;
+
+        if let Some(handle) = self.scheduling_worker_handle.take() {
+            handle.await?;
+        }
+        if let Some(handle) = self.backend_worker_handle.take() {
+            handle.await?;
+        }
+        println!("[Info] Model service shut down gracefully.");
+        Ok(())
     }
 
     async fn scheduling_worker(
         config: HashMap<Handler, BatchingConfig>,
-        mut rx: UnboundedReceiver<(Handler, CmdQueueId, Option<oneshot::Sender<Bytes>>, Bytes)>,
-        backend_tx: UnboundedSender<(Handler, Vec<(Option<oneshot::Sender<Bytes>>, Bytes)>)>,
+        mut rx: mpsc::UnboundedReceiver<(
+            Handler,
+            CmdQueueId,
+            Option<oneshot::Sender<Bytes>>,
+            Bytes,
+        )>,
+        backend_tx: mpsc::UnboundedSender<(Handler, Vec<(Option<oneshot::Sender<Bytes>>, Bytes)>)>,
+        mut shutdown_rx: broadcast::Receiver<()>,
     ) {
         let mut batcher = MultiStreamBatcher::new(config.clone());
         let mut next_poll_duration: Option<Duration> = None;
-
-        // A default timeout to use when the batcher has no pending items.
-        // This prevents a busy-loop while still allowing the scheduler to be responsive.
         const IDLE_TIMEOUT: Duration = Duration::from_secs(1);
 
         loop {
-            // Use the specific duration from the batcher, or fall back to the idle timeout.
             let sleep_duration = next_poll_duration.unwrap_or(IDLE_TIMEOUT);
 
             tokio::select! {
-                // Branch 1: A new message is received.
+                // NEW: Shutdown branch.
+                _ = shutdown_rx.recv() => {
+                    println!("[Info] Shutdown signal received, exiting scheduling worker.");
+                    break;
+                },
                 maybe_msg = rx.recv() => {
                     if let Some((handler, cmd_queue_id, sender, msg)) = maybe_msg {
-                        // Eagerly send if no batching config exists for this handler.
                         if !config.contains_key(&handler) {
-                            let _ = backend_tx.send((handler, vec![(sender, msg)]));
+                            if backend_tx.send((handler, vec![(sender, msg)])).is_err() {
+                               eprintln!("[Warn] Backend channel closed, could not send non-batched message.");
+                            }
                             continue;
                         }
-
-                        // Otherwise, add the command to the batcher.
                         batcher.push(cmd_queue_id, handler, (sender, msg), Instant::now());
                     } else {
-                        // Channel closed, shut down the scheduler.
                         println!("[Info] Command channel closed, shutting down scheduler handler.");
                         break;
                     }
                 },
-                // Branch 2: The timeout expires.
-                _ = tokio::time::sleep(sleep_duration) => {
-                    // Timeout fired. Proceed to the polling logic below.
-                }
+                _ = tokio::time::sleep(sleep_duration) => {}
             }
 
-            // Poll the batcher for any ready batches after either event.
             let batch = batcher.poll(Instant::now());
-
             for (batch_handler, batch_payload) in batch {
-                // check if the handler is sync
                 if batch_handler == Handler::Synchronize {
-                    let (sender, _) = batch_payload.into_iter().next().unwrap();
-                    if let Some(sender) = sender {
-                        let _ = sender.send(Bytes::default());
+                    // FIX: Safely handle potentially empty batches to avoid panic.
+                    if let Some((sender, _)) = batch_payload.into_iter().next() {
+                        if let Some(sender) = sender {
+                            // FIX: Log error if send fails.
+                            if sender.send(Bytes::default()).is_err() {
+                                println!(
+                                    "[Warn] Synchronize response channel closed before sending."
+                                );
+                            }
+                        }
                     }
                     continue;
                 }
 
                 if !batch_payload.is_empty() {
-                    let _ = backend_tx.send((batch_handler, batch_payload));
+                    if backend_tx.send((batch_handler, batch_payload)).is_err() {
+                        eprintln!("[Warn] Backend channel closed, could not send batch.");
+                    }
                 }
             }
-
-            // Recalculate the next required timeout for the next loop iteration.
             next_poll_duration = batcher.next_poll_in(Instant::now());
         }
     }
 
-    /// Manages communication with a backend service over a ZMQ DEALER socket.
-    ///
-    /// This function runs an event loop that performs two main tasks concurrently:
-    /// 1.  Receives commands from an MPSC channel, bundles them into a ZMQ message,
-    ///     and sends them to the backend. It registers reply handlers (`oneshot::Sender`)
-    ///     to await the responses.
-    /// 2.  Receives multipart ZMQ messages from the backend, parses them, and uses a
-    ///     correlation ID to route the reply payloads to the correct waiting handlers.
-    ///
-    /// # Message Formats
-    ///
-    /// ## Outgoing (Client -> Server)
-    /// * Frame 0: `corr_id` (4 bytes, u32 big-endian)
-    /// * Frame 1: `handler_id` (4 bytes, u32 big-endian)
-    /// * Frame 2...N: `payload_bytes`
-    ///
-    /// ## Incoming (Server -> Client)
-    /// * Frame 0: `corr_id` (4 bytes, u32 big-endian)
-    /// * Frame 1...N: `reply_payload_bytes`
-    ///
     async fn backend_worker(
         mut socket: DealerSocket,
-        mut rx: UnboundedReceiver<(Handler, Vec<(Option<oneshot::Sender<Bytes>>, Bytes)>)>,
+        mut rx: mpsc::UnboundedReceiver<(Handler, Vec<(Option<oneshot::Sender<Bytes>>, Bytes)>)>,
         batch_triggers: HashMap<HandlerId, Arc<AtomicBool>>,
+        mut shutdown_rx: broadcast::Receiver<()>,
     ) {
-        // A correlation ID to match outgoing requests with incoming replies.
-        // wrapping_add ensures it safely wraps around on overflow instead of panicking.
         let mut corr_id: u32 = 0;
-
-        // Stores the `oneshot` senders to send replies back to the original requesters.
-        // The key is a tuple of (correlation_id, batch_index).
-        let mut event_table: HashMap<(u32, usize), oneshot::Sender<Bytes>> = HashMap::new();
+        // Store Instant for request timeout handling.
+        let mut event_table: HashMap<(u32, usize), (oneshot::Sender<Bytes>, Instant)> =
+            HashMap::new();
+        const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
         loop {
+            // NEW: Dynamic sleep for timeout checks.
+            let sleep_duration = event_table
+                .values()
+                .map(|(_, instant)| {
+                    instant.saturating_duration_since(Instant::now()) + REQUEST_TIMEOUT
+                })
+                .min()
+                .unwrap_or(REQUEST_TIMEOUT);
+
             tokio::select! {
-                // Branch 1: Handle outgoing commands received from other parts of the application.
+                _ = shutdown_rx.recv() => {
+                    println!("[Info] Shutdown signal received, exiting backend worker.");
+                    break;
+                },
                 maybe_command = rx.recv() => {
                     if let Some((handler, payload)) = maybe_command {
                         let current_corr_id = corr_id;
-
-                        // Unzip payload into two parts
                         let (senders, batch): (Vec<_>, Vec<_>) = payload.into_iter().unzip();
-
-                        // Construct the multipart ZMQ message.
                         let mut frames: VecDeque<Bytes> = VecDeque::with_capacity(2 + batch.len());
                         frames.push_back(Bytes::copy_from_slice(&current_corr_id.to_be_bytes()));
                         frames.push_back(Bytes::copy_from_slice(&handler.get_handler_id().to_be_bytes()));
                         frames.extend(batch);
 
-                        let zmq_msg = match ZmqMessage::try_from(frames) {
-                            Ok(msg) => msg,
-                            Err(e) => {
-                                eprintln!("Failed to construct ZMQ message: {:?}", e);
-                                continue;
-                            }
-                        };
-
-                        // Send the message. If it fails, the `senders` are dropped,
-                        // which notifies the receivers that the operation failed.
-                        if let Err(e) = socket.send(zmq_msg).await {
+                        if let Err(e) = socket.send(ZmqMessage::try_from(frames).unwrap()).await {
                             eprintln!("[Error] Socket send failed for corr_id {}: {:?}", current_corr_id, e);
-                            continue; // Do not proceed to register handlers.
+                            continue;
                         }
 
-                        // If sending was successful, register the reply handlers.
                         for (idx, sender) in senders.into_iter().enumerate() {
                             if let Some(sender) = sender {
-                                event_table.insert((current_corr_id, idx), sender);
+                                // NEW: Store the Instant along with the sender.
+                                event_table.insert((current_corr_id, idx), (sender, Instant::now()));
                             }
                         }
-
-                        // Increment the correlation ID for the next message.
                         corr_id = corr_id.wrapping_add(1);
-
                     } else {
-                        // The channel is closed, indicating the application is shutting down.
                         println!("[Info] Command channel closed, shutting down backend handler.");
                         break;
                     }
                 },
-
-                // Branch 2: Handle incoming replies from the backend server.
                 result = socket.recv() => {
                     match result {
                         Ok(zmq_msg) => {
-                            // We expect at least a correlation ID frame.
-                            if zmq_msg.is_empty() {
-                                eprintln!("[Warn] Received an empty ZMQ message. Ignoring.");
-                                continue;
-                            }
                             let mut frames = zmq_msg.into_vecdeque();
+                            // Safely parse incoming frames to prevent panics.
+                            let Some(corr_id_bytes) = frames.pop_front() else { continue; };
+                            let Some(handler_id_bytes) = frames.pop_front() else { continue; };
+                            let Ok(corr_id_slice) = corr_id_bytes.as_ref().try_into() else { continue; };
+                            let Ok(handler_id_slice) = handler_id_bytes.as_ref().try_into() else { continue; };
 
-                            // The first frame is the correlation ID. ZmqMessage acts like a VecDeque.
-                            let corr_id_bytes = frames.pop_front().unwrap();
-                            let handler_id_bytes = frames.pop_front().unwrap();
+                            let received_corr_id = u32::from_be_bytes(corr_id_slice);
+                            let received_handler_id = u32::from_be_bytes(handler_id_slice);
 
-                            // Parse the correlation ID from the first frame.
-                            let received_corr_id = u32::from_be_bytes(corr_id_bytes.as_ref().try_into().unwrap());
-                            let received_handler_id = u32::from_be_bytes(handler_id_bytes.as_ref().try_into().unwrap());
-
-                            // The remaining frames are payloads. We iterate through them and
-                            // find the corresponding `oneshot::Sender` to send the reply back.
                             for (idx, payload) in frames.into_iter().enumerate() {
                                 let key = (received_corr_id, idx);
-                                if let Some(sender) = event_table.remove(&key) {
-                                    // Send the payload. We don't care if the receiver was dropped.
+                                if let Some((sender, _)) = event_table.remove(&key) {
                                     let _ = sender.send(payload);
                                 }
                             }
 
-                            // Update the trigger if it exists
                             if let Some(trigger) = batch_triggers.get(&received_handler_id) {
                                 trigger.store(true, std::sync::atomic::Ordering::SeqCst);
                             }
-
                         },
                         Err(e) => {
                             eprintln!("[Error] Socket receive error: {}. Shutting down.", e);
                             break;
                         }
                     }
+                },
+                _ = tokio::time::sleep(sleep_duration) => {
+                    let now = Instant::now();
+                    event_table.retain(|_key, (sender, instant)| {
+                        if now.duration_since(*instant) > REQUEST_TIMEOUT {
+                            // The receiver will get a RecvError, indicating the request failed.
+                            eprintln!("[Warn] Request timed out. Dropping sender.");
+                            false
+                        } else {
+                            true
+                        }
+                    });
                 }
             }
         }
@@ -456,16 +471,35 @@ impl Model {
         sender: Option<oneshot::Sender<Bytes>>,
         msg: Bytes,
     ) {
-        let _ = self.scheduler_tx.send((handler, cmd_queue_id, sender, msg));
+        // FIX: Log error if the scheduler channel is closed.
+        if self
+            .scheduler_tx
+            .send((handler, cmd_queue_id, sender, msg))
+            .is_err()
+        {
+            eprintln!("[Error] Failed to submit command: Scheduler channel is closed.");
+        }
+    }
+
+    /// Gathers detailed runtime statistics for this specific model instance.
+    pub fn runtime_stats(&self) -> HashMap<String, String> {
+        let mut stats = HashMap::new();
+        stats.insert("model.name".to_string(), self.info.name.clone());
+
+        // Collect stats from the ResourceManager.
+        self.resource_manager.append_stats_to(&mut stats);
+
+        stats
     }
 }
+
 impl Service for Model {
     type Command = Command;
 
     async fn handle(&mut self, cmd: Self::Command) {
         match cmd {
             Command::Submit {
-                inst_id,
+                inst_id: _,
                 handler,
                 cmd_queue_id,
                 data,
@@ -474,17 +508,16 @@ impl Service for Model {
                 self.submit(handler, cmd_queue_id, response, data);
             }
 
-            Command::Query { query, response } => {
-                let _ = match query {
-                    "name" => response.send(self.model_name.clone()),
-                    "license" => response.send(self.model_name.clone()),
-                    "traits" => response.send(self.model_traits.join(",")),
-                    "description" => response.send(self.model_description.clone()),
-                    "prompt_template" => response.send(self.model_template.clone()),
-                    "prompt_template_type" => response.send(self.model_template_type.clone()),
-                    "kv_page_size" => response.send(self.kv_page_size.to_string()),
-                    _ => Ok(()),
-                };
+            Command::GetInfo { response } => {
+                if response.send(self.info.clone()).is_err() {
+                    println!("[Warn] GetInfo response channel closed before sending.");
+                }
+            }
+
+            Command::GetRuntimeStats { response } => {
+                if response.send(self.runtime_stats()).is_err() {
+                    println!("[Warn] GetRuntimeStats response channel closed before sending.");
+                }
             }
 
             Command::Allocate {
@@ -492,20 +525,17 @@ impl Service for Model {
                 type_id,
                 count,
                 response,
-            } => {
-                let result = self
-                    .resource_manager
-                    .allocate_with_oom(inst_id, type_id, count);
-                match result {
-                    Ok(allocated_ids) => {
-                        let _ = response.send(allocated_ids);
-                    }
-                    Err(e) => {
-                        trap_exception(inst_id, e);
+            } => match self
+                .resource_manager
+                .allocate_with_oom(inst_id, type_id, count)
+            {
+                Ok(allocated_ids) => {
+                    if response.send(allocated_ids).is_err() {
+                        println!("[Warn] Allocate response channel closed before sending.");
                     }
                 }
-            }
-
+                Err(e) => trap_exception(inst_id, e),
+            },
             Command::Deallocate {
                 inst_id,
                 type_id,
@@ -515,18 +545,17 @@ impl Service for Model {
                     trap_exception(inst_id, e);
                 }
             }
-
             Command::Cleanup { inst_id } => {
                 if let Err(e) = self.resource_manager.cleanup(inst_id) {
                     trap_exception(inst_id, e);
                 }
             }
-
             Command::GetAllExported { type_id, response } => {
                 let list = self.resource_manager.get_all_exported(type_id);
-                let _ = response.send(list);
+                if response.send(list).is_err() {
+                    println!("[Warn] GetAllExported response channel closed before sending.");
+                }
             }
-
             Command::Export {
                 inst_id,
                 type_id,
@@ -537,7 +566,6 @@ impl Service for Model {
                     trap_exception(inst_id, e);
                 }
             }
-
             Command::Import {
                 inst_id,
                 type_id,
@@ -545,11 +573,12 @@ impl Service for Model {
                 response,
             } => match self.resource_manager.import(type_id, name) {
                 Ok(ptrs) => {
-                    let _ = response.send(ptrs);
+                    if response.send(ptrs).is_err() {
+                        println!("[Warn] Import response channel closed before sending.");
+                    }
                 }
                 Err(e) => trap_exception(inst_id, e),
             },
-
             Command::ReleaseExported {
                 inst_id,
                 type_id,

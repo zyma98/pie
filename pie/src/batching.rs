@@ -20,7 +20,7 @@ pub enum BatchingConfig {
 }
 
 impl BatchingConfig {
-    pub fn to_policy(&self) -> Box<dyn BatchingPolicy> {
+    fn to_policy(&self) -> Box<dyn BatchingPolicy> {
         match self {
             Self::Bounded {
                 max_wait_time,
@@ -51,26 +51,6 @@ trait BatchingPolicy: Debug + Send {
     /// Returns `None` if no time-based hint is applicable (e.g., when waiting for
     /// an external trigger or if the queue is empty).
     fn next_poll_in(&self, now: Instant) -> Option<Duration>;
-}
-
-pub fn immediate() -> Box<dyn BatchingPolicy> {
-    BoundedPolicy::eager().into_box()
-}
-
-pub fn k_only(min_size: usize, max_size: Option<usize>) -> Box<dyn BatchingPolicy> {
-    BoundedPolicy::k_only(min_size, max_size).into_box()
-}
-
-pub fn t_only(max_wait_time: Duration) -> Box<dyn BatchingPolicy> {
-    BoundedPolicy::t_only(max_wait_time).into_box()
-}
-
-pub fn k_or_t(
-    max_wait_time: Duration,
-    min_size: usize,
-    max_size: Option<usize>,
-) -> Box<dyn BatchingPolicy> {
-    BoundedPolicy::k_or_t(max_wait_time, min_size, max_size).into_box()
 }
 
 /// A policy that forms a batch only when an external trigger is fired

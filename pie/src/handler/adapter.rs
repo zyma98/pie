@@ -3,7 +3,7 @@ use crate::instance::InstanceState;
 use crate::resource::ResourceId;
 use crate::{bindings, resource};
 use wasmtime::component::Resource;
-use wasmtime_wasi::p2::IoView;
+use wasmtime_wasi::WasiView;
 
 impl bindings::pie::inferlet::adapter::Host for InstanceState {
     async fn set_adapter(
@@ -11,7 +11,7 @@ impl bindings::pie::inferlet::adapter::Host for InstanceState {
         pass: Resource<ForwardPass>,
         adapter_ptr: ResourceId,
     ) -> anyhow::Result<()> {
-        let svc_id = self.table().get(&pass)?.service_id;
+        let svc_id = self.ctx().table.get(&pass)?.service_id;
         let phys_adapter_ptr = self
             .translate_resource_ptr(svc_id, resource::ADAPTER_TYPE_ID, adapter_ptr)
             .ok_or(anyhow::format_err!(
@@ -19,7 +19,7 @@ impl bindings::pie::inferlet::adapter::Host for InstanceState {
                 adapter_ptr
             ))?;
 
-        let pass = self.table().get_mut(&pass)?;
+        let pass = self.ctx().table.get_mut(&pass)?;
         pass.adapter = Some(phys_adapter_ptr);
 
         Ok(())

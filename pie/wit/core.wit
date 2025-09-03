@@ -23,9 +23,6 @@ interface core {
     // Get names of models that have all specified traits (e.g. "input_text", "tokenize")
     get-all-models-with-traits: func(traits: list<string>) -> list<string>;
 
-    // Get the size of a KV page
-    get-kv-page-size: func(queue: borrow<queue>) -> u32;
-
     // Sends a message to the remote user client
     send: func(message: string);
 
@@ -104,10 +101,9 @@ interface core {
         get-name: func() -> string;                  // Returns the model's name (e.g. "llama-3.1-8b-instruct")
         get-traits: func() -> list<string>;          // Returns the full set of model traits
         get-description: func() -> string;           // Human-readable description of the model
-        get-version: func() -> string;               // Model version string (e.g. "1.0")
-        get-license: func() -> string;               // License name (e.g. "Llama")
         get-prompt-template: func() -> string;       // Returns the prompt formatting template in Tera
         get-service-id: func() -> u32;
+        get-kv-page-size: func() -> u32; // Get the size of a KV page
         create-queue: func() -> queue;               // Create a new command queue
     }
 
