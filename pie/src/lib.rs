@@ -9,23 +9,21 @@ pub mod client;
 
 // Internal modules
 mod backend;
-mod batching_old;
+mod batching;
 mod bindings;
 mod handler;
 mod instance;
 mod kvs;
 mod messaging;
 mod model;
-mod model_old;
 mod object;
 mod ping;
+mod resource;
 mod runtime;
 pub mod server;
 mod service;
 mod tokenizer;
 mod utils;
-mod batching;
-mod resource;
 
 // Re-export core components from internal modules
 use crate::auth::{create_jwt, init_secret};

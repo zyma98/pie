@@ -1,11 +1,11 @@
 use crate::batching::{BatchingConfig, MultiStreamBatcher};
 use crate::handler::{Handler, get_batching_config};
 use crate::instance::InstanceId;
+use crate::resource::{ResourceId, ResourceManager, ResourceTypeId};
 use crate::runtime::trap_exception;
 use crate::service::{self, Service, ServiceError};
+use crate::tokenizer::BytePairEncoder;
 use bytes::Bytes;
-
-use crate::resource::{ResourceId, ResourceManager, ResourceTypeId};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::AtomicBool;
@@ -15,6 +15,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use zeromq::{DealerSocket, Socket, SocketRecv, SocketSend, ZmqMessage};
+
 pub type HandlerId = u32;
 
 pub type CmdQueueId = u32;
@@ -70,7 +71,7 @@ pub struct HandshakeRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct ModelInfo {
+pub struct HandshakeResponse {
     // backend metadata
     version: String,
 
@@ -160,8 +161,22 @@ impl Command {
 /// An in-memory key-value store service.
 #[derive(Debug)]
 pub struct Model {
+    // model info
+    model_name: String,
+    model_traits: Vec<String>,
+    model_description: String,
+    model_template: String,
+    model_template_type: String,
+
+    // resources
     resource_manager: ResourceManager,
-    info: ModelInfo,
+
+    // tokenizer
+    tokenizer: Arc<BytePairEncoder>,
+
+    // page size
+    kv_page_size: u32,
+
     // event loops
     scheduler_tx: UnboundedSender<(Handler, CmdQueueId, Option<oneshot::Sender<Bytes>>, Bytes)>,
     scheduling_worker_handle: JoinHandle<()>,
@@ -209,15 +224,36 @@ impl Model {
         ))?;
 
         let handshake_info =
-            rmp_serde::from_slice::<ModelInfo>(&handshake_rx.await?.to_vec())?;
+            rmp_serde::from_slice::<HandshakeResponse>(&handshake_rx.await?.to_vec())?;
+
+        let merge_table = handshake_info.tokenizer_merge_table.into_iter().collect();
+        let special_tokens = handshake_info
+            .tokenizer_special_tokens
+            .into_iter()
+            .collect();
+        let pattern = handshake_info.tokenizer_split_regex;
+        let escape_non_printable = handshake_info.tokenizer_escape_non_printable;
+
+        let tokenizer = Arc::new(BytePairEncoder::new(
+            merge_table,
+            special_tokens,
+            &pattern,
+            escape_non_printable,
+        ));
 
         // Initialize the ResourceManager with information from the handshake
         let resource_manager =
             ResourceManager::new(handshake_info.resources.iter().cloned().collect());
 
         Ok(Model {
+            model_name: handshake_info.model_name,
+            model_traits: handshake_info.model_traits,
+            model_description: handshake_info.model_description,
+            model_template: handshake_info.model_template,
+            model_template_type: handshake_info.model_template_type,
             resource_manager,
-            info: handshake_info,
+            tokenizer,
+            kv_page_size: handshake_info.kv_page_size,
             scheduler_tx,
             scheduling_worker_handle,
             backend_worker_handle,
@@ -440,14 +476,13 @@ impl Service for Model {
 
             Command::Query { query, response } => {
                 let _ = match query {
-                    "version" => response.send(self.info.version.clone()),
-                    "name" => response.send(self.info.model_name.clone()),
-                    "license" => response.send(self.info.model_name.clone()),
-                    "traits" => response.send(self.info.model_traits.join(",")),
-                    "description" => response.send(self.info.model_description.clone()),
-                    "prompt_template" => response.send(self.info.model_template.clone()),
-                    "prompt_template_type" => response.send(self.info.model_template_type.clone()),
-                    "kv_page_size" => response.send(self.info.kv_page_size.to_string()),
+                    "name" => response.send(self.model_name.clone()),
+                    "license" => response.send(self.model_name.clone()),
+                    "traits" => response.send(self.model_traits.join(",")),
+                    "description" => response.send(self.model_description.clone()),
+                    "prompt_template" => response.send(self.model_template.clone()),
+                    "prompt_template_type" => response.send(self.model_template_type.clone()),
+                    "kv_page_size" => response.send(self.kv_page_size.to_string()),
                     _ => Ok(()),
                 };
             }

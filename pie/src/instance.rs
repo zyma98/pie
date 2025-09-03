@@ -162,15 +162,15 @@ impl InstanceState {
         }
     }
 
-    pub fn translate_resources(
+    pub fn translate_resource_ptr(
         &self,
         service_id: usize,
         resource_type: ResourceTypeId,
-        virt_ids: &[ResourceId],
-    ) -> Option<Vec<ResourceId>> {
+        virt_id: ResourceId,
+    ) -> Option<ResourceId> {
         let m = self.resources.get(&(service_id, resource_type));
         if let Some(m) = m {
-            Some(m.translate_many(virt_ids))
+            m.translate(virt_id)
         } else {
             None
         }

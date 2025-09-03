@@ -13,14 +13,11 @@ impl bindings::pie::inferlet::adapter::Host for InstanceState {
     ) -> anyhow::Result<()> {
         let svc_id = self.table().get(&pass)?.service_id;
         let phys_adapter_ptr = self
-            .translate_resources(svc_id, resource::ADAPTER_TYPE_ID, &[adapter_ptr])
+            .translate_resource_ptr(svc_id, resource::ADAPTER_TYPE_ID, adapter_ptr)
             .ok_or(anyhow::format_err!(
                 "Failed to translate adapter with ptr: {:?}",
                 adapter_ptr
-            ))?
-            .into_iter()
-            .next()
-            .unwrap();
+            ))?;
 
         let pass = self.table().get_mut(&pass)?;
         pass.adapter = Some(phys_adapter_ptr);

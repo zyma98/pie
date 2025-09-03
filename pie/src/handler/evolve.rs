@@ -19,7 +19,7 @@ impl bindings::pie::inferlet::evolve::Host for InstanceState {
         if pass.adapter.is_some() {
             pass.adapter_seed = Some(seed);
         } else {
-            return Err(anyhow::format_err!("Adapter not set"));
+            anyhow::bail!("Adapter not set");
         }
 
         Ok(())
@@ -36,8 +36,7 @@ impl bindings::pie::inferlet::evolve::Host for InstanceState {
     ) -> anyhow::Result<()> {
         let svc_id = self.table().get(&queue)?.service_id;
         let phys_adapter_ptr = self
-            .translate_resources(svc_id, resource::ADAPTER_TYPE_ID, &[adapter_ptr])
-            .and_then(|v| v.into_iter().next())
+            .translate_resource_ptr(svc_id, resource::ADAPTER_TYPE_ID, adapter_ptr)
             .ok_or_else(|| {
                 anyhow::format_err!("Failed to translate adapter with ptr: {:?}", adapter_ptr)
             })?;
@@ -77,8 +76,7 @@ impl bindings::pie::inferlet::evolve::Host for InstanceState {
     ) -> anyhow::Result<()> {
         let svc_id = self.table().get(&queue)?.service_id;
         let phys_adapter_ptr = self
-            .translate_resources(svc_id, resource::ADAPTER_TYPE_ID, &[adapter_ptr])
-            .and_then(|v| v.into_iter().next())
+            .translate_resource_ptr(svc_id, resource::ADAPTER_TYPE_ID, adapter_ptr)
             .ok_or_else(|| {
                 anyhow::format_err!("Failed to translate adapter with ptr: {:?}", adapter_ptr)
             })?;

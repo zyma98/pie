@@ -59,7 +59,6 @@ pub fn get_batching_config() -> HashMap<Handler, BatchingConfig> {
     config
 }
 
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct QueryRequest {
     query: String,
@@ -94,7 +93,9 @@ pub struct ForwardPassResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EmbedImageRequest {
-    image_ptr: u32,
+    embed_ptrs: Vec<u32>,
+    image_blob: Vec<u8>,
+    position_offset: u32,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

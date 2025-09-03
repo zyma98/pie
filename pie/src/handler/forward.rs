@@ -18,7 +18,7 @@ pub struct ForwardPass {
     input_embed_ptrs: Vec<u32>,
     input_embed_positions: Vec<u32>,
     pub adapter: Option<u32>,
-    pub(crate) adapter_seed: Option<i64>,
+    pub adapter_seed: Option<i64>,
     mask: Vec<Vec<u32>>,
     kv_page_ptrs: Vec<u32>,
     kv_page_last_len: u32,
@@ -85,21 +85,25 @@ impl bindings::pie::inferlet::forward::Host for InstanceState {
     async fn input_embeddings(
         &mut self,
         pass: Resource<ForwardPass>,
-        emb_ptrs: Vec<ResourceId>,
+        mut emb_ptrs: Vec<ResourceId>,
         positions: Vec<u32>,
     ) -> anyhow::Result<()> {
         let svc_id = self.table().get(&pass)?.service_id;
-        let phys_emb_ptrs = self
-            .translate_resources(svc_id, resource::EMBED_TYPE_ID, &emb_ptrs)
-            .ok_or_else(|| {
-                anyhow::format_err!(
-                    "Failed to translate input embeddings with ptrs: {:?}",
-                    emb_ptrs
-                )
-            })?;
+
+        emb_ptrs.iter_mut().try_for_each(|emb_ptr| {
+            *emb_ptr = self
+                .translate_resource_ptr(svc_id, resource::EMBED_TYPE_ID, *emb_ptr)
+                .ok_or_else(|| {
+                    anyhow::format_err!(
+                        "Failed to translate input embedding with ptr: {:?}",
+                        emb_ptr
+                    )
+                })?;
+            Ok::<_, anyhow::Error>(())
+        })?;
 
         let pass = self.table().get_mut(&pass)?;
-        pass.input_embed_ptrs = phys_emb_ptrs;
+        pass.input_embed_ptrs = emb_ptrs;
         pass.input_embed_positions = positions;
         Ok(())
     }
@@ -119,21 +123,24 @@ impl bindings::pie::inferlet::forward::Host for InstanceState {
     async fn output_embeddings(
         &mut self,
         pass: Resource<ForwardPass>,
-        emb_ptrs: Vec<ResourceId>,
+        mut emb_ptrs: Vec<ResourceId>,
         indices: Vec<u32>,
     ) -> anyhow::Result<()> {
         let svc_id = self.table().get(&pass)?.service_id;
-        let phys_emb_ptrs = self
-            .translate_resources(svc_id, resource::EMBED_TYPE_ID, &emb_ptrs)
-            .ok_or_else(|| {
-                anyhow::format_err!(
-                    "Failed to translate input embeddings with ptrs: {:?}",
-                    emb_ptrs
-                )
-            })?;
+        emb_ptrs.iter_mut().try_for_each(|emb_ptr| {
+            *emb_ptr = self
+                .translate_resource_ptr(svc_id, resource::EMBED_TYPE_ID, *emb_ptr)
+                .ok_or_else(|| {
+                    anyhow::format_err!(
+                        "Failed to translate output embedding with ptr: {:?}",
+                        emb_ptr
+                    )
+                })?;
+            Ok::<_, anyhow::Error>(())
+        })?;
 
         let pass = self.table().get_mut(&pass)?;
-        pass.output_embed_ptrs = phys_emb_ptrs;
+        pass.output_embed_ptrs = emb_ptrs;
         pass.output_embed_indices = indices;
         Ok(())
     }
@@ -173,21 +180,25 @@ impl bindings::pie::inferlet::forward::Host for InstanceState {
     async fn kv_cache(
         &mut self,
         pass: Resource<ForwardPass>,
-        kv_page_ptrs: Vec<ResourceId>,
+        mut kv_page_ptrs: Vec<ResourceId>,
         kv_page_last_len: u32,
     ) -> anyhow::Result<()> {
         let svc_id = self.table().get(&pass)?.service_id;
-        let phys_kv_page_ptrs = self
-            .translate_resources(svc_id, resource::KV_PAGE_TYPE_ID, &kv_page_ptrs)
-            .ok_or_else(|| {
-                anyhow::format_err!(
-                    "Failed to translate KV cache pages with ptrs: {:?}",
-                    kv_page_ptrs
-                )
-            })?;
+
+        kv_page_ptrs.iter_mut().try_for_each(|kv_page_ptr| {
+            *kv_page_ptr = self
+                .translate_resource_ptr(svc_id, resource::KV_PAGE_TYPE_ID, *kv_page_ptr)
+                .ok_or_else(|| {
+                    anyhow::format_err!(
+                        "Failed to translate KV cache page with ptr: {:?}",
+                        kv_page_ptr
+                    )
+                })?;
+            Ok::<_, anyhow::Error>(())
+        })?;
 
         let pass = self.table().get_mut(&pass)?;
-        pass.kv_page_ptrs = phys_kv_page_ptrs;
+        pass.kv_page_ptrs = kv_page_ptrs;
         pass.kv_page_last_len = kv_page_last_len;
         Ok(())
     }
