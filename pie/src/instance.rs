@@ -1,5 +1,5 @@
-use crate::model_old::ManagedTypes;
-use crate::model::ResourceId;
+use crate::resource::{ResourceId, ResourceTypeId};
+use crate::utils;
 use bytes::Bytes;
 use colored::*;
 use prost::bytes;
@@ -14,11 +14,72 @@ use wasmtime_wasi::p2::{
 };
 use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpView};
 
-pub type Id = Uuid;
+pub type InstanceId = Uuid;
+
+/// Manages the mapping between virtual and physical resource identifiers.
+#[derive(Debug)]
+struct ResourceIdMapper {
+    /// A pool for acquiring and releasing unique virtual IDs.
+    virtual_id_pool: utils::IdPool<u32>,
+    /// The map from a virtual ID to its corresponding physical ID.
+    virtual_to_physical: HashMap<ResourceId, ResourceId>,
+}
+
+impl Default for ResourceIdMapper {
+    fn default() -> Self {
+        ResourceIdMapper {
+            virtual_id_pool: utils::IdPool::new(u32::MAX),
+            virtual_to_physical: HashMap::new(),
+        }
+    }
+}
+
+impl ResourceIdMapper {
+    /// Creates new virtual IDs and maps them to the provided physical IDs.
+    ///
+    /// Returns the newly created virtual IDs in the same order as the provided physical IDs.
+    fn map_resources(&mut self, physical_ids: &[ResourceId]) -> Vec<ResourceId> {
+        let virtual_ids = self
+            .virtual_id_pool
+            .acquire_many(physical_ids.len())
+            .unwrap();
+
+        // Pre-allocate to prevent multiple rehashes when inserting new entries.
+        self.virtual_to_physical.reserve(physical_ids.len());
+
+        for (&virtual_id, &physical_id) in virtual_ids.iter().zip(physical_ids.iter()) {
+            self.virtual_to_physical.insert(virtual_id, physical_id);
+        }
+
+        virtual_ids
+    }
+
+    /// Removes the mappings for the given virtual IDs and releases them back to the pool.
+    fn unmap_resources(&mut self, virtual_ids: &[ResourceId]) {
+        for &virtual_id in virtual_ids {
+            self.virtual_to_physical.remove(&virtual_id);
+        }
+        self.virtual_id_pool.release_many(virtual_ids).unwrap();
+    }
+
+    /// Translates a single virtual ID to its corresponding physical ID.
+    fn translate(&self, virtual_id: ResourceId) -> Option<ResourceId> {
+        self.virtual_to_physical.get(&virtual_id).copied()
+    }
+
+    /// Translates a slice of virtual IDs to their corresponding physical IDs,
+    /// ignoring any virtual IDs that don't have a valid mapping.
+    fn translate_many(&self, virtual_ids: &[ResourceId]) -> Vec<ResourceId> {
+        virtual_ids
+            .iter()
+            .filter_map(|&virtual_id| self.translate(virtual_id))
+            .collect()
+    }
+}
 
 pub struct InstanceState {
     // Wasm states
-    id: Id,
+    id: InstanceId,
     arguments: Vec<String>,
     wasi_ctx: WasiCtx,
     resource_table: ResourceTable,
@@ -28,7 +89,7 @@ pub struct InstanceState {
     start_time: std::time::Instant,
 
     // virtual resources
-    resources: HashMap<ManagedTypes, HashMap<ResourceId, ResourceId>>,
+    resources: HashMap<(usize, ResourceTypeId), ResourceIdMapper>,
 }
 
 impl IoView for InstanceState {
@@ -69,12 +130,50 @@ impl InstanceState {
         }
     }
 
-    pub fn id(&self) -> Id {
+    pub fn id(&self) -> InstanceId {
         self.id
     }
 
     pub fn arguments(&self) -> &[String] {
         &self.arguments
+    }
+
+    pub fn map_resources(
+        &mut self,
+        service_id: usize,
+        resource_type: ResourceTypeId,
+        phys_ids: &[ResourceId],
+    ) -> Vec<ResourceId> {
+        self.resources
+            .entry((service_id, resource_type))
+            .or_insert_with(|| ResourceIdMapper::default())
+            .map_resources(phys_ids)
+    }
+
+    pub fn unmap_resources(
+        &mut self,
+        service_id: usize,
+        resource_type: ResourceTypeId,
+        virt_ids: &[ResourceId],
+    ) {
+        let m = self.resources.get_mut(&(service_id, resource_type));
+        if let Some(m) = m {
+            m.unmap_resources(virt_ids);
+        }
+    }
+
+    pub fn translate_resources(
+        &self,
+        service_id: usize,
+        resource_type: ResourceTypeId,
+        virt_ids: &[ResourceId],
+    ) -> Option<Vec<ResourceId>> {
+        let m = self.resources.get(&(service_id, resource_type));
+        if let Some(m) = m {
+            Some(m.translate_many(virt_ids))
+        } else {
+            None
+        }
     }
 }
 

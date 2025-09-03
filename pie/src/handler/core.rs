@@ -1,8 +1,9 @@
+use crate::handler::Handler;
 use crate::instance::InstanceState;
 use crate::messaging::{PubSubCommand, PushPullCommand, dispatch_i2i, dispatch_u2i};
-use crate::model::ResourceId;
-use crate::model_old::{self, Command, ManagedTypes, StreamPriority};
-use crate::{bindings, kvs, server};
+use crate::resource::{ResourceId, ResourceTypeId};
+use crate::{bindings, kvs, model, server};
+use bytes::Bytes;
 use std::mem;
 use std::sync::atomic::{AtomicU32, Ordering};
 use tokio::sync::{mpsc, oneshot};
@@ -19,7 +20,7 @@ pub struct Model {
     pub service_id: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Queue {
     pub service_id: usize,
     pub stream_id: u32,
@@ -27,14 +28,14 @@ pub struct Queue {
 
 #[derive(Debug)]
 pub struct DebugQueryResult {
-    receiver: oneshot::Receiver<String>,
+    receiver: oneshot::Receiver<Bytes>,
     result: Option<String>,
     done: bool,
 }
 
 #[derive(Debug)]
 pub struct SynchronizationResult {
-    receiver: oneshot::Receiver<()>,
+    receiver: oneshot::Receiver<Bytes>,
     done: bool,
 }
 
@@ -61,7 +62,8 @@ impl Pollable for DebugQueryResult {
             return;
         }
         let res = (&mut self.receiver).await.unwrap();
-        self.result = Some(res);
+        let res_string = String::from_utf8_lossy(res.as_ref()).to_string();
+        self.result = Some(res_string);
         self.done = true;
     }
 }
@@ -180,7 +182,7 @@ impl bindings::pie::inferlet::core::Host for InstanceState {
     }
 
     async fn get_model(&mut self, name: String) -> anyhow::Result<Option<Resource<Model>>> {
-        if let Some(service_id) = model_old::model_service_id(&name) {
+        if let Some(service_id) = model::model_service_id(&name) {
             let model = Model { name, service_id };
             let res = self.table().push(model)?;
             return Ok(Some(res));
@@ -189,7 +191,7 @@ impl bindings::pie::inferlet::core::Host for InstanceState {
     }
 
     async fn get_all_models(&mut self) -> anyhow::Result<Vec<String>> {
-        Ok(model_old::available_models())
+        Ok(model::registered_models())
     }
 
     async fn get_all_models_with_traits(
@@ -197,7 +199,7 @@ impl bindings::pie::inferlet::core::Host for InstanceState {
         _traits: Vec<String>,
     ) -> anyhow::Result<Vec<String>> {
         // Placeholder: Implement trait filtering logic
-        Ok(model_old::available_models())
+        Ok(model::registered_models())
     }
 
     async fn store_set(&mut self, key: String, value: String) -> anyhow::Result<()> {
@@ -230,82 +232,94 @@ impl bindings::pie::inferlet::core::Host for InstanceState {
     }
 
     async fn get_kv_page_size(&mut self, queue: Resource<Queue>) -> anyhow::Result<u32> {
-        let q = self.table().get(&queue)?;
-        let (tx, rx) = oneshot::channel();
-        Command::GetBlockSize { handle: tx }.dispatch(q.service_id)?;
-        let block_size = rx.await?;
-        Ok(block_size)
+        let svc_id = self.table().get(&queue)?.service_id;
+        let kv_page_size = model::query(svc_id, "kv_page_size").await.parse::<u32>()?;
+        Ok(kv_page_size)
     }
 
     async fn get_all_exported_resources(
         &mut self,
         queue: Resource<Queue>,
-        resource_type: u32,
+        resource_type: ResourceTypeId,
     ) -> anyhow::Result<Vec<(String, u32)>> {
-        let inst_id = self.id();
         let q = self.table().get(&queue)?;
         let (tx, rx) = oneshot::channel();
-        Command::GetExportedList {
-            inst_id,
-            ty: ManagedTypes::KvPage,
-            handle: tx,
+        model::Command::GetAllExported {
+            type_id: resource_type,
+            response: tx,
         }
         .dispatch(q.service_id)?;
-        rx.await.map_err(Into::into)
+
+        // convert list of phys ptrs -> size
+        let c = rx
+            .await?
+            .into_iter()
+            .map(|(s, v)| (s, v.len() as u32))
+            .collect();
+
+        Ok(c)
     }
 
     async fn allocate_resources(
         &mut self,
         queue: Resource<Queue>,
-        resource_type: u32,
+        resource_type: ResourceTypeId,
         count: u32,
     ) -> anyhow::Result<Vec<ResourceId>> {
         let inst_id = self.id();
-        let q = self.table().get(&queue)?;
-        Command::Allocate {
+        let svc_id = self.table().get(&queue)?.service_id;
+        let (tx, rx) = oneshot::channel();
+
+        model::Command::Allocate {
             inst_id,
-            stream_id: q.stream_id,
-            ty: ManagedTypes::KvPage,
-            ids: kv_page_ids,
+            type_id: resource_type,
+            count: count as usize,
+            response: tx,
         }
-        .dispatch(q.service_id)?;
-        Ok(())
+        .dispatch(svc_id)?;
+
+        let phys_ptrs = rx.await?;
+        let virt_ptrs = self.map_resources(svc_id, resource_type, &phys_ptrs);
+
+        Ok(virt_ptrs)
     }
 
     async fn deallocate_resources(
         &mut self,
         queue: Resource<Queue>,
-        resource_type: u32,
+        resource_type: ResourceTypeId,
         ptrs: Vec<ResourceId>,
     ) -> anyhow::Result<()> {
         let inst_id = self.id();
-        let q = self.table().get(&queue)?;
-        Command::Deallocate {
+        let svc_id = self.table().get(&queue)?.service_id;
+        self.unmap_resources(svc_id, resource_type, &ptrs);
+
+        model::Command::Deallocate {
             inst_id,
-            stream_id: q.stream_id,
-            ty: ManagedTypes::KvPage,
-            ids: kv_page_ids,
+            type_id: resource_type,
+            ptrs,
         }
-        .dispatch(q.service_id)?;
+        .dispatch(svc_id)?;
+
         Ok(())
     }
 
     async fn export_resources(
         &mut self,
         queue: Resource<Queue>,
-        resource_type: u32,
+        resource_type: ResourceTypeId,
         ptrs: Vec<ResourceId>,
         name: String,
     ) -> anyhow::Result<()> {
         let inst_id = self.id();
-        let q = self.table().get(&queue)?;
-        Command::Export {
+        let svc_id = self.table().get(&queue)?.service_id;
+        model::Command::Export {
             inst_id,
-            ty: ManagedTypes::KvPage,
-            ids: src_kv_page_ids,
-            resource_name: name,
+            type_id: resource_type,
+            ptrs,
+            name,
         }
-        .dispatch(q.service_id)?;
+        .dispatch(svc_id)?;
 
         Ok(())
     }
@@ -313,17 +327,17 @@ impl bindings::pie::inferlet::core::Host for InstanceState {
     async fn unexport_resources(
         &mut self,
         queue: Resource<Queue>,
-        resource_type: u32,
+        resource_type: ResourceTypeId,
         name: String,
     ) -> anyhow::Result<()> {
         let inst_id = self.id();
-        let q = self.table().get(&queue)?;
-        Command::Unexport {
+        let svc_id = self.table().get(&queue)?.service_id;
+        model::Command::ReleaseExported {
             inst_id,
-            ty: ManagedTypes::KvPage,
-            resource_name: name,
+            type_id: resource_type,
+            name,
         }
-        .dispatch(q.service_id)?;
+        .dispatch(svc_id)?;
 
         Ok(())
     }
@@ -331,49 +345,61 @@ impl bindings::pie::inferlet::core::Host for InstanceState {
     async fn import_resources(
         &mut self,
         queue: Resource<Queue>,
-        resource_type: u32,
+        resource_type: ResourceTypeId,
         name: String,
     ) -> anyhow::Result<Vec<ResourceId>> {
         let inst_id = self.id();
-        let q = self.table().get(&queue)?;
-        Command::Import {
+        let svc_id = self.table().get(&queue)?.service_id;
+
+        let (tx, rx) = oneshot::channel();
+
+        model::Command::Import {
             inst_id,
-            ty: ManagedTypes::KvPage,
-            ids: dst_kv_page_ids,
-            resource_name: name,
+            type_id: resource_type,
+            name,
+            response: tx,
         }
-        .dispatch(q.service_id)?;
-        Ok(())
+        .dispatch(svc_id)?;
+
+        let phys_ptrs = rx.await?;
+        let virt_ptrs = self.map_resources(svc_id, resource_type, &phys_ptrs);
+
+        Ok(virt_ptrs)
     }
 }
 
 impl bindings::pie::inferlet::core::HostModel for InstanceState {
     async fn get_name(&mut self, this: Resource<Model>) -> anyhow::Result<String> {
-        Ok(self.table().get(&this)?.name.clone())
+        let svc_id = self.table().get(&this)?.service_id;
+        let model_name = model::query(svc_id, "name").await;
+        Ok(model_name)
     }
-    async fn get_traits(&mut self, _this: Resource<Model>) -> anyhow::Result<Vec<String>> {
-        // Placeholder
-        Ok(vec![
-            "input_text".to_string(),
-            "tokenize".to_string(),
-            "output_text".to_string(),
-        ])
+    async fn get_traits(&mut self, this: Resource<Model>) -> anyhow::Result<Vec<String>> {
+        let svc_id = self.table().get(&this)?.service_id;
+        let model_traits = model::query(svc_id, "traits").await;
+        // split by comma
+        let model_traits = model_traits.split(',').map(|s| s.to_string()).collect();
+        Ok(model_traits)
     }
-    async fn get_description(&mut self, _this: Resource<Model>) -> anyhow::Result<String> {
-        // Placeholder
-        Ok("A large language model.".to_string())
+    async fn get_description(&mut self, this: Resource<Model>) -> anyhow::Result<String> {
+        let svc_id = self.table().get(&this)?.service_id;
+        let model_description = model::query(svc_id, "description").await;
+        Ok(model_description)
     }
-    async fn get_version(&mut self, _this: Resource<Model>) -> anyhow::Result<String> {
-        // Placeholder
-        Ok("1.0".to_string())
+    async fn get_version(&mut self, this: Resource<Model>) -> anyhow::Result<String> {
+        let svc_id = self.table().get(&this)?.service_id;
+        let model_version = model::query(svc_id, "version").await;
+        Ok(model_version)
     }
-    async fn get_license(&mut self, _this: Resource<Model>) -> anyhow::Result<String> {
-        // Placeholder
-        Ok("Proprietary".to_string())
+    async fn get_license(&mut self, this: Resource<Model>) -> anyhow::Result<String> {
+        let svc_id = self.table().get(&this)?.service_id;
+        let model_license = model::query(svc_id, "license").await;
+        Ok(model_license)
     }
-    async fn get_prompt_template(&mut self, _this: Resource<Model>) -> anyhow::Result<String> {
-        // Placeholder
-        Ok("".to_string())
+    async fn get_prompt_template(&mut self, this: Resource<Model>) -> anyhow::Result<String> {
+        let svc_id = self.table().get(&this)?.service_id;
+        let model_description = model::query(svc_id, "description").await;
+        Ok(model_description)
     }
 
     async fn get_service_id(&mut self, this: Resource<Model>) -> anyhow::Result<u32> {
@@ -408,10 +434,12 @@ impl bindings::pie::inferlet::core::HostQueue for InstanceState {
         let inst_id = self.id();
         let queue = self.table().get(&this)?;
         let (tx, rx) = oneshot::channel();
-        Command::Synchronize {
+        model::Command::Submit {
             inst_id,
-            stream_id: queue.stream_id,
-            handle: tx,
+            cmd_queue_id: 0,
+            handler: Handler::Synchronize,
+            data: Default::default(),
+            response: Some(tx),
         }
         .dispatch(queue.service_id)?;
 
@@ -427,18 +455,6 @@ impl bindings::pie::inferlet::core::HostQueue for InstanceState {
         this: Resource<Queue>,
         priority: bindings::pie::inferlet::core::Priority,
     ) -> anyhow::Result<()> {
-        let inst_id = self.id();
-        let queue = self.table().get(&this)?;
-        Command::SetStreamPriority {
-            inst_id,
-            stream_id: queue.stream_id,
-            priority: match priority {
-                bindings::pie::inferlet::core::Priority::High => StreamPriority::High,
-                bindings::pie::inferlet::core::Priority::Normal => StreamPriority::Normal,
-                bindings::pie::inferlet::core::Priority::Low => StreamPriority::Low,
-            },
-        }
-        .dispatch(queue.service_id)?;
         Ok(())
     }
 
@@ -449,8 +465,17 @@ impl bindings::pie::inferlet::core::HostQueue for InstanceState {
     ) -> anyhow::Result<Resource<DebugQueryResult>> {
         let inst_id = self.id();
         let queue = self.table().get(&this)?;
-        // Placeholder
+
         let (tx, rx) = oneshot::channel();
+
+        model::Command::Submit {
+            inst_id,
+            cmd_queue_id: queue.stream_id,
+            handler: Handler::ModelInfo,
+            data: query.into(),
+            response: Some(tx),
+        }
+        .dispatch(queue.service_id)?;
 
         let res = DebugQueryResult {
             receiver: rx,
@@ -458,13 +483,6 @@ impl bindings::pie::inferlet::core::HostQueue for InstanceState {
             done: false,
         };
 
-        Command::DebugQuery {
-            inst_id,
-            stream_id: queue.stream_id,
-            query,
-            handle: tx,
-        }
-        .dispatch(queue.service_id)?;
         Ok(self.table().push(res)?)
     }
 

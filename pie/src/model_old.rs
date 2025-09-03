@@ -1,6 +1,6 @@
 use crate::backend::Backend;
 use crate::batching_old::{Batchable, Batcher, BatchingStrategy, ManualStrategy};
-use crate::instance::Id as InstanceId;
+use crate::instance::InstanceId as InstanceId;
 use crate::object::{IdRepr, ObjectManager, ObjectType, group_consecutive_ids};
 use crate::service::{Service, ServiceError, install_service};
 use crate::tokenizer::{BytePairEncoder, load_merge_rules};

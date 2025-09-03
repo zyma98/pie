@@ -1,4 +1,4 @@
-use crate::instance::Id as InstanceId;
+use crate::instance::InstanceId as InstanceId;
 use crate::messaging::dispatch_u2i;
 use crate::model_old::attach_new_remote_backend;
 use crate::runtime::RuntimeError;

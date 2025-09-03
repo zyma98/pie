@@ -1,9 +1,7 @@
-use crate::bindings;
 use crate::handler::forward::ForwardPass;
 use crate::instance::InstanceState;
-use crate::model::ResourceId;
-use crate::model_old::{Command, ManagedTypes};
-use tokio::sync::oneshot;
+use crate::resource::ResourceId;
+use crate::{bindings, resource};
 use wasmtime::component::Resource;
 use wasmtime_wasi::p2::IoView;
 
@@ -13,6 +11,20 @@ impl bindings::pie::inferlet::adapter::Host for InstanceState {
         pass: Resource<ForwardPass>,
         adapter_ptr: ResourceId,
     ) -> anyhow::Result<()> {
-        todo!()
+        let svc_id = self.table().get(&pass)?.service_id;
+        let phys_adapter_ptr = self
+            .translate_resources(svc_id, resource::ADAPTER_TYPE_ID, &[adapter_ptr])
+            .ok_or(anyhow::format_err!(
+                "Failed to translate adapter with ptr: {:?}",
+                adapter_ptr
+            ))?
+            .into_iter()
+            .next()
+            .unwrap();
+
+        let pass = self.table().get_mut(&pass)?;
+        pass.adapter = Some(phys_adapter_ptr);
+
+        Ok(())
     }
 }

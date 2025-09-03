@@ -25,6 +25,7 @@ mod service;
 mod tokenizer;
 mod utils;
 mod batching;
+mod resource;
 
 // Re-export core components from internal modules
 use crate::auth::{create_jwt, init_secret};

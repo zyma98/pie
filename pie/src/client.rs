@@ -4,7 +4,7 @@ use futures::{SinkExt, StreamExt};
 use rmp_serde::{decode, encode};
 use std::sync::Arc;
 
-use crate::instance::Id as InstanceId;
+use crate::instance::InstanceId as InstanceId;
 use crate::server::{CHUNK_SIZE_BYTES, ClientMessage, QUERY_PROGRAM_EXISTS, ServerMessage};
 use crate::utils::IdPool;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};

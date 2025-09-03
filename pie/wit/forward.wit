@@ -3,73 +3,64 @@ interface forward {
     use wasi:io/poll@0.2.4.{pollable};
     use core.{queue, pointer};
 
-    execute: func(
-        queue: borrow<queue>,                   // Queue to schedule the operation
-        pass: borrow<forward-pass>              // Forward pass to execute
-    );
-
-
     resource forward-pass {
-        // leave empty for maximum compatibility
-        constructor();
+        execute: func() -> option<forward-pass-result>;
     }
 
-
-    resource distribution-result {
+    resource forward-pass-result {
         // Returns a pollable object to check when the result is ready
         pollable: func() -> pollable;
 
         // Retrieves the result if ready; None if still pending
         // Each tuple: (token IDs, associated probabilities)
-        get: func() -> option<list<tuple<list<u32>, list<f32>>>>;
+        get-distributions: func() -> option<list<tuple<list<u32>, list<f32>>>>;
+
+        get-tokens: func() -> option<list<u32>>;
     }
 
+    create-forward-pass: func(
+        queue: borrow<queue>
+    ) -> forward-pass;
 
-    resource token-result {
-        pollable: func() -> pollable;
-        get: func() -> option<list<u32>>;
-    }
-
-
-    set-input-embeddings: func(
+    input-embeddings: func(
         pass: borrow<forward-pass>,
         emb-ptrs: list<pointer>,
         positions: list<u32>,
     );
 
 
-    set-input-tokens: func(
+    input-tokens: func(
         pass: borrow<forward-pass>,
         input-tokens: list<u32>,
         positions: list<u32>,
     );
 
 
-    request-output-embeddings: func(
+    output-embeddings: func(
         pass: borrow<forward-pass>,
         emb-ptrs: list<pointer>,
         indices: list<u32>,
     );
 
-    request-output-distributions: func(
+    output-distributions: func(
         pass: borrow<forward-pass>,
         indices: list<u32>,
-    ) -> distribution-result;
+    );
 
 
-    request-output-tokens: func(
+    output-tokens: func(
         pass: borrow<forward-pass>,
         indices: list<u32>,
-        sampler: string
-    ) -> token-result;
+        samplers: list<u32>
+    );
 
 
-    apply-mask: func(
+    attention-mask: func(
         pass: borrow<forward-pass>,
         mask: list<list<u32>>,
     );
 
-    use-kv-cache: func(
+    kv-cache: func(
         pass: borrow<forward-pass>,
         kv-page-ptrs: list<pointer>,
         last-kv-page-len: u32,

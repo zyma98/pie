@@ -1,10 +1,10 @@
-use crate::bindings;
 use crate::handler::core::Queue;
 use crate::handler::forward::ForwardPass;
+use crate::handler::{Handler, InitializeAdapterRequest, UpdateAdapterRequest};
 use crate::instance::InstanceState;
-use crate::model::ResourceId;
-use crate::model_old::{Command, ManagedTypes};
-use tokio::sync::oneshot;
+use crate::resource::ResourceId;
+use crate::{bindings, model, resource};
+use bytes::Bytes;
 use wasmtime::component::Resource;
 use wasmtime_wasi::p2::IoView;
 
@@ -14,7 +14,15 @@ impl bindings::pie::inferlet::evolve::Host for InstanceState {
         pass: Resource<ForwardPass>,
         seed: i64,
     ) -> anyhow::Result<()> {
-        todo!()
+        let pass = self.table().get_mut(&pass)?;
+
+        if pass.adapter.is_some() {
+            pass.adapter_seed = Some(seed);
+        } else {
+            return Err(anyhow::format_err!("Adapter not set"));
+        }
+
+        Ok(())
     }
     async fn initialize_adapter(
         &mut self,
@@ -26,17 +34,33 @@ impl bindings::pie::inferlet::evolve::Host for InstanceState {
         mu_fraction: f32,
         initial_sigma: f32,
     ) -> anyhow::Result<()> {
+        let svc_id = self.table().get(&queue)?.service_id;
+        let phys_adapter_ptr = self
+            .translate_resources(svc_id, resource::ADAPTER_TYPE_ID, &[adapter_ptr])
+            .and_then(|v| v.into_iter().next())
+            .ok_or_else(|| {
+                anyhow::format_err!("Failed to translate adapter with ptr: {:?}", adapter_ptr)
+            })?;
+
         let inst_id = self.id();
         let q = self.table().get(&queue)?;
-        Command::InitializeAdapter {
-            inst_id,
-            stream_id: q.stream_id,
-            adapter: adapter_ptr,
+
+        let req = InitializeAdapterRequest {
+            adapter_ptr: phys_adapter_ptr,
             rank,
             alpha,
             population_size,
             mu_fraction,
             initial_sigma,
+        };
+        let data = Bytes::from(rmp_serde::to_vec_named(&req)?);
+
+        model::Command::Submit {
+            inst_id,
+            cmd_queue_id: q.stream_id,
+            handler: Handler::InitializeAdapter,
+            data,
+            response: None,
         }
         .dispatch(q.service_id)?;
 
@@ -51,15 +75,31 @@ impl bindings::pie::inferlet::evolve::Host for InstanceState {
         seeds: Vec<i64>,
         max_sigma: f32,
     ) -> anyhow::Result<()> {
+        let svc_id = self.table().get(&queue)?.service_id;
+        let phys_adapter_ptr = self
+            .translate_resources(svc_id, resource::ADAPTER_TYPE_ID, &[adapter_ptr])
+            .and_then(|v| v.into_iter().next())
+            .ok_or_else(|| {
+                anyhow::format_err!("Failed to translate adapter with ptr: {:?}", adapter_ptr)
+            })?;
+
         let inst_id = self.id();
         let q = self.table().get(&queue)?;
-        Command::UpdateAdapter {
-            inst_id,
-            stream_id: q.stream_id,
-            adapter: adapter_ptr,
+
+        let req = UpdateAdapterRequest {
+            adapter_ptr: phys_adapter_ptr,
             scores,
             seeds,
             max_sigma,
+        };
+        let data = Bytes::from(rmp_serde::to_vec_named(&req)?);
+
+        model::Command::Submit {
+            inst_id,
+            cmd_queue_id: q.stream_id,
+            handler: Handler::UpdateAdapter,
+            data,
+            response: None,
         }
         .dispatch(q.service_id)?;
 

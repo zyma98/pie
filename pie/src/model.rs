@@ -1,29 +1,23 @@
-use crate::backend::{Backend, BackendError};
 use crate::batching::{BatchingConfig, MultiStreamBatcher};
-use crate::batching_old::Batcher;
-use crate::handler::{
-    BatchSchedulingPolicy, Handler, HandshakeRequest, HandshakeResponse, get_batching_config,
-};
-use crate::instance::Id as InstanceId;
-use crate::model_old::{Event, Stream};
-use crate::runtime::{TerminationCause, trap, trap_exception};
+use crate::handler::{Handler, get_batching_config};
+use crate::instance::InstanceId;
+use crate::runtime::trap_exception;
 use crate::service::{self, Service, ServiceError};
-use crate::utils::IdPool;
-use bytes::{Buf, Bytes};
-use dashmap::DashMap;
+use bytes::Bytes;
+
+use crate::resource::{ResourceId, ResourceManager, ResourceTypeId};
 use serde::{Deserialize, Serialize};
-use std::cmp::PartialEq;
-use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::future;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc::{Receiver, UnboundedReceiver, UnboundedSender, unbounded_channel};
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
-use tokio::time::timeout;
 use zeromq::{DealerSocket, Socket, SocketRecv, SocketSend, ZmqMessage};
+pub type HandlerId = u32;
+
+pub type CmdQueueId = u32;
 
 static SERVICE_ID_KVS: OnceLock<usize> = OnceLock::new();
 
@@ -32,13 +26,71 @@ pub fn dispatch(command: Command) -> Result<(), ServiceError> {
     let service_id = *SERVICE_ID_KVS.get_or_init(|| service::get_service_id("resource").unwrap());
     service::dispatch(service_id, command)
 }
+static REGISTERED_MODELS: std::sync::LazyLock<boxcar::Vec<(String, usize)>> =
+    std::sync::LazyLock::new(boxcar::Vec::new);
 
-pub type ResourceId = u32;
-pub type ResourceTypeId = u32;
+pub fn registered_models() -> Vec<String> {
+    REGISTERED_MODELS
+        .iter()
+        .map(|(_, (model_name, _))| model_name.clone())
+        .collect()
+}
 
-pub type HandlerId = u32;
+pub fn register_model(model_name: String, service_id: usize) {
+    REGISTERED_MODELS.push((model_name, service_id));
+}
 
-pub type CmdQueueId = u32;
+pub fn model_service_id(model_name: &str) -> Option<usize> {
+    REGISTERED_MODELS
+        .iter()
+        .find(|(_, (name, _))| name == model_name)
+        .map(|(_, (_, service_id))| *service_id)
+}
+
+pub fn cleanup_instance(inst_id: InstanceId) {
+    REGISTERED_MODELS.iter().for_each(|(_, (_, service_id))| {
+        Command::Cleanup { inst_id }.dispatch(*service_id).ok();
+    })
+}
+
+pub async fn query(service_id: usize, query: &'static str) -> String {
+    let (tx, rx) = oneshot::channel();
+    Command::Query {
+        query,
+        response: tx,
+    }
+    .dispatch(service_id)
+    .unwrap();
+    rx.await.unwrap()
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct HandshakeRequest {
+    version: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ModelInfo {
+    // backend metadata
+    version: String,
+
+    // model metadata
+    model_name: String,
+    model_traits: Vec<String>,
+    model_description: String,
+    model_template: String,
+    model_template_type: String,
+
+    // resources
+    kv_page_size: u32,
+    resources: Vec<(u32, u32)>, // (id, capacity)
+
+    // tokenizer
+    tokenizer_merge_table: Vec<(u32, Vec<u8>)>,
+    tokenizer_special_tokens: Vec<(String, u32)>,
+    tokenizer_split_regex: String,
+    tokenizer_escape_non_printable: bool,
+}
 
 /// Defines the set of operations available for the key-value store.
 #[derive(Debug)]
@@ -49,6 +101,11 @@ pub enum Command {
         handler: Handler,
         data: Bytes,
         response: Option<oneshot::Sender<Bytes>>,
+    },
+
+    Query {
+        query: &'static str,
+        response: oneshot::Sender<String>,
     },
 
     Allocate {
@@ -94,16 +151,17 @@ pub enum Command {
     },
 }
 
+impl Command {
+    pub fn dispatch(self, service_id: usize) -> Result<(), ServiceError> {
+        service::dispatch(service_id, self)
+    }
+}
+
 /// An in-memory key-value store service.
 #[derive(Debug)]
 pub struct Model {
-    res_pool: HashMap<ResourceTypeId, IdPool<ResourceId>>,
-    res_exported: HashMap<ResourceTypeId, HashMap<String, Vec<ResourceId>>>,
-    res_allocated: HashMap<(ResourceTypeId, InstanceId), HashSet<ResourceId>>,
-
-    // heuristic used by oom killer
-    inst_start_time: HashMap<InstanceId, Instant>,
-
+    resource_manager: ResourceManager,
+    info: ModelInfo,
     // event loops
     scheduler_tx: UnboundedSender<(Handler, CmdQueueId, Option<oneshot::Sender<Bytes>>, Bytes)>,
     scheduling_worker_handle: JoinHandle<()>,
@@ -112,43 +170,32 @@ pub struct Model {
 
 impl Model {
     pub async fn new(endpoint: &str) -> anyhow::Result<Self> {
-        // Use the connection helper with spinner from zmq_handler
+        // --- This setup logic is largely the same, but initializes ResourceManager ---
         let mut socket = DealerSocket::new();
         socket.connect(endpoint).await?;
 
-        // iterate through all handler enums
         let mut batching_config = get_batching_config();
         let mut batch_triggers = HashMap::new();
         for (handler, cfg) in batching_config.iter_mut() {
-            match cfg {
-                BatchingConfig::Triggered {
-                    mut trigger,
-                    min_wait_time,
-                } => {
-                    let t = Arc::new(AtomicBool::new(true));
-                    batch_triggers.insert(handler.get_handler_id(), t.clone());
-                    trigger = Some(t.clone());
-                }
-                _ => {}
+            if let BatchingConfig::Triggered { trigger, .. } = cfg {
+                let t = Arc::new(AtomicBool::new(true));
+                batch_triggers.insert(handler.get_handler_id(), t.clone());
+                *trigger = Some(t.clone());
             }
         }
 
         let (backend_tx, backend_rx) = unbounded_channel();
         let (scheduler_tx, scheduler_rx) = unbounded_channel();
 
-        // Spawn the event loop task.
         let backend_worker_handle =
             tokio::spawn(Self::backend_worker(socket, backend_rx, batch_triggers));
-
         let scheduling_worker_handle = tokio::spawn(Self::scheduling_worker(
             batching_config,
             scheduler_rx,
             backend_tx,
         ));
 
-        // do the handshake
         let (handshake_tx, handshake_rx) = oneshot::channel();
-
         scheduler_tx.send((
             Handler::Handshake,
             0,
@@ -161,21 +208,16 @@ impl Model {
             ),
         ))?;
 
-        let model_info = rmp_serde::from_slice::<HandshakeResponse>(&handshake_rx.await?.to_vec())?;
+        let handshake_info =
+            rmp_serde::from_slice::<ModelInfo>(&handshake_rx.await?.to_vec())?;
 
-        let mut res_pool = HashMap::new();
-
-        for (res_id, capacity) in model_info.resources.iter() {
-            res_pool
-                .entry(*res_id)
-                .or_insert_with(|| IdPool::new(*capacity));
-        }
+        // Initialize the ResourceManager with information from the handshake
+        let resource_manager =
+            ResourceManager::new(handshake_info.resources.iter().cloned().collect());
 
         Ok(Model {
-            res_pool,
-            res_exported: HashMap::new(),
-            res_allocated: HashMap::new(),
-            inst_start_time: HashMap::new(),
+            resource_manager,
+            info: handshake_info,
             scheduler_tx,
             scheduling_worker_handle,
             backend_worker_handle,
@@ -226,6 +268,15 @@ impl Model {
             let batch = batcher.poll(Instant::now());
 
             for (batch_handler, batch_payload) in batch {
+                // check if the handler is sync
+                if batch_handler == Handler::Synchronize {
+                    let (sender, _) = batch_payload.into_iter().next().unwrap();
+                    if let Some(sender) = sender {
+                        let _ = sender.send(Bytes::default());
+                    }
+                    continue;
+                }
+
                 if !batch_payload.is_empty() {
                     let _ = backend_tx.send((batch_handler, batch_payload));
                 }
@@ -362,318 +413,59 @@ impl Model {
         }
     }
 
-    pub fn submit(&self) {}
-
-    pub fn available(&self, type_id: ResourceTypeId) -> anyhow::Result<usize> {
-        let pool = self.res_pool.get(&type_id).ok_or(anyhow::anyhow!(
-            "Resource pool for type {:?} does not exist",
-            type_id
-        ))?;
-        Ok(pool.available())
-    }
-
-    pub fn allocate(
-        &mut self,
-        inst_id: InstanceId,
-        type_id: ResourceTypeId,
-        count: usize,
-    ) -> anyhow::Result<Vec<ResourceId>> {
-        let pool = self
-            .res_pool
-            .entry(type_id)
-            .or_insert_with(|| IdPool::new(ResourceId::MAX));
-
-        if pool.available() < count {
-            return Err(anyhow::anyhow!("Out of memory"));
-        }
-
-        let allocated = pool.acquire_many(count)?;
-
-        // Record the start time if this is the first allocation for this instance.
-        self.inst_start_time
-            .entry(inst_id)
-            .or_insert_with(Instant::now);
-
-        // update the allocated map
-        self.res_allocated
-            .entry((type_id, inst_id))
-            .or_insert_with(HashSet::new)
-            .extend(&allocated);
-
-        Ok(allocated)
-    }
-
-    pub fn deallocate(
-        &mut self,
-        inst_id: InstanceId,
-        type_id: ResourceTypeId,
-        ptrs: Vec<ResourceId>,
-    ) -> anyhow::Result<()> {
-        let allocated = self
-            .res_allocated
-            .get_mut(&(type_id, inst_id))
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Instance {:?} has no allocated resources of type {:?}",
-                    inst_id,
-                    type_id
-                )
-            })?;
-
-        let pool = self.res_pool.get_mut(&type_id).ok_or_else(|| {
-            anyhow::anyhow!("Resource pool for type {:?} does not exist", type_id)
-        })?;
-
-        for ptr in ptrs {
-            if allocated.remove(&ptr) {
-                pool.release(ptr)?;
-            } else {
-                return Err(anyhow::anyhow!(
-                    "Pointer {:?} is not allocated to instance {:?}",
-                    ptr,
-                    inst_id
-                ));
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Finds and terminates victim instances until the requested `size` of resources of `ty` is available.
-    pub fn oom_kill(
-        &mut self,
-        type_id: ResourceTypeId,
-        size: usize,
-        inst_id_to_exclude: InstanceId,
-    ) -> anyhow::Result<()> {
-        // 1. Get the start time of the instance requesting memory.
-        // If it has no start time (i.e., no resources), no other instance can be "newer".
-        let requester_start_time = match self.inst_start_time.get(&inst_id_to_exclude) {
-            Some(time) => *time,
-            None => {
-                return Err(anyhow::anyhow!(
-                    "OOM unrecoverable: Requesting instance has no recorded start time, so no newer instances can be killed."
-                ));
-            }
-        };
-
-        // 2. Loop until enough resources are freed.
-        loop {
-            // Check available memory, handling potential errors if the resource pool doesn't exist.
-            let available_count = self.available(type_id)?;
-            if available_count >= size {
-                break; // Success, enough memory is now free.
-            }
-
-            // 3. Heuristic: Find the newest instance that is *strictly newer* than the requester.
-            let victim_id = self
-                .inst_start_time
-                .iter()
-                // The key change: only consider instances started AFTER the requester.
-                .filter(|(_, time)| **time > requester_start_time)
-                // Find the newest among the filtered candidates.
-                .max_by_key(|(_, time)| **time)
-                .map(|(id, _)| *id);
-
-            if let Some(victim_id) = victim_id {
-                // A victim was found, clean up its resources.
-                self.cleanup(victim_id)?;
-
-                // Terminate the victim instance.
-                trap(
-                    victim_id,
-                    TerminationCause::OutOfResources(
-                        "Terminated by OOM killer to free resources for an older instance"
-                            .to_string(),
-                    ),
-                );
-            } else {
-                // No more instances newer than the requester could be found.
-                return Err(anyhow::anyhow!(
-                    "OOM unrecoverable: Not enough memory could be freed after terminating all newer instances."
-                ));
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Deallocates all resources associated with a given instance.
-    pub fn cleanup(&mut self, inst_id: InstanceId) -> anyhow::Result<()> {
-        let mut to_release_by_type: HashMap<ResourceTypeId, Vec<ResourceId>> = HashMap::new();
-
-        // `retain` iterates and removes entries for which the closure returns false.
-        self.res_allocated.retain(|(ty, id), ptrs| {
-            if *id == inst_id {
-                // Collect the pointers to be released for the matching instance.
-                to_release_by_type
-                    .entry(*ty)
-                    .or_default()
-                    .extend(ptrs.iter().copied());
-                // Return `false` to remove this entry from `self.allocated`.
-                false
-            } else {
-                // Keep entries for other instances.
-                true
-            }
-        });
-
-        // Release the collected pointers back to their respective pools.
-        for (ty, ptrs) in to_release_by_type {
-            let pool = self.res_pool.get_mut(&ty).ok_or_else(|| {
-                anyhow::anyhow!("Cleanup failed: Resource pool for type {:?} not found", ty)
-            })?;
-
-            for ptr in ptrs {
-                pool.release(ptr)?;
-            }
-        }
-
-        // Remove the instance's start time entry.
-        self.inst_start_time.remove(&inst_id);
-
-        Ok(())
-    }
-
-    pub fn export(
-        &mut self,
-        inst_id: InstanceId,
-        type_id: ResourceTypeId,
-        ptrs: Vec<ResourceId>,
-        name: String,
-    ) -> anyhow::Result<()> {
-        // We need a mutable reference to the allocated set to remove pointers.
-        let allocated = self
-            .res_allocated
-            .get_mut(&(type_id, inst_id))
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Instance {:?} has no allocated resources of type {:?}",
-                    inst_id,
-                    type_id
-                )
-            })?;
-
-        // 1. Membership check: Ensure the instance owns all pointers before transferring them.
-        for ptr in &ptrs {
-            if !allocated.contains(ptr) {
-                return Err(anyhow::anyhow!(
-                    "Invalid pointer {:?} for instance {:?}",
-                    ptr,
-                    inst_id
-                ));
-            }
-        }
-
-        // 2. Add the resource to the public export map, but only if the name isn't taken.
-        // We get or create the nested map for the given resource type first.
-        let type_exports = self.res_exported.entry(type_id).or_default();
-
-        // The key change is here: using the Entry API.
-        match type_exports.entry(name) {
-            // This arm runs if the name is already in use.
-            Entry::Occupied(entry) => {
-                // Return an error to prevent overwriting and leaking the old resource.
-                Err(anyhow::anyhow!(
-                    "Exported resource with name '{}' already exists for type {:?}",
-                    entry.key(),
-                    type_id
-                ))
-            }
-            // This arm runs if the name is available.
-            Entry::Vacant(entry) => {
-                // 3. After validation, remove the pointers from the instance's ownership.
-                // This is done only after we've confirmed the export name is available.
-                for ptr in &ptrs {
-                    allocated.remove(ptr);
-                }
-
-                // 4. Safely insert the new exported resource.
-                entry.insert(ptrs);
-                Ok(())
-            }
-        }
-    }
-
-    pub fn import(
-        &mut self,
-        type_id: ResourceTypeId,
-        name: String,
-    ) -> anyhow::Result<Vec<ResourceId>> {
-        let ptrs = self
-            .res_exported
-            .get(&type_id)
-            .and_then(|exports| exports.get(&name))
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Exported resource '{}' not found for type {:?}",
-                    name,
-                    type_id
-                )
-            })?
-            .clone();
-
-        Ok(ptrs)
-    }
-
-    pub fn release_exported(
-        &mut self,
-        type_id: ResourceTypeId,
-        name: String,
-    ) -> anyhow::Result<()> {
-        let type_exports = self.res_exported.get_mut(&type_id).ok_or_else(|| {
-            anyhow::anyhow!("No resources of type {:?} have been exported", type_id)
-        })?;
-
-        // Try to remove the named resource.
-        if let Some(ptrs_to_release) = type_exports.remove(&name) {
-            // If found, get the corresponding resource pool.
-            let pool = self.res_pool.get_mut(&type_id).ok_or_else(|| {
-                anyhow::anyhow!("Resource pool for type {:?} does not exist", type_id)
-            })?;
-
-            // Release each pointer back into the pool.
-            for ptr in ptrs_to_release {
-                pool.release(ptr)?;
-            }
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!(
-                "Exported resource with name '{}' not found",
-                name
-            ))
-        }
+    pub fn submit(
+        &self,
+        handler: Handler,
+        cmd_queue_id: CmdQueueId,
+        sender: Option<oneshot::Sender<Bytes>>,
+        msg: Bytes,
+    ) {
+        let _ = self.scheduler_tx.send((handler, cmd_queue_id, sender, msg));
     }
 }
-
 impl Service for Model {
     type Command = Command;
 
     async fn handle(&mut self, cmd: Self::Command) {
         match cmd {
+            Command::Submit {
+                inst_id,
+                handler,
+                cmd_queue_id,
+                data,
+                response,
+            } => {
+                self.submit(handler, cmd_queue_id, response, data);
+            }
+
+            Command::Query { query, response } => {
+                let _ = match query {
+                    "version" => response.send(self.info.version.clone()),
+                    "name" => response.send(self.info.model_name.clone()),
+                    "license" => response.send(self.info.model_name.clone()),
+                    "traits" => response.send(self.info.model_traits.join(",")),
+                    "description" => response.send(self.info.model_description.clone()),
+                    "prompt_template" => response.send(self.info.model_template.clone()),
+                    "prompt_template_type" => response.send(self.info.model_template_type.clone()),
+                    "kv_page_size" => response.send(self.info.kv_page_size.to_string()),
+                    _ => Ok(()),
+                };
+            }
+
             Command::Allocate {
                 inst_id,
-                type_id: ty,
+                type_id,
                 count,
                 response,
             } => {
-                // Check if there is enough memory before attempting to allocate.
-                if self.available(ty).unwrap_or(0) < count {
-                    // Not enough memory, trigger the OOM killer.
-                    if let Err(kill_err) = self.oom_kill(ty, count, inst_id) {
-                        // OOM killing failed because it couldn't free enough memory. Trap the requester.
-                        trap_exception(inst_id, kill_err);
-                        return;
-                    }
-                }
-
-                // Proceed with the allocation. A successful oom_kill guarantees enough space.
-                match self.allocate(inst_id, ty, count) {
-                    Ok(v) => {
-                        let _ = response.send(v);
+                let result = self
+                    .resource_manager
+                    .allocate_with_oom(inst_id, type_id, count);
+                match result {
+                    Ok(allocated_ids) => {
+                        let _ = response.send(allocated_ids);
                     }
                     Err(e) => {
-                        // This path is defensive; it shouldn't be reached if oom_kill succeeded.
                         trap_exception(inst_id, e);
                     }
                 }
@@ -681,67 +473,54 @@ impl Service for Model {
 
             Command::Deallocate {
                 inst_id,
-                type_id: ty,
+                type_id,
                 ptrs,
             } => {
-                if let Err(e) = self.deallocate(inst_id, ty, ptrs) {
+                if let Err(e) = self.resource_manager.deallocate(inst_id, type_id, ptrs) {
                     trap_exception(inst_id, e);
                 }
             }
 
             Command::Cleanup { inst_id } => {
-                if let Err(e) = self.cleanup(inst_id) {
+                if let Err(e) = self.resource_manager.cleanup(inst_id) {
                     trap_exception(inst_id, e);
                 }
             }
 
-            Command::GetAllExported {
-                type_id: ty,
-                response,
-            } => {
-                let list = self
-                    .res_exported
-                    .get(&ty)
-                    .map(|exports| {
-                        // Clone each name and its associated Vec<ResourceId> just once.
-                        exports
-                            .iter()
-                            .map(|(name, ptrs)| (name.clone(), ptrs.clone()))
-                            .collect()
-                    })
-                    .unwrap_or_default();
+            Command::GetAllExported { type_id, response } => {
+                let list = self.resource_manager.get_all_exported(type_id);
                 let _ = response.send(list);
             }
 
             Command::Export {
                 inst_id,
-                type_id: ty,
+                type_id,
                 ptrs,
                 name,
             } => {
-                if let Err(e) = self.export(inst_id, ty, ptrs, name) {
+                if let Err(e) = self.resource_manager.export(inst_id, type_id, ptrs, name) {
                     trap_exception(inst_id, e);
                 }
             }
 
             Command::Import {
                 inst_id,
-                type_id: ty,
+                type_id,
                 name,
                 response,
-            } => match self.import(ty, name) {
-                Ok(ptr) => {
-                    let _ = response.send(ptr);
+            } => match self.resource_manager.import(type_id, name) {
+                Ok(ptrs) => {
+                    let _ = response.send(ptrs);
                 }
                 Err(e) => trap_exception(inst_id, e),
             },
 
             Command::ReleaseExported {
                 inst_id,
-                type_id: ty,
+                type_id,
                 name,
             } => {
-                if let Err(e) = self.release_exported(ty, name) {
+                if let Err(e) = self.resource_manager.release_exported(type_id, name) {
                     trap_exception(inst_id, e);
                 }
             }

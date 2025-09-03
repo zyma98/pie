@@ -1,4 +1,4 @@
-use crate::batching::{BatchSchedulingPolicy, BatchingConfig};
+use crate::batching::BatchingConfig;
 use crate::model::HandlerId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -17,7 +17,8 @@ pub mod tokenize;
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum Handler {
     Handshake,
-    Query,
+    Synchronize,
+    ModelInfo,
     ForwardPass,
     EmbedImage,
     InitializeAdapter,
@@ -28,7 +29,8 @@ impl Handler {
     pub fn get_handler_id(&self) -> HandlerId {
         match self {
             Self::Handshake => 0,
-            Self::Query => 1,
+            Self::Synchronize => 0,
+            Self::ModelInfo => 1,
             Self::ForwardPass => 2,
             Self::EmbedImage => 3,
             Self::InitializeAdapter => 4,
@@ -40,6 +42,14 @@ impl Handler {
 pub fn get_batching_config() -> HashMap<Handler, BatchingConfig> {
     let mut config = HashMap::new();
     config.insert(
+        Handler::Synchronize,
+        BatchingConfig::Bounded {
+            max_wait_time: Duration::ZERO,
+            min_size: 1,
+            max_size: None,
+        },
+    );
+    config.insert(
         Handler::ForwardPass,
         BatchingConfig::Triggered {
             trigger: None,
@@ -49,32 +59,6 @@ pub fn get_batching_config() -> HashMap<Handler, BatchingConfig> {
     config
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct HandshakeRequest {
-    pub version: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct HandshakeResponse {
-    // backend metadata
-    pub version: String,
-
-    // model metadata
-    pub model_name: String,
-    pub model_description: String,
-    pub model_template: String,
-    pub model_template_type: String,
-
-    // resources
-    pub kv_page_size: u32,
-    pub resources: Vec<(u32, u32)>, // (id, capacity)
-
-    // tokenizer
-    pub tokenizer_merge_table: Vec<(u32, Vec<u8>)>,
-    pub tokenizer_special_tokens: Vec<(String, u32)>,
-    pub tokenizer_split_regex: String,
-    pub tokenizer_escape_non_printable: bool,
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct QueryRequest {
@@ -92,6 +76,7 @@ pub struct ForwardPassRequest {
     input_embed_ptrs: Vec<u32>,
     input_embed_positions: Vec<u32>,
     adapter: u32,
+    adapter_seed: i64,
     mask: Vec<Vec<u32>>,
     kv_cache_page_ptrs: Vec<u32>,
     kv_cache_last_page_len: u32,
@@ -104,7 +89,7 @@ pub struct ForwardPassRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ForwardPassResponse {
     tokens: Vec<u32>,
-    dists: Vec<(u32, Vec<f32>)>,
+    dists: Vec<(Vec<u32>, Vec<f32>)>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

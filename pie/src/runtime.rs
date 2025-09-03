@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use dashmap::DashMap;
 use hyper::server::conn::http1;
 use std::net::SocketAddr;
@@ -8,7 +9,7 @@ use wasmtime::{
     component::Component, component::Linker,
 };
 
-use crate::instance::{Id as InstanceId, InstanceState};
+use crate::instance::{InstanceId, InstanceState};
 use crate::{bindings, model_old, server, service};
 
 use crate::model_old::cleanup_instance;
@@ -118,7 +119,7 @@ pub enum Command {
 
     DebugQuery {
         query: String,
-        event: oneshot::Sender<String>,
+        event: oneshot::Sender<Bytes>,
     },
 }
 
@@ -235,15 +236,15 @@ impl Service for Runtime {
 
             Command::DebugQuery { query, event } => match query.as_str() {
                 "ping" => {
-                    event.send("pong".to_string()).unwrap();
+                    event.send("pong".into()).unwrap();
                 }
                 "get_instance_count" => {
                     let count = self.running_instances.len();
-                    event.send(count.to_string()).unwrap();
+                    event.send(count.to_string().into()).unwrap();
                 }
                 "get_server_instance_count" => {
                     let count = self.running_server_instances.len();
-                    event.send(count.to_string()).unwrap();
+                    event.send(count.to_string().into()).unwrap();
                 }
                 // Add the new queries here
                 "list_running_instances" => {
@@ -258,7 +259,7 @@ impl Service for Runtime {
                             )
                         })
                         .collect();
-                    event.send(instances.join("\n")).unwrap();
+                    event.send(instances.join("\n").into()).unwrap();
                 }
                 "list_in_memory_programs" => {
                     let keys: Vec<String> = self
@@ -266,16 +267,18 @@ impl Service for Runtime {
                         .iter()
                         .map(|item| item.key().clone())
                         .collect();
-                    event.send(keys.join("\n")).unwrap();
+                    event.send(keys.join("\n").into()).unwrap();
                 }
                 "get_cache_dir" => {
                     event
-                        .send(self.cache_dir.to_string_lossy().to_string())
+                        .send(self.cache_dir.to_string_lossy().to_string().into())
                         .unwrap();
                 }
 
                 _ => {
-                    event.send(format!("Unknown query: {}", query)).unwrap();
+                    event
+                        .send(format!("Unknown query: {}", query).into())
+                        .unwrap();
                 }
             },
         }
