@@ -61,11 +61,6 @@ pub mod bindings_server {
     });
 }
 
-//// --------------------------------- Core wrappers -------------------------------
-
-/// Represents a command queue for a model instance.
-///
-/// Queues are used to submit tasks to a model and manage their execution.
 #[derive(Clone, Debug)]
 pub struct Queue {
     pub(crate) inner: Rc<core::Queue>,
@@ -259,18 +254,6 @@ impl Model {
     pub fn create_context(&self) -> Context {
         Context::new(self)
     }
-
-    pub fn set_adapter(&mut self, adapter_id: u32, seed: i64) {
-        self.adapter = Some((adapter_id, seed))
-    }
-
-    pub fn get_adapter(&self) -> Option<(u32, i64)> {
-        self.adapter
-    }
-
-    pub fn remove_adapter(&mut self) {
-        self.adapter = None;
-    }
 }
 
 impl Queue {
@@ -322,8 +305,6 @@ impl Queue {
     pub fn release_exported_resources(&self, resource: Resource, name: &str) {
         core::release_exported_resources(&self.inner, resource as u32, name)
     }
-
-
 }
 
 /// --------------------------------------------------------------------------------

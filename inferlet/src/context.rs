@@ -2,8 +2,9 @@ use crate::brle::Brle;
 use crate::drafter::Drafter;
 use crate::sampler::Sampler;
 use crate::stop_condition::StopCondition;
-use crate::traits::forward::{Forward, KvPage};
+use crate::traits::forward::{Distribution, Forward, KvPage};
 use crate::traits::tokenize::{Tokenize, Tokenizer};
+use crate::traits::{Adapter, SetAdapter, SetAdapterSeed};
 use crate::{Model, Queue, sampler, stop_condition};
 use futures::future::join_all;
 use std::cmp::Ordering;
@@ -26,6 +27,9 @@ pub struct Context {
     pub kv_pages: Vec<KvPage>,
     pub kv_page_last_len: usize,
     pub kv_page_size: usize,
+
+    pub adapter_ptr: Option<u32>,
+    pub adapter_random_seed: Option<i64>,
 }
 
 impl Context {
@@ -46,7 +50,21 @@ impl Context {
             kv_pages: Vec::new(),
             kv_page_last_len: 0,
             kv_page_size,
+            adapter_ptr: None,
+            adapter_random_seed: None,
         }
+    }
+
+    pub fn set_adapter(&mut self, adapter_ptr: u32) {
+        self.adapter_ptr = Some(adapter_ptr);
+    }
+
+    pub fn remove_adapter(&mut self) {
+        self.adapter_ptr = None;
+    }
+
+    pub fn set_adapter_random_seed(&mut self, seed: i64) {
+        self.adapter_random_seed = Some(seed);
     }
 
     /// Creates a new Context from previously exported and now imported KV pages.
@@ -82,6 +100,8 @@ impl Context {
             kv_pages,
             kv_page_last_len,
             kv_page_size,
+            adapter_ptr: None,
+            adapter_random_seed: None,
         }
     }
 
@@ -191,6 +211,8 @@ impl Context {
             kv_pages: new_kv_page_ptrs,
             kv_page_last_len: new_kv_page_last_len,
             kv_page_size: self.kv_page_size,
+            adapter_ptr: self.adapter_ptr,
+            adapter_random_seed: self.adapter_random_seed,
         }
     }
 
@@ -377,7 +399,7 @@ impl Context {
     ///
     /// This method will do nothing if there are fewer than two tokens in the pending buffer,
     /// as there must be at least one token to flush and one to keep.
-    pub fn flush(&mut self) {
+    pub async fn flush(&mut self) {
         // We need at least two pending tokens: one to be the "seed" for the next forward pass,
         // and one (or more) to be flushed into the KV cache now.
         if self.token_ids_pending.len() < 2 {
@@ -407,13 +429,12 @@ impl Context {
         // println!("mask: {:?}", &mask);
         // println!("position ids: {:?}", &position_ids);
 
-        self.queue.forward_text_no_output(
-            self.kv_page_last_len as u32,
-            &self.kv_pages,
-            &pending_token_ids,
-            &position_ids,
-            &mask,
-        );
+        let p = self.queue.create_forward_pass();
+        p.input_tokens(&pending_token_ids, &position_ids);
+        p.kv_cache(&self.kv_pages, self.kv_page_last_len);
+        p.attention_mask(&mask);
+
+        let _ = p.execute().await;
 
         self.token_ids.extend(pending_token_ids);
         self.position_ids.extend(&position_ids);
@@ -459,42 +480,28 @@ impl Context {
             .map(|brie| brie.buffer)
             .collect::<Vec<Vec<u32>>>();
 
-        let sampled = if let Some((adapter_id, seed)) = self.model.get_adapter() {
-            self.queue
-                .forward_with_adapter(
-                    adapter_id,
-                    seed,
-                    self.kv_page_last_len as u32,
-                    &self.kv_pages,
-                    &pending_token_ids,
-                    &position_ids,
-                    &mask,
-                    &[pending_token_ids.len() as u32 - 1],
-                )
-                .await
-                .unwrap()
-        } else {
-            self.queue
-                .forward_text(
-                    self.kv_page_last_len as u32,
-                    &self.kv_pages,
-                    &pending_token_ids,
-                    &position_ids,
-                    &mask,
-                    &[pending_token_ids.len() as u32 - 1],
-                )
-                .await
-        };
+        let p = self.queue.create_forward_pass();
 
-        // let sampled = self.queue.get_next_token_distribution(&output_embed_id).await;
+        if let Some(adapter_ptr) = self.adapter_ptr {
+            p.set_adapter(adapter_ptr);
+
+            if let Some(adapter_random_seed) = self.adapter_random_seed {
+                p.set_adapter_seed(adapter_random_seed);
+            }
+        }
+
+        p.input_tokens(&pending_token_ids, &position_ids);
+        p.kv_cache(&self.kv_pages, self.kv_page_last_len);
+        p.attention_mask(&mask);
+        p.output_distributions(&[pending_token_ids.len() as u32 - 1]);
+
+        let res = p.execute().await;
+        let sampled = res.distributions.unwrap().into_iter().next().unwrap();
 
         self.token_ids.extend(pending_token_ids);
         self.position_ids.extend(position_ids);
-        // self.queue.deallocate_embeds(&input_embed_id);
-        // self.queue.deallocate_embeds(&output_embed_id);
 
-        // Only one token is generated. So it is safe to unwrap here.
-        sampled.into_iter().next().unwrap()
+        sampled
     }
 
     /// Generates text autoregressively until a stop condition is met.
@@ -659,21 +666,6 @@ impl Context {
     /// model to propose a sequence of candidate tokens. These draft tokens are then
     /// verified in a single, parallel forward pass by the main model.
     ///
-    /// ### Algorithm
-    /// 1.  **✍️ Draft**: A single pending token in the context is used to prompt the
-    ///     `drafter`, which generates a short sequence of speculative future tokens.
-    /// 2.  **✅ Verify**: The seed token and all draft tokens are combined into a
-    ///     single batch and processed by the main model in one forward pass. This is
-    ///     the core optimization, as it computes multiple steps' worth of information
-    ///     simultaneously.
-    /// 3.  **🤝 Accept & Correct**: The main model's output distributions are compared
-    ///     against the draft tokens. The function accepts draft tokens as long as they
-    ///     match the tokens sampled from the main model's output. When a mismatch
-    ///     occurs, the draft is rejected, and the main model's sampled token is used
-    ///     as the correction.
-    /// 4.  **🔄 Update**: The context's state (token history and KV cache) is efficiently
-    ///     updated to reflect all accepted tokens. The loop then continues, using the
-    ///     last accepted token as the seed for the next draft.
     ///
     /// This process allows the model to generate multiple tokens for the cost of a
     /// single forward pass when the drafter's predictions are correct, significantly
@@ -712,14 +704,12 @@ impl Context {
         // Each iteration performs one step of speculative decoding, which may accept
         // multiple tokens at once.
         loop {
-            // --- 1. Draft Phase ✍️ ---
             let token_ids_pending = mem::take(&mut self.token_ids_pending);
 
             // Update the drafter with the seed and generate a sequence of draft tokens.
             drafter.update(&all_generated_tokens);
             let (draft_tokens, draft_pos_ids) = drafter.draft();
 
-            // --- 2. Verification Phase ✅ ---
             // Combine the seed and draft tokens into a single batch for the main model.
             let batch_tokens = [token_ids_pending.as_slice(), draft_tokens.as_slice()].concat();
             //println!("pending len: {:?}", &token_ids_pending);
@@ -748,27 +738,16 @@ impl Context {
 
             // Allocate resources and expand the KV cache to accommodate the entire batch.
             self.grow_kv_pages(batch_tokens.len());
-            let input_embeds = self.queue.allocate_embed_ptrs(batch_tokens.len());
-            let output_embeds = self.queue.allocate_embed_ptrs(batch_tokens.len());
 
-            // Run a single, efficient forward pass on the main model with the combined tokens.
-            self.queue
-                .embed_text(&input_embeds, &batch_tokens, &batch_positions);
-            self.queue.forward(
-                self.kv_page_last_len as u32,
-                &self.kv_pages,
-                &input_embeds,
-                &output_embeds,
-            );
+            let out_range = token_ids_pending.len() - 1..batch_tokens.len();
 
-            // Get the resulting probability distributions for each token in the batch.
-            // size = draft_tokens.len() + 1
-            let output_distributions = self
-                .queue
-                .get_next_token_distribution(&output_embeds[token_ids_pending.len() - 1..])
-                .await;
+            let p = self.queue.create_forward_pass();
+            p.input_tokens(&batch_tokens, &batch_positions);
+            p.kv_cache(&self.kv_pages, self.kv_page_last_len);
+            p.output_distributions(&out_range.map(|x| x as u32).collect::<Vec<_>>());
 
-            // --- 3. Trie Acceptance & Correction 🤝 ---
+            let res = p.execute().await;
+            let output_distributions = res.distributions.unwrap();
             // The speculation "Trie" is a tree of possibilities. The first token is always correct.
             // R[n] (P[n+1] P[n+2] P[n+3] P[n+2] P[n+3]) (P[n+1] P[n+2]) (P[n+1] P[n+2]) ...
 
@@ -827,7 +806,6 @@ impl Context {
                 }
             }
 
-            // --- 4. State Update 🔄 ---
             // Rewind the KV cache to discard the states of any rejected draft tokens.
             let redundant_count =
                 batch_tokens.len() - token_ids_pending.len() - num_retained_draft_tokens;
@@ -842,10 +820,6 @@ impl Context {
 
             all_generated_tokens.extend_from_slice(&accepted_tokens);
             self.fill_tokens(accepted_tokens[num_retained_draft_tokens..].to_owned());
-
-            // Clean up allocated resources for this step.
-            self.queue.deallocate_embed_ptrs(&input_embeds);
-            self.queue.deallocate_embed_ptrs(&output_embeds);
 
             // Check if the stop condition has been met after the step is complete.
             if stop_condition.should_stop(&all_generated_tokens) {

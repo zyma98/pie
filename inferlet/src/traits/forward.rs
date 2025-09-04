@@ -11,10 +11,18 @@ pub struct ForwardPass {
 
 #[derive(Debug, Clone)]
 pub struct ForwardPassResult {
-    pub distributions: Option<Vec<(Vec<u32>, Vec<f32>)>>,
+    pub distributions: Option<Vec<Distribution>>,
     pub tokens: Option<Vec<u32>>,
 }
 
+/// Represents a probability distribution over a set of tokens.
+#[derive(Clone, Debug)]
+pub struct Distribution {
+    /// A vector of token IDs.
+    pub ids: Vec<u32>,
+    /// A vector of probabilities corresponding to the token IDs.
+    pub probs: Vec<f32>,
+}
 // "Smart" kv page
 #[derive(Debug, Clone)]
 pub struct KvPage {
@@ -189,8 +197,17 @@ impl ForwardPass {
         if let Some(future) = self.inner.execute() {
             let pollable = future.pollable();
             AsyncPollable::new(pollable).wait_for().await;
+
+            let mut dists = Vec::new();
+            if let Some(distributions) = future.get_distributions() {
+                for (ids, probs) in distributions {
+                    dists.push(Distribution { ids, probs });
+                }
+            }
+            let distributions = if dists.is_empty() { None } else { Some(dists) };
+
             ForwardPassResult {
-                distributions: future.get_distributions(),
+                distributions,
                 tokens: future.get_tokens(),
             }
         } else {
@@ -201,31 +218,36 @@ impl ForwardPass {
         }
     }
 
-    pub fn input_embeddings(&self, embed_ptrs: Vec<u32>, positions: Vec<u32>) {
-        forward::input_embeddings(&self.inner, &embed_ptrs, &positions);
+    pub fn input_embed_ptrs(&self, embed_ptrs: &[u32], positions: &[u32]) {
+        forward::input_embeddings(&self.inner, embed_ptrs, positions);
     }
 
-    pub fn input_tokens(&self, input_tokens: Vec<u32>, positions: Vec<u32>) {
-        forward::input_tokens(&self.inner, &input_tokens, &positions);
+    pub fn input_tokens(&self, input_tokens: &[u32], positions: &[u32]) {
+        forward::input_tokens(&self.inner, input_tokens, positions);
     }
 
-    pub fn output_embeddings(&self, embed_ptrs: Vec<u32>, indices: Vec<u32>) {
-        forward::output_embeddings(&self.inner, &embed_ptrs, &indices);
+    pub fn output_embed_ptrs(&self, embed_ptrs: &[u32], indices: &[u32]) {
+        forward::output_embeddings(&self.inner, embed_ptrs, indices);
     }
 
-    pub fn output_distributions(&self, indices: Vec<u32>) {
-        forward::output_distributions(&self.inner, &indices);
+    pub fn output_distributions(&self, indices: &[u32]) {
+        forward::output_distributions(&self.inner, indices);
     }
 
-    pub fn output_tokens(&self, indices: Vec<u32>, samplers: Vec<u32>) {
-        forward::output_tokens(&self.inner, &indices, &samplers);
+    pub fn output_tokens(&self, indices: &[u32], samplers: &[u32]) {
+        forward::output_tokens(&self.inner, indices, samplers);
     }
 
-    pub fn attention_mask(&self, mask: Vec<Vec<u32>>) {
-        forward::attention_mask(&self.inner, &mask);
+    pub fn attention_mask(&self, mask: &Vec<Vec<u32>>) {
+        forward::attention_mask(&self.inner, mask);
     }
 
-    pub fn kv_cache(&self, kv_page_ptrs: Vec<u32>, last_kv_page_len: u32) {
-        forward::kv_cache(&self.inner, &kv_page_ptrs, last_kv_page_len);
+    pub fn kv_cache(&self, kv_pages: &[KvPage], last_kv_page_len: usize) {
+        let ptrs = kv_pages.iter().map(|kv| kv.ptr()).collect::<Vec<_>>();
+        forward::kv_cache(&self.inner, &ptrs, last_kv_page_len as u32);
+    }
+
+    pub fn kv_cache_ptrs(&self, kv_page_ptrs: &[u32], last_kv_page_len: usize) {
+        forward::kv_cache(&self.inner, kv_page_ptrs, last_kv_page_len as u32);
     }
 }
