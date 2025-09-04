@@ -403,9 +403,8 @@ class Driver:
         # print('qo_indptr', qo_indptr)
         # print('custom_mask', custom_masks)
 
-        # Fix for AMP/autocast thread locality issue
-        # Ensure consistent dtype (bfloat16) in worker thread
-        with torch.cuda.device(self.device), torch.amp.autocast('cuda', dtype=self.dtype):
+        with torch.cuda.device(self.device):
+
             output_embeds = self.lm.model.forward(
                 input_embeds=input_embeds,
                 position_ids=pt_new_position_ids,
@@ -567,9 +566,8 @@ class Driver:
 
         responses = []
 
-        # Fix for AMP/autocast thread locality issue
-        # Ensure consistent dtype (bfloat16) in worker thread
-        with torch.cuda.device(self.device), torch.amp.autocast('cuda', dtype=self.dtype):
+        with torch.cuda.device(self.device):
+
             output_embeds = self.lm.model.forward(
                 adapters=None,
                 adapter_indices=None,
