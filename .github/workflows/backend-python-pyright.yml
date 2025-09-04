@@ -1,11 +1,11 @@
-name: Python Pylint Linter Check
+name: Python Pyright Type Check
 
 on:
   pull_request:
   push:
 
 jobs:
-  pylint:
+  pyright:
     runs-on: ubuntu-latest
 
     steps:
@@ -24,14 +24,14 @@ jobs:
     
       # Install dependencies but don't install FlashInfer
       # Building FlashInfer in a CUDA containter will exceed
-      # the storage limit. We use a `.pylintrc` file to skip the
+      # the storage limit. We use a `pyrightconfig.json` file to skip the
       # check for FlashInfer.
       - name: Sync dependencies
         run: |
           uv --project backend/backend-python sync \
             --frozen --no-install-package flashinfer-python
 
-      # Run pylint check.
-      # See `.pylintrc` for the configuration of the check.
-      - name: Run pylint check
-        run: ./tests/backend-python-pylint.sh
+      # Run pyright check.
+      # See `pyrightconfig.json` for the configuration of the check.
+      - name: Run pyright check
+        run: ./tests/backend-python-pyright.sh
