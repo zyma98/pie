@@ -299,8 +299,10 @@ class L4maModel(nn.Module):
     @torch.inference_mode()
     def forward(
             self,
-            adapter: Adapter | None,
-            seeds: torch.Tensor | None,
+            adapter_at_layer: list[torch.Tensor],
+            adapter_indices: list[int],
+            adapter_rand_seeds: list[int],
+            adapter_indptr: list[int],
             input_embeds: torch.Tensor,
             position_ids: torch.Tensor,
             kv_cache_at_layer: list[torch.Tensor],

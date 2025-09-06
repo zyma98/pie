@@ -459,7 +459,7 @@ impl bindings::pie::inferlet::core::HostQueue for InstanceState {
         model::Command::Submit {
             inst_id,
             cmd_queue_id: queue.stream_id,
-            handler: Handler::ModelInfo,
+            handler: Handler::Query,
             data: query.into(),
             response: Some(tx),
         }

@@ -18,7 +18,7 @@ pub mod tokenize;
 pub enum Handler {
     Handshake,
     Synchronize,
-    ModelInfo,
+    Query,
     ForwardPass,
     EmbedImage,
     InitializeAdapter,
@@ -30,7 +30,7 @@ impl Handler {
         match self {
             Self::Handshake => 0,
             Self::Synchronize => 0,
-            Self::ModelInfo => 1,
+            Self::Query => 1,
             Self::ForwardPass => 2,
             Self::EmbedImage => 3,
             Self::InitializeAdapter => 4,
@@ -74,16 +74,20 @@ pub struct ForwardPassRequest {
     input_token_positions: Vec<u32>,
     input_embed_ptrs: Vec<u32>,
     input_embed_positions: Vec<u32>,
-    adapter: u32,
-    adapter_seed: i64,
+    adapter: Option<u32>,
+    adapter_seed: Option<i64>,
     mask: Vec<Vec<u32>>,
-    kv_cache_page_ptrs: Vec<u32>,
-    kv_cache_last_page_len: u32,
+    kv_page_ptrs: Vec<u32>,
+    kv_page_last_len: u32,
     output_token_indices: Vec<u32>,
     output_token_samplers: Vec<u32>,
     output_dist_indices: Vec<u32>,
     output_embed_ptrs: Vec<u32>,
     output_embed_indices: Vec<u32>,
+    sampler_temperature: f32,
+    sampler_top_k: u32,
+    sampler_top_p: f32,
+    sampler_min_p: f32,
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ForwardPassResponse {

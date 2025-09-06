@@ -1,9 +1,170 @@
-import time
+from __future__ import annotations
 
+import time
 import torch
 import torch.nn as nn
 import math
 import rand_mv
+
+
+def run_length_encode(data: list[int]) -> list[tuple[int, int]]:
+    """
+    Perform run-length encoding on a list of integers.
+
+    Args:
+        data (List[int]): The input list of integers.
+
+    Returns:
+        List[Tuple[int, int]]: A list of (value, count) pairs.
+    """
+    if not data:
+        return []
+
+    encoded = []
+    current_value = data[0]
+    count = 1
+
+    for num in data[1:]:
+        if num == current_value:
+            count += 1
+        else:
+            encoded.append((current_value, count))
+            current_value = num
+            count = 1
+
+    # Append the last run
+    encoded.append((current_value, count))
+
+    return encoded
+
+
+class AdapterSubpass:
+
+    def __init__(self,
+                 adapter_at_layer: list[tuple[torch.Tensor, torch.Tensor]],
+                 adapter_indices: list[int],
+                 adapter_extras: dict[int, Adapter],
+                 rand_seeds: torch.Tensor,
+                 qo_indptr: list[int],
+                 ):
+        self.adapter_at_layer = adapter_at_layer
+        self.adapter_indices = adapter_indices
+        self.adapter_extras = adapter_extras
+        self.rand_seeds = rand_seeds
+        self.adapter_indices_rle = run_length_encode(self.adapter_indices)
+        self.qo_indptr = qo_indptr
+
+    def execute(self,
+                layer_idx: int,
+                xs: torch.Tensor,
+                q_state: torch.Tensor,
+                k_state: torch.Tensor,
+                v_state: torch.Tensor
+                ):
+        i = 0
+        for adapter_index, count in self.adapter_indices_rle:
+
+            x_start = self.qo_indptr[i]
+            x_end = self.qo_indptr[i + count]
+            x = xs[x_start:x_end]
+
+            rand_seeds = self.rand_seeds[i:i + count]
+            inject_noise = rand_seeds.any().item()
+
+            assert x.shape[0] == rand_seeds.shape[0], "Batch size must match seeds."
+
+            # DOWN noise uses 3 equal chunks of size `rank` each (Q/K/V).
+            Wd = self.adapter_at_layer[layer_idx][0][adapter_index]
+            Wu = self.adapter_at_layer[layer_idx][1][adapter_index]  # (rank, d_q+d_k+d_v)
+            adapter_info = self.adapter_extras[adapter_index]
+
+            rank = adapter_info.rank
+            out_indptr = adapter_info.out_features_indptr  # built from [d_q, d_k, d_v]
+
+            qkv_down = x @ Wd
+            d_q, d_k, d_v = torch.split(qkv_down, [rank, rank, rank], dim=-1)
+
+            if inject_noise:
+
+                if not isinstance(adapter_info, CmaesAdapter):
+                    continue
+
+                Sd = adapter_info.qkv_down_sigma[layer_idx]  # (in_features, 3*rank)
+                Sd_q, Sd_k, Sd_v = torch.split(Sd, [rank, rank, rank], dim=-1)
+
+                q_noise_down = rand_mv.batched_randn_matmul(
+                    x,
+                    seeds=rand_seeds + layer_idx,
+                    S=Sd_q,
+                    out_dtype=x.dtype,
+                )
+                k_noise_down = rand_mv.batched_randn_matmul(
+                    x,
+                    seeds=rand_seeds + (layer_idx + 100),
+                    S=Sd_k,
+                    out_dtype=x.dtype,
+                )
+                v_noise_down = rand_mv.batched_randn_matmul(
+                    x,
+                    seeds=rand_seeds + (layer_idx + 200),
+                    S=Sd_v,
+                    out_dtype=x.dtype,
+                )
+
+                d_q = d_q + q_noise_down
+                d_k = d_k + k_noise_down
+                d_v = d_v + v_noise_down
+
+            Wu_q = Wu[:, out_indptr[0]:out_indptr[1]]  # (rank, d_q)
+            Wu_k = Wu[:, out_indptr[1]:out_indptr[2]]  # (rank, d_k)
+            Wu_v = Wu[:, out_indptr[2]:out_indptr[3]]  # (rank, d_v)
+
+            u_q = d_q @ Wu_q
+            u_k = d_k @ Wu_k
+            u_v = d_v @ Wu_v
+
+            if inject_noise:
+                # UP noise uses column slices [d_q, d_k, d_v].
+                Su = adapter_info.qkv_up_sigma[layer_idx]  # (rank, d_q+d_k+d_v)
+                Su_q = Su[:, out_indptr[0]:out_indptr[1]].contiguous()
+                Su_k = Su[:, out_indptr[1]:out_indptr[2]].contiguous()
+                Su_v = Su[:, out_indptr[2]:out_indptr[3]].contiguous()
+
+                q_noise_up = rand_mv.batched_randn_matmul(
+                    d_q,
+                    seeds=rand_seeds - layer_idx,
+                    S=Su_q,
+                    out_dtype=x.dtype,
+                )
+                k_noise_up = rand_mv.batched_randn_matmul(
+                    d_k,
+                    seeds=rand_seeds - (layer_idx + 100),
+                    S=Su_k,
+                    out_dtype=x.dtype,
+                )
+                v_noise_up = rand_mv.batched_randn_matmul(
+                    d_v,
+                    seeds=rand_seeds - (layer_idx + 200),
+                    S=Su_v,
+                    out_dtype=x.dtype,
+                )
+
+                u_q = u_q + q_noise_up
+                u_k = u_k + k_noise_up
+                u_v = u_v + v_noise_up
+
+            # ===== 3) Combine mean + noise =====
+            scaling = adapter_info.alpha / float(rank)
+
+            q_final = scaling * u_q
+            k_final = scaling * u_k
+            v_final = scaling * u_v
+
+            q_state[x_start:x_end].add_(q_final)
+            k_state[x_start:x_end].add_(k_final)
+            v_state[x_start:x_end].add_(v_final)
+
+            i += count
 
 
 class Adapter:
@@ -269,144 +430,3 @@ class CmaesAdapter(Adapter):
             Su_new = (sigma_new * torch.sqrt(diag_C_up_new)).to(self.dtype)
             self.qkv_down_sigma[layer_idx].copy_(Sd_new)
             self.qkv_up_sigma[layer_idx].copy_(Su_new)
-
-
-class AdapterBuffer:
-    """
-    Utility class to manage and apply a buffer of adapters in a batched context.
-    (This class was provided as part of the original context.)
-    """
-    adapter: CmaesAdapter
-    seeds: torch.Tensor | None
-
-    def __init__(self,
-                 adapter: CmaesAdapter,
-                 seeds: torch.Tensor | None,
-                 ):
-        self.adapter = adapter
-        self.seeds = seeds
-
-    @torch.inference_mode()
-    def compute_lora_delta(self, layer_idx: int, x: torch.Tensor) -> list[torch.Tensor]:
-        if self.seeds is None:
-            self.compute_lora_delta_no_noise(layer_idx, x)
-        else:
-            self.compute_lora_delta_with_noise(layer_idx, x)
-
-    @torch.inference_mode()
-    def compute_lora_delta_no_noise(self, layer_idx: int, x: torch.Tensor) -> list[torch.Tensor]:
-        rank = self.adapter.rank
-
-        # Short-hands
-        out_indptr = self.adapter.out_features_indptr  # built from [d_q, d_k, d_v]
-
-        Wd = self.adapter.qkv_down_weight[layer_idx]
-        Wu = self.adapter.qkv_up_weight[layer_idx]  # (rank, d_q+d_k+d_v)
-
-        qkv_down = x @ Wd
-        d_q, d_k, d_v = torch.split(qkv_down, [rank, rank, rank], dim=-1)
-
-        Wu_q = Wu[:, out_indptr[0]:out_indptr[1]]  # (rank, d_q)
-        Wu_k = Wu[:, out_indptr[1]:out_indptr[2]]  # (rank, d_k)
-        Wu_v = Wu[:, out_indptr[2]:out_indptr[3]]  # (rank, d_v)
-
-        u_q = d_q @ Wu_q
-        u_k = d_k @ Wu_k
-        u_v = d_v @ Wu_v
-
-        # ===== 3) Combine mean + noise =====
-        scaling = self.adapter.alpha / float(rank)
-
-        q_final = scaling * u_q
-        k_final = scaling * u_k
-        v_final = scaling * u_v
-
-        return [q_final, k_final, v_final]
-
-    @torch.inference_mode()
-    def compute_lora_delta_with_noise(self, layer_idx: int, x: torch.Tensor) -> list[torch.Tensor]:
-        assert x.shape[0] == self.seeds.shape[0], "Batch size must match seeds."
-        rank = self.adapter.rank
-
-        # Short-hands
-        out_indptr = self.adapter.out_features_indptr  # built from [d_q, d_k, d_v]
-
-        # ===== 1) Noise paths =====
-        # DOWN noise uses 3 equal chunks of size `rank` each (Q/K/V).
-        Sd = self.adapter.qkv_down_sigma[layer_idx]  # (in_features, 3*rank)
-        Wd = self.adapter.qkv_down_weight[layer_idx]
-        Wu = self.adapter.qkv_up_weight[layer_idx]  # (rank, d_q+d_k+d_v)
-
-        Sd_q, Sd_k, Sd_v = torch.split(Sd, [rank, rank, rank], dim=-1)
-
-        qkv_down = x @ Wd
-        d_q, d_k, d_v = torch.split(qkv_down, [rank, rank, rank], dim=-1)
-
-        q_noise_down = rand_mv.batched_randn_matmul(
-            x,
-            seeds=self.seeds + layer_idx,
-            S=Sd_q,
-            out_dtype=x.dtype,
-        )
-        k_noise_down = rand_mv.batched_randn_matmul(
-            x,
-            seeds=self.seeds + (layer_idx + 100),
-            S=Sd_k,
-            out_dtype=x.dtype,
-        )
-        v_noise_down = rand_mv.batched_randn_matmul(
-            x,
-            seeds=self.seeds + (layer_idx + 200),
-            S=Sd_v,
-            out_dtype=x.dtype,
-        )
-
-        d_q = d_q + q_noise_down
-        d_k = d_k + k_noise_down
-        d_v = d_v + v_noise_down
-
-        # UP noise uses column slices [d_q, d_k, d_v].
-        Su = self.adapter.qkv_up_sigma[layer_idx]  # (rank, d_q+d_k+d_v)
-        Su_q = Su[:, out_indptr[0]:out_indptr[1]].contiguous()
-        Su_k = Su[:, out_indptr[1]:out_indptr[2]].contiguous()
-        Su_v = Su[:, out_indptr[2]:out_indptr[3]].contiguous()
-
-        Wu_q = Wu[:, out_indptr[0]:out_indptr[1]]  # (rank, d_q)
-        Wu_k = Wu[:, out_indptr[1]:out_indptr[2]]  # (rank, d_k)
-        Wu_v = Wu[:, out_indptr[2]:out_indptr[3]]  # (rank, d_v)
-
-        u_q = d_q @ Wu_q
-        u_k = d_k @ Wu_k
-        u_v = d_v @ Wu_v
-
-        q_noise_up = rand_mv.batched_randn_matmul(
-            d_q,
-            seeds=self.seeds - layer_idx,
-            S=Su_q,
-            out_dtype=x.dtype,
-        )
-        k_noise_up = rand_mv.batched_randn_matmul(
-            d_k,
-            seeds=self.seeds - (layer_idx + 100),
-            S=Su_k,
-            out_dtype=x.dtype,
-        )
-        v_noise_up = rand_mv.batched_randn_matmul(
-            d_v,
-            seeds=self.seeds - (layer_idx + 200),
-            S=Su_v,
-            out_dtype=x.dtype,
-        )
-
-        u_q = u_q + q_noise_up
-        u_k = u_k + k_noise_up
-        u_v = u_v + v_noise_up
-
-        # ===== 3) Combine mean + noise =====
-        scaling = self.adapter.alpha / float(rank)
-
-        q_final = scaling * u_q
-        k_final = scaling * u_k
-        v_final = scaling * u_v
-
-        return [q_final, k_final, v_final]

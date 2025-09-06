@@ -9,10 +9,6 @@ import os
 import tomli
 from pathlib import Path
 from platformdirs import user_cache_dir
-import handshake_pb2
-import l4m_pb2
-import l4m_vision_pb2
-import ping_pb2
 from config import parse_model_metadata
 from driver import Driver
 from l4ma import L4maForCausalLM, create_fusion_map
@@ -35,7 +31,7 @@ def main(config: str = None,
          dist_size: int = 32,
          max_num_kv_pages: int = 1000,
          max_num_embeds: int = 50000,
-         max_num_adapters: int = 2048,
+         max_num_adapters: int = 48,
          max_adapter_rank: int = 8,
          device: str = 'cuda:0',
          dtype: str = 'bfloat16'):
@@ -84,7 +80,7 @@ def main(config: str = None,
         'max_num_kv_pages': max_num_kv_pages if max_num_kv_pages != 1000 else config_from_file.get('max_num_kv_pages',
                                                                                                    1000),
         'max_num_embeds': max_num_embeds if max_num_embeds != 50000 else config_from_file.get('max_num_embeds', 50000),
-        'max_num_adapters': max_num_adapters if max_num_adapters != 2048 else config_from_file.get('max_num_adapters',
+        'max_num_adapters': max_num_adapters if max_num_adapters != 48 else config_from_file.get('max_num_adapters',
                                                                                                    2048),
         'max_adapter_rank': max_adapter_rank if max_adapter_rank != 8 else config_from_file.get('max_adapter_rank', 8),
         'device': device if device != 'cuda:0' else config_from_file.get('device', 'cuda:0'),
@@ -111,6 +107,18 @@ def main(config: str = None,
     start_service(final_config, model, model_metadata)
 
 
+def detect_architecture_type(metadata_path: str) -> str:
+    """Detect the architecture type from the TOML file."""
+    try:
+        with open(metadata_path, "rb") as f:
+            data = tomli.load(f)
+        arch_data = data.get("architecture", {})
+        return arch_data.get("type", "").lower()
+    except Exception as e:
+        raise RuntimeError(f"Failed to detect architecture type from {metadata_path}: {e}")
+
+
+
 def load_model(config: dict):
     model_name = config.get('model')
     if not model_name:
@@ -126,21 +134,19 @@ def load_model(config: dict):
     if not os.path.exists(metadata_path):
         raise FileNotFoundError(f"Metadata file not found at: {metadata_path}")
 
-    metadata = parse_model_metadata(metadata_path)
-
-    metadata.architecture.device = config.get('device', 'cuda:0')
-    metadata.architecture.dtype = getattr(torch, config.get('dtype', 'bfloat16'))
+    model_device = config.get('device', 'cuda:0')
+    model_dtype = getattr(torch, config.get('dtype', 'bfloat16'))
+    model_info = ModelInfo.load_from_file(metadata_path, model_device, model_dtype)
 
     # 1. Map fused tensor names to their original sources
     # Choose the appropriate model based on architecture type
-    if metadata.architecture.type.lower() == 'qwen3':
-        model = Qwen3ForCausalLM(metadata.architecture)
+    if model_info.architecture.type.lower() == 'qwen3':
+        model = Qwen3ForCausalLM(model_info.architecture)
         fusion_map = create_qwen3_fusion_map(model)
     else:
         # Default to L4MA for backward compatibility
-        model = L4maForCausalLM(metadata.architecture)
+        model = L4maForCausalLM(model_info.architecture)
         fusion_map = create_fusion_map(model)
-
     # 2. Create a reverse map for fast lookups (original source -> fused target)
     source_to_fusion_target = {
         source: target
@@ -158,7 +164,7 @@ def load_model(config: dict):
     # print(f"Found {len(metadata.parameters)} parameter file(s) to load.")
 
     try:
-        for param_file in metadata.parameters:
+        for param_file in model_info.parameters:
             weights_path = os.path.join(model_path, model_name, param_file)
             # ... (existing file existence check) ...
 
@@ -227,7 +233,7 @@ def load_model(config: dict):
         # Move the entire model to the specified device
         model.eval()  # Set the model to evaluation mode
 
-        return model, metadata
+        return model, model_info
 
 
     except ztensor.ZTensorError as e:
@@ -477,84 +483,6 @@ def run_zmq_server(router, engine, config, model_metadata):
                 break
             else:
                 raise
-
-
-def run_test_routine(engine: Driver):
-    """
-    Runs a simple test routine to verify the fill_block functionality,
-    adhering to the correct protobuf message signatures.
-    """
-    print("\n--- [START] Corrected Python Test Routine for fill_block ---")
-
-    # 1. Define test parameters
-    token_ids = [3513, 5331, 533, 11]
-    block_id = 101
-    embed_id_offset = 201
-    dist_id = 301
-    k_top = 5
-
-    # 2. Allocate a KV block
-    # The engine.allocate method expects a single BatchAllocate object.
-    print("\n[Step 1] Allocating KV Block...")
-    alloc_command = l4m_pb2.Allocate(
-        kind=l4m_pb2.ObjectKind.OBJECT_KIND_KV_BLOCK,
-        object_id_offset=block_id,
-        count=1
-    )
-    batch_allocate_request = l4m_pb2.BatchAllocate(items=[alloc_command])
-    engine.allocate(batch_allocate_request)
-    print(f"Allocated block with ID: {block_id}")
-
-    # 3. Create text embeddings
-    # The engine.embed_text method expects a single BatchEmbedText object.
-    print("\n[Step 2] Creating Text Embeddings...")
-    list_of_embed_commands = []
-    input_embed_ids = []
-    for i, token in enumerate(token_ids):
-        embedding_id = embed_id_offset + i
-        input_embed_ids.append(embedding_id)
-        list_of_embed_commands.append(l4m_pb2.EmbedText(
-            embedding_id=embedding_id,
-            token_id=token,
-            position_id=i
-        ))
-    batch_embed_request = l4m_pb2.BatchEmbedText(items=list_of_embed_commands)
-    engine.embed_text(batch_embed_request)
-    print(f"Created {len(list_of_embed_commands)} embeddings.")
-
-    # 4. Call fill_block for a single forward pass
-    # The engine.fill_block method expects a single BatchFillBlock object.
-    print("\n[Step 3] Calling fill_block for a forward pass...")
-    fill_command = l4m_pb2.FillBlock(
-        last_block_len=len(token_ids),
-        context_block_ids=[block_id],
-        input_embedding_ids=input_embed_ids,
-        output_embedding_ids=[dist_id]
-    )
-    batch_fill_request = l4m_pb2.BatchFillBlock(items=[fill_command])
-    engine.fill_block(batch_fill_request)
-    print("fill_block completed.")
-
-    # 5. Verify the output by sampling
-    # The engine.sample_top_k_request method expects a BatchSampleTopKRequest.
-    print(f"\n[Step 4] Verifying output with sample_top_k (k={k_top})...")
-    sample_command = l4m_pb2.SampleTopKRequest(
-        distribution_id=dist_id,
-        k=k_top
-    )
-    batch_sample_request = l4m_pb2.BatchSampleTopKRequest(items=[sample_command])
-    response = engine.sample_top_k_request(batch_sample_request)
-
-    # The 'response' is a BatchSampleTopKResponse object which contains a list of results.
-    if response and response.items:
-        result = response.items[0]
-        print(f"Successfully retrieved Top-{len(result.token_ids)} predicted next tokens:")
-        for i in range(len(result.token_ids)):
-            print(f"  - Token ID: {result.token_ids[i]:<6} Probability: {result.probabilities[i]:.4f}")
-    else:
-        print("Test Error: Failed to get sampling results.")
-
-    print("\n--- [END] Corrected Python Test Routine Finished ---\n")
 
 
 if __name__ == "__main__":

@@ -66,4 +66,24 @@ interface forward {
         last-kv-page-len: u32,
     );
 
+    sampler-temperature: func(
+        pass: borrow<forward-pass>,
+        temperature: f32,
+    );
+
+    sampler-top-k: func(
+        pass: borrow<forward-pass>,
+        top-k: u32,
+    );
+
+    sampler-top-p: func(
+        pass: borrow<forward-pass>,
+        top-p: f32,
+    );
+
+    sampler-min-p: func(
+        pass: borrow<forward-pass>,
+        min-p: f32,
+    );
+
 }

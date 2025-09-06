@@ -316,7 +316,6 @@ impl Model {
             let sleep_duration = next_poll_duration.unwrap_or(IDLE_TIMEOUT);
 
             tokio::select! {
-                // NEW: Shutdown branch.
                 _ = shutdown_rx.recv() => {
                     println!("[Info] Shutdown signal received, exiting scheduling worker.");
                     break;
@@ -341,7 +340,6 @@ impl Model {
             let batch = batcher.poll(Instant::now());
             for (batch_handler, batch_payload) in batch {
                 if batch_handler == Handler::Synchronize {
-                    // FIX: Safely handle potentially empty batches to avoid panic.
                     if let Some((sender, _)) = batch_payload.into_iter().next() {
                         if let Some(sender) = sender {
                             // FIX: Log error if send fails.

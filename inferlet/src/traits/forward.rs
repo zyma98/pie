@@ -23,6 +23,15 @@ pub struct Distribution {
     /// A vector of probabilities corresponding to the token IDs.
     pub probs: Vec<f32>,
 }
+
+pub enum Sampler {
+    Multinomial = 0,
+    TopP = 1,
+    TopK = 2,
+    MinP = 3,
+    TopKTopP = 4,
+}
+
 // "Smart" kv page
 #[derive(Debug, Clone)]
 pub struct KvPage {
@@ -249,5 +258,21 @@ impl ForwardPass {
 
     pub fn kv_cache_ptrs(&self, kv_page_ptrs: &[u32], last_kv_page_len: usize) {
         forward::kv_cache(&self.inner, kv_page_ptrs, last_kv_page_len as u32);
+    }
+
+    pub fn sampler_temperature(&self, temperature: f32) {
+        forward::sampler_temperature(&self.inner, temperature);
+    }
+
+    pub fn sampler_top_p(&self, top_p: f32) {
+        forward::sampler_top_p(&self.inner, top_p);
+    }
+
+    pub fn sampler_top_k(&self, top_k: u32) {
+        forward::sampler_top_k(&self.inner, top_k);
+    }
+
+    pub fn sampler_min_p(&self, min_p: f32) {
+        forward::sampler_min_p(&self.inner, min_p);
     }
 }

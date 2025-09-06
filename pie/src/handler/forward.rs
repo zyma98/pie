@@ -6,9 +6,9 @@ use crate::{bindings, model, resource};
 use bytes::Bytes;
 use tokio::sync::oneshot;
 use wasmtime::component::Resource;
+use wasmtime_wasi::WasiView;
 use wasmtime_wasi::async_trait;
 use wasmtime_wasi::p2::{DynPollable, Pollable, subscribe};
-use wasmtime_wasi::WasiView;
 
 #[derive(Debug)]
 pub struct ForwardPass {
@@ -28,6 +28,10 @@ pub struct ForwardPass {
     output_dist_indices: Vec<u32>,
     output_embed_ptrs: Vec<u32>,
     output_embed_indices: Vec<u32>,
+    sampler_temperature: f32,
+    sampler_top_k: u32,
+    sampler_top_p: f32,
+    sampler_min_p: f32,
 }
 
 #[derive(Debug)]
@@ -79,6 +83,10 @@ impl bindings::pie::inferlet::forward::Host for InstanceState {
             output_dist_indices: vec![],
             output_embed_ptrs: vec![],
             output_embed_indices: vec![],
+            sampler_temperature: 0.60,
+            sampler_top_k: 50,
+            sampler_top_p: 0.9,
+            sampler_min_p: 0.2,
         };
         Ok(self.ctx().table.push(pass)?)
     }
@@ -203,6 +211,47 @@ impl bindings::pie::inferlet::forward::Host for InstanceState {
         pass.kv_page_last_len = kv_page_last_len;
         Ok(())
     }
+
+    async fn sampler_temperature(
+        &mut self,
+        pass: Resource<ForwardPass>,
+        temperature: f32,
+    ) -> anyhow::Result<()> {
+        let pass = self.ctx().table.get_mut(&pass)?;
+        pass.sampler_temperature = temperature;
+
+        Ok(())
+    }
+
+    async fn sampler_top_k(
+        &mut self,
+        pass: Resource<ForwardPass>,
+        top_k: u32,
+    ) -> anyhow::Result<()> {
+        let pass = self.ctx().table.get_mut(&pass)?;
+        pass.sampler_top_k = top_k;
+        Ok(())
+    }
+
+    async fn sampler_top_p(
+        &mut self,
+        pass: Resource<ForwardPass>,
+        top_p: f32,
+    ) -> anyhow::Result<()> {
+        let pass = self.ctx().table.get_mut(&pass)?;
+        pass.sampler_top_p = top_p;
+        Ok(())
+    }
+
+    async fn sampler_min_p(
+        &mut self,
+        pass: Resource<ForwardPass>,
+        min_p: f32,
+    ) -> anyhow::Result<()> {
+        let pass = self.ctx().table.get_mut(&pass)?;
+        pass.sampler_min_p = min_p;
+        Ok(())
+    }
 }
 
 impl bindings::pie::inferlet::forward::HostForwardPass for InstanceState {
@@ -229,16 +278,20 @@ impl bindings::pie::inferlet::forward::HostForwardPass for InstanceState {
                 input_token_positions: take(&mut pass.input_token_positions),
                 input_embed_ptrs: take(&mut pass.input_embed_ptrs),
                 input_embed_positions: take(&mut pass.input_embed_positions),
-                adapter: pass.adapter.unwrap_or(0),
-                adapter_seed: pass.adapter_seed.unwrap_or(0),
+                adapter: pass.adapter,
+                adapter_seed: pass.adapter_seed,
                 mask: take(&mut pass.mask),
-                kv_cache_page_ptrs: take(&mut pass.kv_page_ptrs),
-                kv_cache_last_page_len: pass.kv_page_last_len,
+                kv_page_ptrs: take(&mut pass.kv_page_ptrs),
+                kv_page_last_len: pass.kv_page_last_len,
                 output_token_indices: take(&mut pass.output_token_indices),
                 output_token_samplers: take(&mut pass.output_token_samplers),
                 output_dist_indices: take(&mut pass.output_dist_indices),
                 output_embed_ptrs: take(&mut pass.output_embed_ptrs),
                 output_embed_indices: take(&mut pass.output_embed_indices),
+                sampler_temperature: pass.sampler_temperature,
+                sampler_top_k: pass.sampler_top_k,
+                sampler_top_p: pass.sampler_top_p,
+                sampler_min_p: pass.sampler_min_p,
             };
 
             (request, service_id, stream_id)
