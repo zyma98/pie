@@ -1,6 +1,7 @@
+use crate::handler::Handler;
 use crate::handler::core::Queue;
-use crate::handler::{ForwardPassRequest, ForwardPassResponse, Handler};
 use crate::instance::InstanceState;
+use crate::model::{ForwardPassRequest, ForwardPassResponse};
 use crate::resource::ResourceId;
 use crate::{bindings, model, resource};
 use bytes::Bytes;

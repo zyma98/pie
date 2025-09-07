@@ -24,14 +24,6 @@ pub struct Distribution {
     pub probs: Vec<f32>,
 }
 
-pub enum Sampler {
-    Multinomial,
-    TopP { top_p: f32 },
-    TopK { top_k: u32 },
-    MinP { min_p: f32 },
-    TopKTopP { top_k: u32, top_p: f32 },
-}
-
 // "Smart" kv page
 #[derive(Debug, Clone)]
 pub struct KvPage {
