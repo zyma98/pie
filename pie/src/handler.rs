@@ -80,15 +80,11 @@ pub struct ForwardPassRequest {
     kv_page_ptrs: Vec<u32>,
     kv_page_last_len: u32,
     output_token_indices: Vec<u32>,
-    output_token_samplers: Vec<u32>,
-    output_dist_indices: Vec<u32>,
+    output_token_samplers: Vec<HashMap<String, rmpv::Value>>,
     output_embed_ptrs: Vec<u32>,
     output_embed_indices: Vec<u32>,
-    sampler_temperature: f32,
-    sampler_top_k: u32,
-    sampler_top_p: f32,
-    sampler_min_p: f32,
 }
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ForwardPassResponse {
     tokens: Vec<u32>,
