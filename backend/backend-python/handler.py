@@ -199,7 +199,10 @@ class Handler:
 
         # 3. Run the forward pass through the model.
         with torch.cuda.device(self.device):
-            output_embeds = self.lm.model.forward(**model_inputs)
+            output_embeds = self.lm.model.forward(
+                kv_cache_at_layer=self.kv_cache_at_layer,
+                **model_inputs
+            )
 
             # 4. Package the model outputs into response messages.
             responses = batch.package_responses(output_embeds)
@@ -366,7 +369,6 @@ class ForwardPassBatch:
             "input_embeds": input_embeds,
             "position_ids": torch.as_tensor(self.batch_position_ids, device=device, dtype=torch.int32),
             "qo_indptr": torch.as_tensor(self.qo_indptr, device=device, dtype=torch.int32),
-            "kv_cache_at_layer": self._handler.kv_cache_at_layer,
             "kv_page_indices": torch.as_tensor(self.kv_page_indices, device=device, dtype=torch.int32),
             "kv_page_indptr": torch.as_tensor(self.kv_page_indptr, device=device, dtype=torch.int32),
             "kv_last_page_lens": torch.as_tensor(self.kv_last_page_lengths, device=device, dtype=torch.int32),
@@ -429,7 +431,7 @@ class ForwardPassBatch:
                         k = self.sampler_params[original_idx]['top_k']
                         ids = topk_inds[i, :k].tolist()
                         vals = topk_vals[i, :k].tolist()
-                        final_dists[original_idx] = list(zip(ids, vals))
+                        final_dists[original_idx] = (ids, vals)
 
             # Handle sampling operations (sampler_idx > 0)
             else:
