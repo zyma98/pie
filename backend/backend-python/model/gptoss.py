@@ -8,9 +8,9 @@ from torch import nn
 import torch.distributed as dist
 
 import flashinfer as ops
-from ..adapter import AdapterSubpass
+from adapter import AdapterSubpass
 
-from ..config.gptoss import GPTOSSArch
+from config.gptoss import GPTOSSArch
 
 VERSION = "0.1.0"
 
