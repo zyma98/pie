@@ -7,7 +7,7 @@ import numpy as np
 import torch
 
 import message
-from adapter import CmaesAdapter, AdapterSubpass
+from adapter import AdapterSubpass
 import flashinfer as ops
 
 from config.common import ModelInfo
@@ -154,32 +154,14 @@ class Handler:
         cfg = self.lm.config
 
         for req in reqs:
-            self.adapters[req.adapter_ptr] = CmaesAdapter(
-                rank=req.rank,
-                alpha=req.alpha,
-                in_features=cfg.hidden_size,
-                out_features=[cfg.head_size * cfg.num_query_heads,
-                              cfg.head_size * cfg.num_key_value_heads,
-                              cfg.head_size * cfg.num_key_value_heads],
-                num_layers=cfg.num_layers,
-                population_size=req.population_size,
-                mu_fraction=req.mu_fraction,
-                initial_sigma=req.initial_sigma,
-                min_sigma=1e-7,
-                min_var=1e-8,
-                max_var=1e4,
-                device=self.device,
-                dtype=self.dtype,
-            )
+            pass
 
     @torch.inference_mode()
     def update_adapter(self, reqs: list[message.UpdateAdapterRequest]):
 
         for req in reqs:
             if req.adapter_ptr in self.adapters:
-                adapter = self.adapters[req.adapter_ptr]
-                if isinstance(adapter, CmaesAdapter):
-                    adapter.update(req.scores, req.seeds, req.max_sigma)
+                pass
 
     @torch.inference_mode()
     def forward_pass(self, reqs: list[message.ForwardPassRequest]):
