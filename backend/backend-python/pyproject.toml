@@ -23,4 +23,5 @@ dependencies = [
     "black>=24.10",
     "numba>=0.61.0",
     "pyright>=1.1.405",
+    "msgspec>=0.19.0"
 ]

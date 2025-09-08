@@ -106,6 +106,7 @@ class Handler:
                 model_description=self.model_info.description,
                 prompt_template=self.model_info.template_content,
                 prompt_template_type=self.model_info.template_type,
+                prompt_stop_tokens=self.model_info.stop_tokens,
                 kv_page_size=self.kv_page_size,
                 resources={
                     0: self.max_num_kv_pages,
