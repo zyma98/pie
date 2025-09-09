@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "pie-backend"
 version = "0.1.0"
@@ -58,6 +62,14 @@ debug = [
     "typing-extensions~=4.15.0",
 ]
 
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["*"]
+exclude = ["tests*", "*.tests*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.sql", "*.toml", "*.yaml", "*.yml"]
+
 [tool.uv]
 # Ensure cross-platform compatibility by not failing on unavailable platform-specific packages
-environments = ["platform_system == 'Darwin'", "platform_system == 'Linux'"]
+environments = ["sys_platform == 'darwin'", "sys_platform == 'linux'"]

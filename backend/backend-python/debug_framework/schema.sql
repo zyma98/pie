@@ -8,7 +8,7 @@ PRAGMA foreign_keys = ON;
 
 -- Debug Sessions Table
 -- Stores high-level debugging session information with model context and configuration
-CREATE TABLE debug_sessions (
+CREATE TABLE IF NOT EXISTS debug_sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     model_path TEXT NOT NULL,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -17,7 +17,7 @@ CREATE TABLE debug_sessions (
 
 -- Validation Checkpoints Table
 -- Records validation checkpoints comparing backend implementations
-CREATE TABLE checkpoints (
+CREATE TABLE IF NOT EXISTS checkpoints (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id INTEGER NOT NULL,
     checkpoint_name TEXT NOT NULL,
@@ -33,7 +33,7 @@ CREATE TABLE checkpoints (
 
 -- Tensor Recording Table
 -- Stores individual tensor recordings with metadata and file path references
-CREATE TABLE tensor_recordings (
+CREATE TABLE IF NOT EXISTS tensor_recordings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     checkpoint_id INTEGER NOT NULL,
     tensor_name TEXT NOT NULL,
@@ -47,21 +47,20 @@ CREATE TABLE tensor_recordings (
 
 -- Indexes for Performance Optimization
 -- Session queries by timestamp
-CREATE INDEX idx_debug_sessions_created_at ON debug_sessions(created_at);
+CREATE INDEX IF NOT EXISTS idx_debug_sessions_created_at ON debug_sessions(created_at);
 
 -- Checkpoint lookups by session and name
-CREATE INDEX idx_checkpoints_session_id ON checkpoints(session_id);
-CREATE INDEX idx_checkpoints_name ON checkpoints(checkpoint_name);
-CREATE INDEX idx_checkpoints_status ON checkpoints(status);
+CREATE INDEX IF NOT EXISTS idx_checkpoints_session_id ON checkpoints(session_id);
+CREATE INDEX IF NOT EXISTS idx_checkpoints_status ON checkpoints(status);
 
 -- Tensor recording lookups by checkpoint and name
-CREATE INDEX idx_tensor_recordings_checkpoint_id ON tensor_recordings(checkpoint_id);
-CREATE INDEX idx_tensor_recordings_tensor_name ON tensor_recordings(tensor_name);
-CREATE INDEX idx_tensor_recordings_backend ON tensor_recordings(backend);
+CREATE INDEX IF NOT EXISTS idx_tensor_recordings_checkpoint_id ON tensor_recordings(checkpoint_id);
+CREATE INDEX IF NOT EXISTS idx_tensor_recordings_tensor_name ON tensor_recordings(tensor_name);
+CREATE INDEX IF NOT EXISTS idx_tensor_recordings_backend ON tensor_recordings(backend);
 
 -- Views for Common Queries
 -- Session overview with checkpoint counts
-CREATE VIEW session_overview AS
+CREATE VIEW IF NOT EXISTS session_overview AS
 SELECT
     ds.id,
     ds.model_path,
@@ -74,7 +73,7 @@ LEFT JOIN checkpoints c ON ds.id = c.session_id
 GROUP BY ds.id;
 
 -- Checkpoint details with recording counts
-CREATE VIEW checkpoint_details AS
+CREATE VIEW IF NOT EXISTS checkpoint_details AS
 SELECT
     c.id,
     c.session_id,
