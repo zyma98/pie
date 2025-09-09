@@ -40,7 +40,7 @@ class TrainingConfig:
     # --- ES Hyperparameters ---
     ADAPTER_NAME: str = "evo-countdown-v1"
     TRAINING_STEPS: int = 10000
-    POPULATION_SIZE: int = 256
+    POPULATION_SIZE: int = 512
     TASKS_PER_SEED: int = 4
     NUM_ROLLOUTS_PER_WORKER: int = 8
     LORA_RANK: int = 8

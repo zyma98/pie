@@ -2,6 +2,7 @@
 # PIE Torch Backend
 
 ```
+uv venv
 uv pip install flashinfer-python==0.3.1
 uv pip install torch torchvision pytorch_triton --index-url https://download.pytorch.org/whl/cu126 --force-reinstall
 ```

@@ -121,6 +121,13 @@ class Handler:
             resps.append(resp)
         return resps
 
+    def heartbeat(self, reqs: list[message.HeartbeatRequest]) -> list[message.HeartbeatResponse]:
+        resps = []
+        for req in reqs:
+            resp = message.HeartbeatResponse()
+            resps.append(resp)
+        return resps
+
     def query(self, reqs: list[message.QueryRequest]) -> list[message.QueryResponse]:
         resps = []
         for req in reqs:

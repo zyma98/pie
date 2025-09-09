@@ -35,6 +35,11 @@ class QueryRequest(msgspec.Struct, gc=False):
 class QueryResponse(msgspec.Struct, gc=False):
     value: str
 
+class HeartbeatRequest(msgspec.Struct, gc=False):
+    pass
+
+class HeartbeatResponse(msgspec.Struct, gc=False):
+    pass
 
 class ForwardPassRequest(msgspec.Struct, gc=False):
     input_tokens: list[int]

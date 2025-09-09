@@ -17,8 +17,9 @@ pub mod tokenize;
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum Handler {
     Handshake,
-    Synchronize,
     Query,
+    Synchronize,
+    Heartbeat,
     ForwardPass,
     EmbedImage,
     InitializeAdapter,
@@ -29,12 +30,13 @@ impl Handler {
     pub fn get_handler_id(&self) -> HandlerId {
         match self {
             Self::Handshake => 0,
+            Self::Heartbeat => 1,
             Self::Synchronize => 0,
-            Self::Query => 1,
-            Self::ForwardPass => 2,
-            Self::EmbedImage => 3,
-            Self::InitializeAdapter => 4,
-            Self::UpdateAdapter => 5,
+            Self::Query => 2,
+            Self::ForwardPass => 3,
+            Self::EmbedImage => 4,
+            Self::InitializeAdapter => 5,
+            Self::UpdateAdapter => 6,
         }
     }
 }
