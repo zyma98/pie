@@ -65,7 +65,7 @@ class TrainingConfig:
     WANDB_TAGS: List[str] = field(default_factory=lambda: ["es", "countdown", "lora"])
 
     # --- Logging ---
-    VERBOSE_WORKER_LOGS: bool = True
+    VERBOSE_WORKER_LOGS: bool = False
 
     def __post_init__(self):
         """Set up dynamic paths and dictionaries after initialization."""

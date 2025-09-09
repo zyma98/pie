@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# ==== Configure here or via env: PORTS / DEVICES (comma or space separated) ====
+# ==== Configure here: PORTS / DEVICES / MODEL / KV_PAGES ====
 DEFAULT_PORTS=(8080 8081 8082 8083 8084 8085 8086 8087)
 DEFAULT_DEVICES=(cuda:0 cuda:1 cuda:2 cuda:3 cuda:4 cuda:5 cuda:6 cuda:7)
+
+# Configure model and max_num_kv_pages here. These are not overridden by env vars.
+MODEL="qwen-3-4b"
+MAX_NUM_KV_PAGES=10240
+
+# --- The rest of the script remains the same ---
 
 split_list() { local s="${1:-}"; s="${s//,/ }"; echo ${s}; }
 [[ -n "${PORTS:-}"  ]] && PORTS_ARR=($(split_list "$PORTS"))   || PORTS_ARR=("${DEFAULT_PORTS[@]}")
@@ -71,21 +77,18 @@ enable_auth = false
 auth_secret = "hello"
 verbose = true
 log = "${app_log}"
-batching_strategy = "adaptive"
-batching_strategy_k = 8
-batching_strategy_t = 16
 
 [[backend]]
 backend_type = "python"
 exec_path = "${BACKEND_PATH}"
-model = "qwen-3-4b"
+model = "${MODEL}"
 device = "${device}"
 dtype = "bfloat16"
 kv_page_size = 16
-dist_size = 16
-max_num_kv_pages = 24000
-max_num_embeds = 50000
-max_num_adapters = 2
+max_dist_size = 32
+max_num_kv_pages = ${MAX_NUM_KV_PAGES}
+max_num_embeds = 4
+max_num_adapters = 4
 max_adapter_rank = 8
 EOF
 
