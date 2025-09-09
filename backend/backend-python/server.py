@@ -27,7 +27,7 @@ from message import (
     HandshakeRequest,
     InitializeAdapterRequest,
     QueryRequest,
-    UpdateAdapterRequest, HeartbeatRequest,
+    UpdateAdapterRequest, HeartbeatRequest, UploadAdapterRequest, DownloadAdapterRequest,
 )
 from model.qwen3 import Qwen3ForCausalLM, create_fusion_map as create_qwen3_fusion_map
 
@@ -40,6 +40,8 @@ class HandlerId(enum.Enum):
     EMBED_IMAGE = 4
     INITIALIZE_ADAPTER = 5
     UPDATE_ADAPTER = 6
+    UPLOAD_HANDLER = 7
+    DOWNLOAD_HANDLER = 8
 
 
 def main(
@@ -338,6 +340,8 @@ def run_zmq_server(socket, handler):
             InitializeAdapterRequest
         ),
         HandlerId.UPDATE_ADAPTER.value: msgspec.msgpack.Decoder(UpdateAdapterRequest),
+        HandlerId.UPLOAD_HANDLER.value: msgspec.msgpack.Decoder(UploadAdapterRequest),
+        HandlerId.DOWNLOAD_HANDLER.value: msgspec.msgpack.Decoder(DownloadAdapterRequest),
     }
     MSGPACK_ENCODER = msgspec.msgpack.Encoder()
 
@@ -400,6 +404,10 @@ def run_zmq_server(socket, handler):
                     handler.initialize_adapter(reqs)
                 case HandlerId.UPDATE_ADAPTER.value:
                     handler.update_adapter(reqs)
+                case HandlerId.UPLOAD_HANDLER.value:
+                    handler.upload_handler(reqs)
+                case HandlerId.DOWNLOAD_HANDLER.value:
+                    resps = handler.download_handler(reqs)
                 case _:
                     print(f"[!] Unknown handler ID: {handler_id}", file=sys.stderr)
 

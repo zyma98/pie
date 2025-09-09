@@ -24,6 +24,8 @@ pub enum Handler {
     EmbedImage,
     InitializeAdapter,
     UpdateAdapter,
+    UploadAdapter,
+    DownloadAdapter,
 }
 
 impl Handler {
@@ -37,6 +39,8 @@ impl Handler {
             Self::EmbedImage => 4,
             Self::InitializeAdapter => 5,
             Self::UpdateAdapter => 6,
+            Self::UploadAdapter => 7,
+            Self::DownloadAdapter => 8,
         }
     }
 }

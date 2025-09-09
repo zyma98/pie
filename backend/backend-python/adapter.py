@@ -41,12 +41,12 @@ def run_length_encode(data: list[int]) -> list[tuple[int, int]]:
 class AdapterSubpass:
 
     def __init__(
-        self,
-        adapter_at_layer: list[tuple[torch.Tensor, torch.Tensor]],
-        adapter_indices: list[int],
-        adapter_extras: dict[int, Adapter],
-        rand_seeds: torch.Tensor,
-        qo_indptr: list[int],
+            self,
+            adapter_at_layer: list[tuple[torch.Tensor, torch.Tensor]],
+            adapter_indices: list[int],
+            adapter_extras: dict[int, Adapter],
+            rand_seeds: torch.Tensor,
+            qo_indptr: list[int],
     ):
         self.adapter_at_layer = adapter_at_layer
         self.adapter_indices = adapter_indices
@@ -56,12 +56,12 @@ class AdapterSubpass:
         self.qo_indptr = qo_indptr
 
     def execute(
-        self,
-        layer_idx: int,
-        xs: torch.Tensor,
-        q_state: torch.Tensor,
-        k_state: torch.Tensor,
-        v_state: torch.Tensor,
+            self,
+            layer_idx: int,
+            xs: torch.Tensor,
+            q_state: torch.Tensor,
+            k_state: torch.Tensor,
+            v_state: torch.Tensor,
     ):
         i = 0
         for adapter_index, count in self.adapter_indices_rle:
@@ -119,9 +119,9 @@ class AdapterSubpass:
                 d_k = d_k + k_noise_down
                 d_v = d_v + v_noise_down
 
-            Wu_q = Wu[:, out_indptr[0] : out_indptr[1]]  # (rank, d_q)
-            Wu_k = Wu[:, out_indptr[1] : out_indptr[2]]  # (rank, d_k)
-            Wu_v = Wu[:, out_indptr[2] : out_indptr[3]]  # (rank, d_v)
+            Wu_q = Wu[:, out_indptr[0]: out_indptr[1]]  # (rank, d_q)
+            Wu_k = Wu[:, out_indptr[1]: out_indptr[2]]  # (rank, d_k)
+            Wu_v = Wu[:, out_indptr[2]: out_indptr[3]]  # (rank, d_v)
 
             u_q = d_q @ Wu_q
             u_k = d_k @ Wu_k
@@ -130,9 +130,9 @@ class AdapterSubpass:
             if inject_noise:
                 # UP noise uses column slices [d_q, d_k, d_v].
                 Su = adapter_info.qkv_up_sigma[layer_idx]  # (rank, d_q+d_k+d_v)
-                Su_q = Su[:, out_indptr[0] : out_indptr[1]].contiguous()
-                Su_k = Su[:, out_indptr[1] : out_indptr[2]].contiguous()
-                Su_v = Su[:, out_indptr[2] : out_indptr[3]].contiguous()
+                Su_q = Su[:, out_indptr[0]: out_indptr[1]].contiguous()
+                Su_k = Su[:, out_indptr[1]: out_indptr[2]].contiguous()
+                Su_v = Su[:, out_indptr[2]: out_indptr[3]].contiguous()
 
                 q_noise_up = rand_mv.batched_randn_matmul(
                     d_q,
@@ -183,7 +183,7 @@ class Adapter:
     out_features_indptr: list[int]
 
     def __init__(
-        self, adapter_id: int, rank: int, alpha: float, out_features: list[int]
+            self, adapter_id: int, rank: int, alpha: float, out_features: list[int]
     ):
         self.adapter_id = adapter_id
         self.rank = rank
@@ -216,22 +216,22 @@ class CmaesAdapter(Adapter):
 
     @torch.inference_mode()
     def __init__(
-        self,
-        adapter_id: int,
-        adapter_at_layer: list[tuple[torch.Tensor, torch.Tensor]],
-        rank: int,
-        alpha: float,
-        in_features: int,
-        out_features: list[int],
-        num_layers: int,
-        population_size: int,
-        mu_fraction: float,
-        initial_sigma: float,
-        min_sigma: float,
-        min_var: float,
-        max_var: float,
-        device: torch.device,
-        dtype: torch.dtype,
+            self,
+            adapter_id: int,
+            adapter_at_layer: list[tuple[torch.Tensor, torch.Tensor]],
+            rank: int,
+            alpha: float,
+            in_features: int,
+            out_features: list[int],
+            num_layers: int,
+            population_size: int,
+            mu_fraction: float,
+            initial_sigma: float,
+            min_sigma: float,
+            min_var: float,
+            max_var: float,
+            device: torch.device,
+            dtype: torch.dtype,
     ):
         super().__init__(adapter_id, rank, alpha, out_features)
 
@@ -314,7 +314,7 @@ class CmaesAdapter(Adapter):
         )
         damps_term = torch.sqrt((self.mueff - 1.0) / (d + 1.0)) - 1.0
         self.damps = 1.0 + 2.0 * torch.clamp(damps_term, min=0.0) + self.cs
-        self.chiN = (d**0.5) * (1.0 - 1.0 / (4.0 * d) + 1.0 / (21.0 * d**2))
+        self.chiN = (d ** 0.5) * (1.0 - 1.0 / (4.0 * d) + 1.0 / (21.0 * d ** 2))
 
         # Per-layer scalar step-size (sigma) and paths / diag covariance (var=1 initially)
         self.layer_sigma = [
@@ -352,6 +352,139 @@ class CmaesAdapter(Adapter):
             torch.ones((rank, self.sum_out), dtype=f32, device=device)
             for _ in range(num_layers)
         ]
+
+    def upload(self, data: bytes) -> None:
+        """
+        Loads the adapter's state from a file and populates its parameters and state.
+
+        This function loads a state dictionary from f"adapter_{self.adapter_id}.pt".
+        It populates the adapter's weights by copying them into the appropriate
+        slices of `self.adapter_at_layer`. It also restores all hyperparameters and
+        the internal state of the CMA-ES optimizer. The 'data' parameter is ignored.
+        """
+        filename = f"adapter_{self.adapter_id}.pt"
+        # Load the state dictionary, mapping tensors to the adapter's device.
+        state_dict = torch.load(filename, map_location=self.device)
+
+        # --- Verification ---
+        # Ensure the loaded checkpoint is compatible with this adapter instance.
+        assert self.adapter_id == state_dict['adapter_id'], "Adapter ID mismatch during upload."
+        assert self.rank == state_dict['rank'], "Rank mismatch during upload."
+        assert self.num_layers == state_dict['num_layers'], "Layer count mismatch during upload."
+
+        # --- Load Hyperparameters & CMA-ES State ---
+        self.alpha = state_dict['alpha']
+        self.out_features = state_dict['out_features']
+        self.population_size = state_dict['population_size']
+        self.mu_fraction = state_dict['mu_fraction']
+        self.initial_sigma = state_dict['initial_sigma']
+        self.min_sigma = state_dict['min_sigma']
+        self.min_var = state_dict['min_var']
+        self.max_var = state_dict['max_var']
+        self.in_features = state_dict['in_features']
+
+        # Restore CMA-ES optimizer state tensors
+        self.qkv_down_sigma = state_dict['qkv_down_sigma']
+        self.qkv_up_sigma = state_dict['qkv_up_sigma']
+        self.layer_sigma = state_dict['layer_sigma']
+        self.ps_down = state_dict['ps_down']
+        self.ps_up = state_dict['ps_up']
+        self.pc_down = state_dict['pc_down']
+        self.pc_up = state_dict['pc_up']
+        self.diag_C_down = state_dict['diag_C_down']
+        self.diag_C_up = state_dict['diag_C_up']
+
+        # --- Recalculate Derived CMA-ES Strategy Parameters ---
+        # This ensures the optimizer's internal constants are correct after loading
+        # potentially different hyperparameters (e.g., population_size).
+        f32 = torch.float32
+        self.d_per_layer = float(
+            self.in_features * self.rank * len(self.out_features) + self.rank * sum(self.out_features)
+        )
+        self.mu = max(1, int(self.population_size * self.mu_fraction))
+        ranks = torch.arange(1, self.mu + 1, dtype=f32, device=self.device)
+        logw = torch.log(torch.tensor(self.mu + 0.5, dtype=f32, device=self.device)) - torch.log(ranks)
+        self.weights = (logw / logw.sum()).to(f32)
+        self.weights_reshaped = self.weights.view(-1, 1, 1)
+        self.mueff = (self.weights.sum() ** 2) / (self.weights.pow(2).sum())
+
+        d = self.d_per_layer
+        self.cc = (4.0 + self.mueff / d) / (d + 4.0 + 2.0 * self.mueff / d)
+        self.cs = (self.mueff + 2.0) / (d + self.mueff + 5.0)
+        self.c1 = 2.0 / ((d + 1.3) ** 2 + self.mueff)
+        self.cmu = min(1.0 - self.c1, 2.0 * (self.mueff - 2.0 + 1.0 / self.mueff) / ((d + 2.0) ** 2 + self.mueff))
+        damps_term = torch.sqrt((self.mueff - 1.0) / (d + 1.0)) - 1.0
+        self.damps = 1.0 + 2.0 * torch.clamp(damps_term, min=0.0) + self.cs
+        self.chiN = (d ** 0.5) * (1.0 - 1.0 / (4.0 * d) + 1.0 / (21.0 * d ** 2))
+
+        # --- Load Parameters (Weights) ---
+        # Copy the loaded weights into the correct slices of the shared tensor.
+        loaded_down_weights = state_dict['qkv_down_weight']
+        loaded_up_weights = state_dict['qkv_up_weight']
+        for i in range(self.num_layers):
+            self.adapter_at_layer[i][0][self.adapter_id].copy_(loaded_down_weights[i])
+            self.adapter_at_layer[i][1][self.adapter_id].copy_(loaded_up_weights[i])
+
+    def download(self) -> bytes:
+        """
+        Snapshots the adapter's current parameters and state into a file.
+
+        This function saves a dictionary containing the adapter's weights (extracted
+        from `adapter_at_layer`), hyperparameters, and the CMA-ES optimizer state
+        to f"adapter_{self.adapter_id}.pt". It returns an empty bytes object as
+        per the instructions.
+        """
+        filename = f"adapter_{self.adapter_id}.pt"
+
+        # Extract the weight tensors for this specific adapter.
+        # We use .clone().cpu() for safe, device-independent saving.
+        qkv_down_weight = [
+            self.adapter_at_layer[i][0][self.adapter_id].clone().cpu()
+            for i in range(self.num_layers)
+        ]
+        qkv_up_weight = [
+            self.adapter_at_layer[i][1][self.adapter_id].clone().cpu()
+            for i in range(self.num_layers)
+        ]
+
+        # Assemble the state dictionary with all necessary data.
+        state_dict = {
+            # Identification & Configuration
+            'adapter_id': self.adapter_id,
+            'rank': self.rank,
+            'alpha': self.alpha,
+            'out_features': self.out_features,
+            'in_features': self.in_features,
+            'num_layers': self.num_layers,
+
+            # CMA-ES Hyperparameters
+            'population_size': self.population_size,
+            'mu_fraction': self.mu_fraction,
+            'initial_sigma': self.initial_sigma,
+            'min_sigma': self.min_sigma,
+            'min_var': self.min_var,
+            'max_var': self.max_var,
+
+            # Parameters (Weights)
+            'qkv_down_weight': qkv_down_weight,
+            'qkv_up_weight': qkv_up_weight,
+
+            # CMA-ES State Tensors
+            'qkv_down_sigma': [t.clone().cpu() for t in self.qkv_down_sigma],
+            'qkv_up_sigma': [t.clone().cpu() for t in self.qkv_up_sigma],
+            'layer_sigma': [t.clone().cpu() for t in self.layer_sigma],
+            'ps_down': [t.clone().cpu() for t in self.ps_down],
+            'ps_up': [t.clone().cpu() for t in self.ps_up],
+            'pc_down': [t.clone().cpu() for t in self.pc_down],
+            'pc_up': [t.clone().cpu() for t in self.pc_up],
+            'diag_C_down': [t.clone().cpu() for t in self.diag_C_down],
+            'diag_C_up': [t.clone().cpu() for t in self.diag_C_up],
+        }
+
+        torch.save(state_dict, filename)
+
+        # As instructed, return an empty bytes object.
+        return b""
 
     @torch.inference_mode()
     def update(self, scores: list[float], seeds: list[int], max_sigma: float) -> None:
@@ -455,10 +588,10 @@ class CmaesAdapter(Adapter):
             # ===== Step-size path (ps) and covariance path (pc) updates =====
             sigma_l = self.layer_sigma[layer_idx].to(f32)  # scalar
             std_down = torch.sqrt(self.diag_C_down[layer_idx]).clamp_min(
-                self.min_var**0.5
+                self.min_var ** 0.5
             )  # (I, 3*rank)
             std_up = torch.sqrt(self.diag_C_up[layer_idx]).clamp_min(
-                self.min_var**0.5
+                self.min_var ** 0.5
             )  # (rank, d_sum)
 
             # Normalized steps
@@ -504,7 +637,7 @@ class CmaesAdapter(Adapter):
             # ===== Diagonal covariance update (rank-1 + rank-µ) =====
             # y_parent = (parent - mean_old) / sigma_l  (shape: like params)
             y_down_parents = (parents_down - mean_down_old.unsqueeze(0)) / (
-                sigma_l + eps
+                    sigma_l + eps
             )
             y_up_parents = (parents_up - mean_up_old.unsqueeze(0)) / (sigma_l + eps)
 
@@ -514,14 +647,14 @@ class CmaesAdapter(Adapter):
             rankmu_up = self.cmu * torch.sum((y_up_parents.pow(2)) * W, dim=0)
 
             diag_C_down_new = (
-                (1.0 - self.c1 - self.cmu) * self.diag_C_down[layer_idx]
-                + rank1_down
-                + rankmu_down
+                    (1.0 - self.c1 - self.cmu) * self.diag_C_down[layer_idx]
+                    + rank1_down
+                    + rankmu_down
             ).clamp(self.min_var, self.max_var)
             diag_C_up_new = (
-                (1.0 - self.c1 - self.cmu) * self.diag_C_up[layer_idx]
-                + rank1_up
-                + rankmu_up
+                    (1.0 - self.c1 - self.cmu) * self.diag_C_up[layer_idx]
+                    + rank1_up
+                    + rankmu_up
             ).clamp(self.min_var, self.max_var)
 
             # ===== Persist state and refresh runtime S tensors =====

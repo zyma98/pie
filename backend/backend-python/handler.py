@@ -191,6 +191,27 @@ class Handler:
                     adapter.update(req.scores, req.seeds, req.max_sigma)
 
     @torch.inference_mode()
+    def upload_adapter(self, reqs: list[message.UploadAdapterRequest]):
+        for req in reqs:
+            if req.adapter_ptr in self.adapters:
+                adapter = self.adapters[req.adapter_ptr]
+                if isinstance(adapter, CmaesAdapter):
+                    adapter.upload(req.adapter_data)
+
+    @torch.inference_mode()
+    def download_adapter(self, reqs: list[message.DownloadAdapterRequest]) -> list[message.DownloadAdapterResponse]:
+        resps = []
+        for req in reqs:
+            if req.adapter_ptr in self.adapters:
+                adapter = self.adapters[req.adapter_ptr]
+                if isinstance(adapter, CmaesAdapter):
+                    data = adapter.download()
+                    resp = message.DownloadAdapterResponse(adapter_data=data)
+                    resps.append(resp)
+
+        return resps
+
+    @torch.inference_mode()
     def forward_pass(self, reqs: list[message.ForwardPassRequest]):
         """
         Processes a batch of forward pass requests through the language model.

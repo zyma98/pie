@@ -182,6 +182,21 @@ pub struct UpdateAdapterRequest {
     pub seeds: Vec<i64>,
     pub max_sigma: f32,
 }
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UploadAdapterRequest {
+    pub adapter_ptr: u32,
+    pub adapter_data: Vec<u8>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DownloadAdapterRequest {
+    pub adapter_ptr: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DownloadAdapterResponse {
+    pub adapter_data: Vec<u8>,
+}
 
 /// Defines the set of operations available for the key-value store.
 #[derive(Debug)]
