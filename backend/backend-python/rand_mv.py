@@ -19,6 +19,7 @@ import torch
 #  A100-tuned tile choosers
 # ==========================
 
+
 def _choose_pow2(sz: int) -> int:
     # power-of-two in {16, 32, 64, 128, 256}
     if sz >= 4096:
@@ -64,22 +65,26 @@ def _choose_tiling_gen(I: int, O: int):
 #            B is runtime; I/O constexpr (for codegen)
 # ============================================================
 
+
 @triton.jit
 def _randn_mm_row_kernel_with_stdev(
-        x_ptr,            # *f16/f32 [B, I]
-        seeds_ptr,        # *int64   [B]
-        S_ptr,            # *f16/f32 [I, O] elementwise stdev
-        y_ptr,            # *f32     [B, O] accumulate in f32
-        B,                # runtime int32
-        I: tl.constexpr,
-        O: tl.constexpr,
-        # strides (in elements)
-        stride_xb, stride_xi,
-        stride_Si, stride_So,
-        stride_yb, stride_yo,
-        n_rounds: tl.constexpr,
-        BLOCK_K: tl.constexpr,
-        BLOCK_N: tl.constexpr,
+    x_ptr,  # *f16/f32 [B, I]
+    seeds_ptr,  # *int64   [B]
+    S_ptr,  # *f16/f32 [I, O] elementwise stdev
+    y_ptr,  # *f32     [B, O] accumulate in f32
+    B,  # runtime int32
+    I: tl.constexpr,
+    O: tl.constexpr,
+    # strides (in elements)
+    stride_xb,
+    stride_xi,
+    stride_Si,
+    stride_So,
+    stride_yb,
+    stride_yo,
+    n_rounds: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    BLOCK_N: tl.constexpr,
 ):
     pid_b = tl.program_id(0)
     pid_n = tl.program_id(1)
@@ -94,48 +99,60 @@ def _randn_mm_row_kernel_with_stdev(
 
     acc = tl.zeros([BLOCK_N], dtype=tl.float32)
 
-    seed_i = tl.load(seeds_ptr + pid_b).to(tl.int32)
+    seed_val = tl.load(seeds_ptr + pid_b)
 
-    k0 = 0
-    while k0 < I:
-        offs_k = k0 + tl.arange(0, BLOCK_K)
-        mask_k = offs_k < I
+    # ---- MODIFICATION START ----
+    # If seed is non-zero, perform the matmul. Otherwise, acc remains zero,
+    # resulting in a zero vector output for this batch.
+    if seed_val != 0:
+        seed_i = seed_val.to(tl.int32)
+        k0 = 0
+        while k0 < I:
+            offs_k = k0 + tl.arange(0, BLOCK_K)
+            mask_k = offs_k < I
 
-        # Load x[b, k] (vector over K)
-        x_tile = tl.load(x_row_ptr + offs_k * stride_xi, mask=mask_k, other=0.0).to(tl.float32)
+            # Load x[b, k] (vector over K)
+            x_tile = tl.load(x_row_ptr + offs_k * stride_xi, mask=mask_k, other=0.0).to(
+                tl.float32
+            )
 
-        # Compute offsets for rng: offset = k * O + n
-        k_offsets = offs_k.to(tl.int32)[:, None]
-        n_offsets = offs_n.to(tl.int32)[None, :]
-        offsets = k_offsets * O + n_offsets
+            # Compute offsets for rng: offset = k * O + n
+            k_offsets = offs_k.to(tl.int32)[:, None]
+            n_offsets = offs_n.to(tl.int32)[None, :]
+            offsets = k_offsets * O + n_offsets
 
-        # Random normals
-        w_tile = tl.randn(seed_i, offsets, n_rounds=n_rounds)  # [BK, BN], f32
+            # Random normals
+            w_tile = tl.randn(seed_i, offsets, n_rounds=n_rounds)  # [BK, BN], f32
 
-        # Load S[k, n] tile and scale
-        S_tile_ptr = S_ptr + offs_k[:, None] * stride_Si + offs_n[None, :] * stride_So
-        S_tile = tl.load(S_tile_ptr, mask=mask_k[:, None] & mask_n[None, :], other=0.0).to(tl.float32)
+            # Load S[k, n] tile and scale
+            S_tile_ptr = (
+                S_ptr + offs_k[:, None] * stride_Si + offs_n[None, :] * stride_So
+            )
+            S_tile = tl.load(
+                S_tile_ptr, mask=mask_k[:, None] & mask_n[None, :], other=0.0
+            ).to(tl.float32)
 
-        w_tile = w_tile * S_tile  # scale by stdev elementwise
+            w_tile = w_tile * S_tile  # scale by stdev elementwise
 
-        # Mask invalid lanes to zero
-        w_tile = tl.where(mask_k[:, None] & mask_n[None, :], w_tile, 0.0)
+            # Mask invalid lanes to zero
+            w_tile = tl.where(mask_k[:, None] & mask_n[None, :], w_tile, 0.0)
 
-        # Reduce over K
-        acc += tl.sum(w_tile * x_tile[:, None], axis=0)
-        k0 += BLOCK_K
+            # Reduce over K
+            acc += tl.sum(w_tile * x_tile[:, None], axis=0)
+            k0 += BLOCK_K
+    # ---- MODIFICATION END ----
 
     tl.store(y_row_ptr + offs_n * stride_yo, acc, mask=mask_n)
 
 
 @torch.no_grad()
 def batched_randn_matmul(
-        x: torch.Tensor,
-        seeds: torch.Tensor,
-        S: torch.Tensor,
-        *,
-        n_rounds: int = 10,
-        out_dtype: torch.dtype | None = None,
+    x: torch.Tensor,
+    seeds: torch.Tensor,
+    S: torch.Tensor,
+    *,
+    n_rounds: int = 10,
+    out_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     """
     Compute y[b] = x[b] @ (S * N(0,1; seed=seeds[b])) without materializing weights.
@@ -167,14 +184,24 @@ def batched_randn_matmul(
     grid = (B, triton.cdiv(O, BLOCK_N))
 
     _randn_mm_row_kernel_with_stdev[grid](
-        x, seeds_dev, S, y,
-        B, I, O,
-        stride_xb, stride_xi,
-        stride_Si, stride_So,
-        stride_yb, stride_yo,
+        x,
+        seeds_dev,
+        S,
+        y,
+        B,
+        I,
+        O,
+        stride_xb,
+        stride_xi,
+        stride_Si,
+        stride_So,
+        stride_yb,
+        stride_yo,
         n_rounds=n_rounds,
-        BLOCK_K=BLOCK_K, BLOCK_N=BLOCK_N,
-        num_warps=num_warps, num_stages=num_stages,
+        BLOCK_K=BLOCK_K,
+        BLOCK_N=BLOCK_N,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
 
     return y.to(out_dtype)
@@ -185,19 +212,23 @@ def batched_randn_matmul(
 #            B is runtime; I/O constexpr (for codegen)
 # ============================================================
 
+
 @triton.jit
 def _randn_generate_kernel_with_stdev(
-        seeds_ptr,        # *int64 [B]
-        S_ptr,            # *f16/f32 [I, O]
-        y_ptr,            # *f32   [B, I, O]
-        B,                # runtime int32
-        I: tl.constexpr,
-        O: tl.constexpr,
-        stride_Si, stride_So,
-        stride_yb, stride_yi, stride_yo,
-        n_rounds: tl.constexpr,
-        BLOCK_M: tl.constexpr,
-        BLOCK_N: tl.constexpr,
+    seeds_ptr,  # *int64 [B]
+    S_ptr,  # *f16/f32 [I, O]
+    y_ptr,  # *f32   [B, I, O]
+    B,  # runtime int32
+    I: tl.constexpr,
+    O: tl.constexpr,
+    stride_Si,
+    stride_So,
+    stride_yb,
+    stride_yi,
+    stride_yo,
+    n_rounds: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
 ):
     pid_b = tl.program_id(0)
     pid_t = tl.program_id(1)
@@ -216,33 +247,47 @@ def _randn_generate_kernel_with_stdev(
     mask_i = offs_i < I
     mask_o = offs_o < O
 
-    seed_b = tl.load(seeds_ptr + pid_b).to(tl.int32)
+    seed_val = tl.load(seeds_ptr + pid_b)
 
-    # offsets = i * O + o
-    i_offsets = offs_i.to(tl.int32)[:, None]
-    o_offsets = offs_o.to(tl.int32)[None, :]
-    offsets = i_offsets * O + o_offsets
+    # ---- MODIFICATION START ----
+    # If seed is zero, generate a zero tile. Otherwise, generate randoms.
+    if seed_val == 0:
+        tile = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    else:
+        seed_b = seed_val.to(tl.int32)
+        # offsets = i * O + o
+        i_offsets = offs_i.to(tl.int32)[:, None]
+        o_offsets = offs_o.to(tl.int32)[None, :]
+        offsets = i_offsets * O + o_offsets
 
-    # Generate normals
-    tile = tl.randn(seed_b, offsets, n_rounds=n_rounds)  # f32
+        # Generate normals
+        tile = tl.randn(seed_b, offsets, n_rounds=n_rounds)  # f32
 
-    # Load S[i, o] and scale
-    S_tile_ptr = S_ptr + offs_i[:, None] * stride_Si + offs_o[None, :] * stride_So
-    S_tile = tl.load(S_tile_ptr, mask=mask_i[:, None] & mask_o[None, :], other=0.0).to(tl.float32)
-    tile = tile * S_tile
+        # Load S[i, o] and scale
+        S_tile_ptr = S_ptr + offs_i[:, None] * stride_Si + offs_o[None, :] * stride_So
+        S_tile = tl.load(
+            S_tile_ptr, mask=mask_i[:, None] & mask_o[None, :], other=0.0
+        ).to(tl.float32)
+        tile = tile * S_tile
+    # ---- MODIFICATION END ----
 
-    base_ptr = y_ptr + pid_b * stride_yb + offs_i[:, None] * stride_yi + offs_o[None, :] * stride_yo
+    base_ptr = (
+        y_ptr
+        + pid_b * stride_yb
+        + offs_i[:, None] * stride_yi
+        + offs_o[None, :] * stride_yo
+    )
     tl.store(base_ptr, tile, mask=mask_i[:, None] & mask_o[None, :])
 
 
 @torch.no_grad()
 def batched_randn_generate(
-        seeds: torch.Tensor,
-        S: torch.Tensor,
-        *,
-        n_rounds: int = 10,
-        device: torch.device | None = None,
-        dtype: torch.dtype = torch.float32,
+    seeds: torch.Tensor,
+    S: torch.Tensor,
+    *,
+    n_rounds: int = 10,
+    device: torch.device | None = None,
+    dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """
     Materialize W_batched[b, i, o] = S[i, o] * N(0,1; seed=seeds[b]).
@@ -266,13 +311,22 @@ def batched_randn_generate(
     grid = (B, tiles_m * tiles_n)
 
     _randn_generate_kernel_with_stdev[grid](
-        seeds_dev, S_dev, y,
-        B, I, O,
-        stride_Si, stride_So,
-        stride_yb, stride_yi, stride_yo,
+        seeds_dev,
+        S_dev,
+        y,
+        B,
+        I,
+        O,
+        stride_Si,
+        stride_So,
+        stride_yb,
+        stride_yi,
+        stride_yo,
         n_rounds=n_rounds,
-        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
-        num_warps=num_warps, num_stages=num_stages,
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
 
     return y.to(dtype)
@@ -281,6 +335,7 @@ def batched_randn_generate(
 # ============================================================
 #  TESTS
 # ============================================================
+
 
 def _max_abs_diff(a: torch.Tensor, b: torch.Tensor) -> float:
     return (a.to(torch.float32) - b.to(torch.float32)).abs().max().item()
@@ -295,10 +350,14 @@ def run_tests():
         x = torch.randn(B, I, device=device, dtype=dtype_x)
         # Non-negative stdevs; include zeros to exercise masking
         S = torch.ones(I, O, device=device, dtype=dtype_S)
-        seeds = torch.randint(0, 1 << 30, (B,), device=device, dtype=torch.int64)
+        seeds = torch.randint(
+            1, 1 << 30, (B,), device=device, dtype=torch.int64
+        )  # Ensure non-zero seeds for baseline
 
         # Baseline via generator + bmm
-        W = batched_randn_generate(seeds, S, device=device, dtype=torch.float32)  # [B, I, O]
+        W = batched_randn_generate(
+            seeds, S, device=device, dtype=torch.float32
+        )  # [B, I, O]
         y_ref = torch.bmm(x.to(torch.float32).unsqueeze(1), W).squeeze(1)
 
         # Kernel 1 result
@@ -307,6 +366,38 @@ def run_tests():
         print(f"B={B} I={I} O={O} | max-abs-diff={diff:.3e}")
         assert diff < 0.1, "Bit-exact mismatch"
 
+        # ---- MODIFICATION START: Test zero seed behavior ----
+        if B >= 2:
+            seeds_with_zero = seeds.clone()
+            seeds_with_zero[1] = 0  # Set seed for batch 1 to zero
+
+            # Kernel 2 (generator) must produce zeros for batch 1
+            W_zero_ker = batched_randn_generate(
+                seeds_with_zero, S, device=device, dtype=torch.float32
+            )
+            assert torch.all(
+                W_zero_ker[1] == 0
+            ), "Generator kernel failed to output zeros for zero seed"
+            # Batch 0 should be unaffected
+            assert torch.all(
+                W_zero_ker[0] == W[0]
+            ), "Generator kernel changed output for non-zero seed"
+
+            # Kernel 1 (matmul) must produce zeros for batch 1
+            y_zero_ker = batched_randn_matmul(
+                x, seeds_with_zero, S, out_dtype=torch.float32
+            )
+            is_zero = torch.all(y_zero_ker[1] == 0)
+            assert is_zero, "Matmul kernel failed to output zeros for zero seed"
+
+            # Batch 0 should be unaffected
+            diff_zero_seed = _max_abs_diff(y_zero_ker[0], y_ref[0])
+            print(
+                f"  zero seed test | batch 1 is all zero: {is_zero}, batch 0 diff={diff_zero_seed:.3e}"
+            )
+            assert diff_zero_seed < 0.1
+        # ---- MODIFICATION END ----
+
         # Repro: rows with same seed produce same result, independent of others
         if B >= 3:
             seeds2 = seeds.clone()
@@ -314,11 +405,6 @@ def run_tests():
             y1 = batched_randn_matmul(x, seeds, S, out_dtype=torch.float32)
             y2 = batched_randn_matmul(x, seeds2, S, out_dtype=torch.float32)
 
-            #W1 = batched_randn_generate(seeds, S, device=device, dtype=torch.float32)  # [B, I, O]
-            #W2 = batched_randn_generate(seeds2, S, device=device, dtype=torch.float32)  # [B, I, O]
-
-            #print(W1)
-            #print(W2)
             d0 = _max_abs_diff(y1[0], y2[0])
             d2 = _max_abs_diff(y1[2], y2[2])
             print(f"  repro rows 0 & 2 unchanged: {d0:.3e}, {d2:.3e}")

@@ -1,3 +1,4 @@
+use inferlet::Sampler;
 use inferlet::traits::Tokenize;
 use pico_args::Arguments;
 use std::ffi::OsString;
@@ -67,7 +68,9 @@ async fn main() -> Result<(), String> {
     ctx.fill_system("You are a helpful, respectful and honest assistant.");
     ctx.fill_user(&prompt);
 
-    let final_text = ctx.generate_until(max_num_outputs as usize).await;
+    let final_text = ctx
+        .generate_until(Sampler::top_p(0.6, 0.95), max_num_outputs as usize)
+        .await;
 
     let token_ids = tokenizer.tokenize(&final_text);
     println!(

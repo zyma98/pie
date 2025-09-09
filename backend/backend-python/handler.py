@@ -68,8 +68,8 @@ class Handler:
                 torch.zeros(
                     (
                         max_num_adapters,
-                        max_adapter_rank * 3,
                         self.lm.config.hidden_size,
+                        max_adapter_rank * 3,
                     ),
                     dtype=dtype,
                     device=device,
@@ -77,9 +77,9 @@ class Handler:
                 torch.zeros(
                     (
                         max_num_adapters,
+                        max_adapter_rank,
                         self.lm.config.head_size * (
                                 self.lm.config.num_query_heads + self.lm.config.num_key_value_heads * 2),
-                        max_adapter_rank,
                     ),
                     dtype=dtype,
                     device=device,
@@ -294,7 +294,7 @@ class ForwardPassBatch:
         for token_idx in req.output_token_indices:
             self.indices_for_logits.append(token_idx + self.total_tokens_in_batch)
 
-        # Extract sampler configurations.
+        # Extract _sampler configurations.
         # sampler_idx=0 is for distributions, existing samplers are shifted by +1.
         for sampler_config in req.output_token_samplers:
             params = {}
@@ -349,7 +349,16 @@ class ForwardPassBatch:
     def finalize(self) -> dict:
         """Finalizes batch preparation, creating tensors and the adapter subpass."""
         device = self._handler.device
-
+        # print('seeds', self.seeds)
+        # print('adapter_indices', self.adapter_indices)
+        # print('qo_indptr', self.qo_indptr)
+        # print('kv_page_indices', self.kv_page_indices)
+        # print('kv_page_indptr', self.kv_page_indptr)
+        # print('kv_last_page_lengths', self.kv_last_page_lengths)
+        # #print('attention_masks', self.attention_masks)
+        # print('batch_token_ids', self.batch_token_ids)
+        # print('batch_position_ids', self.batch_position_ids)
+        # print('single_token_inference_mode', self.single_token_inference_mode)
         adapter_subpass = None
         if self.adapter_subpass_needed:
             seeds_tensor = torch.as_tensor(self.seeds, device=device, dtype=torch.long)
@@ -402,7 +411,7 @@ class ForwardPassBatch:
         # We compute probabilities for the entire batch of logit requests
         probs = torch.softmax(scaled_logits, dim=-1)
 
-        # Group requests by sampler type for efficient batch processing
+        # Group requests by _sampler type for efficient batch processing
         sampler_groups = {}
         for i, sampler_idx in enumerate(self.sampler_type):
             if sampler_idx not in sampler_groups:
@@ -412,7 +421,7 @@ class ForwardPassBatch:
         num_logit_requests = len(self.indices_for_logits)
         # Initialize result containers. Using lists of Nones helps place results correctly.
         final_dists = [None] * num_logit_requests
-        final_tokens_tensor = torch.empty(num_logit_requests, dtype=torch.long, device=self._handler.device)
+        final_tokens_tensor = torch.empty(num_logit_requests, dtype=torch.int32, device=self._handler.device)
 
         for sampler_idx, indices in sampler_groups.items():
             if not indices:
@@ -439,20 +448,20 @@ class ForwardPassBatch:
                 if sampler_idx == 1:  # Old 0: sampling_from_probs
                     sampled = ops.sampling.sampling_from_probs(group_probs)
                 elif sampler_idx == 2:  # Old 1: top_p_sampling_from_probs
-                    top_p_vals = torch.tensor([self.sampler_params[i]['top_p'] for i in indices], device=self._handler.device, dtype=self._handler.dtype)
+                    top_p_vals = torch.tensor([self.sampler_params[i]['top_p'] for i in indices], device=self._handler.device, dtype=torch.float32)
                     sampled = ops.sampling.top_p_sampling_from_probs(group_probs, top_p=top_p_vals)
                 elif sampler_idx == 3:  # Old 2: top_k_sampling_from_probs
-                    top_k_vals = torch.tensor([self.sampler_params[i]['top_k'] for i in indices], device=self._handler.device, dtype=torch.long)
+                    top_k_vals = torch.tensor([self.sampler_params[i]['top_k'] for i in indices], device=self._handler.device, dtype=torch.int32)
                     sampled = ops.sampling.top_k_sampling_from_probs(group_probs, top_k=top_k_vals)
                 elif sampler_idx == 4:  # Old 3: min_p_sampling_from_probs
-                    min_p_vals = torch.tensor([self.sampler_params[i]['min_p'] for i in indices], device=self._handler.device, dtype=self._handler.dtype)
+                    min_p_vals = torch.tensor([self.sampler_params[i]['min_p'] for i in indices], device=self._handler.device, dtype=torch.float32)
                     sampled = ops.sampling.min_p_sampling_from_probs(group_probs, min_p=min_p_vals)
                 elif sampler_idx == 5:  # Old 4: top_k_top_p_sampling_from_probs
-                    top_k_vals = torch.tensor([self.sampler_params[i]['top_k'] for i in indices], device=self._handler.device, dtype=torch.long)
-                    top_p_vals = torch.tensor([self.sampler_params[i]['top_p'] for i in indices], device=self._handler.device, dtype=self._handler.dtype)
+                    top_k_vals = torch.tensor([self.sampler_params[i]['top_k'] for i in indices], device=self._handler.device, dtype=torch.int32)
+                    top_p_vals = torch.tensor([self.sampler_params[i]['top_p'] for i in indices], device=self._handler.device, dtype=torch.float32)
                     sampled = ops.sampling.top_k_top_p_sampling_from_probs(group_probs, top_k=top_k_vals, top_p=top_p_vals)
                 else:
-                    raise ValueError(f"Unknown sampler index: {sampler_idx}")
+                    raise ValueError(f"Unknown _sampler index: {sampler_idx}")
 
                 # Place sampled tokens into the main tensor at their original batch positions
                 final_tokens_tensor.scatter_(0, indices_tensor, sampled)

@@ -1,11 +1,8 @@
+
 use futures::future::join_all;
-use inferlet::{
-    self,
-    context::Context,
-};
-use inferlet::traits::Optimize;
+use inferlet::traits::Adapter;
+use inferlet::{self, Sampler};
 use pico_args::Arguments;
-use serde::Serialize;
 use std::ffi::OsString;
 use std::future::Future;
 use std::pin::Pin;
@@ -41,9 +38,7 @@ async fn main() -> Result<(), String> {
     }
 
     // Parse required arguments.
-    let name: String = args
-        .value_from_str("--name")
-        .map_err(|e| e.to_string())?;
+    let name: String = args.value_from_str("--name").map_err(|e| e.to_string())?;
 
     let max_num_outputs: usize = args
         .value_from_str("--max-num-outputs")
@@ -65,7 +60,6 @@ async fn main() -> Result<(), String> {
     let tasks: Vec<String> = serde_json::from_str(&tasks_json)
         .map_err(|e| format!("Failed to parse tasks JSON: {}", e))?;
 
-
     if tasks.len() != seeds.len() {
         return Err(format!(
             "The number of tasks ({}) must the same as the number of seeds ({}).",
@@ -83,33 +77,28 @@ async fn main() -> Result<(), String> {
 
     let es_adapter = queue.import_adapter(&name);
 
-    println!("🚀 Starting parallel rollout...");
+    // println!("🚀 Starting parallel rollout...");
     for i in 0..seeds.len() {
-
         let task = tasks[i].clone();
-        let seed = seeds[i].clone();
+        let seed = seeds[i];
 
-        //println!("task: {}", &task);
-
-        // Get a new model instance for each seed.
-        let mut model_with_adapter = model.clone();
-        model_with_adapter.set_adapter(es_adapter, seed);
-
-        let mut ctx = model_with_adapter.create_context();
+        let mut ctx = model.create_context();
+        ctx.set_adapter(es_adapter);
+        ctx.set_adapter_random_seed(seed);
 
         // Create an async block that owns the forked context and the task string.
         let generation_future = async move {
             ctx.fill(&task);
-            ctx.generate_until("<|eot_id|>", max_num_outputs).await
+            ctx.generate_until(Sampler::top_p(0.6, 0.95), max_num_outputs)
+                .await
         };
 
         // Box the future to store it in the vector with other futures.
         futures.push(Box::pin(generation_future));
-
     }
 
     // --- 4. Collect Results and Send ---
-    println!("⏳ Waiting for {} tasks to complete...", futures.len());
+    // println!("⏳ Waiting for {} tasks to complete...", futures.len());
     let results: Vec<String> = join_all(futures).await;
 
     // Serialize the collected text outputs into a JSON string array.
@@ -118,7 +107,7 @@ async fn main() -> Result<(), String> {
 
     // Send the final JSON response back to the caller.
     inferlet::send(&response_json);
-    println!("✅ Rollout complete. Sent {} results.", results.len());
+    // println!("✅ Rollout complete. Sent {} results.", results.len());
 
     Ok(())
 }

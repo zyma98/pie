@@ -1,8 +1,9 @@
+
+use inferlet::traits::{Adapter, Evolve};
+use inferlet::wstd::time::Duration;
 use inferlet::{self};
-use inferlet::traits::Optimize;
 use pico_args::Arguments;
 use std::ffi::OsString;
-use inferlet::wstd::time::Duration;
 
 /// Defines the command-line interface and help message.
 const HELP: &str = r#"
@@ -34,9 +35,7 @@ async fn main() -> Result<(), String> {
     }
 
     // Parse required arguments.
-    let name: String = args
-        .value_from_str("--name")
-        .map_err(|e| e.to_string())?;
+    let name: String = args.value_from_str("--name").map_err(|e| e.to_string())?;
 
     // Parse comma-separated lists for seeds and scores.
     let seeds: Vec<i64> = args
@@ -73,7 +72,10 @@ async fn main() -> Result<(), String> {
     }
 
     // --- 3. Adapter Update ---
-    println!("🔧 Initializing model and queue to update adapter '{}'...", &name);
+    println!(
+        "🔧 Initializing model and queue to update adapter '{}'...",
+        &name
+    );
     let model = inferlet::get_auto_model();
     let queue = model.create_queue();
 
@@ -86,7 +88,7 @@ async fn main() -> Result<(), String> {
     let es_adapter = queue.import_adapter(&name);
 
     // Perform the update operation with max_sigma.
-    queue.update_adapter(es_adapter, &scores, &seeds, max_sigma);
+    queue.update_adapter(es_adapter, scores, seeds, max_sigma);
 
     // sleep for 100ms
     inferlet::wstd::task::sleep(Duration::from_millis(100)).await;

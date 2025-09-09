@@ -1,12 +1,8 @@
-use inferlet::{
-    self,
-    context::Context,
-    traits::{Optimize},
-};
-use pico_args::Arguments;
-use serde::{Deserialize, Serialize};
-use std::ffi::OsString;
+use inferlet::traits::Adapter;
 use inferlet::wstd::time::Duration;
+use inferlet::{self, traits::Evolve};
+use pico_args::Arguments;
+use std::ffi::OsString;
 
 /// Defines the command-line interface and help message.
 const HELP: &str = r#"
@@ -44,15 +40,9 @@ async fn main() -> Result<(), String> {
 
     // Parse all required arguments for creating the adapter and caching the prefix.
     // The .map_err() converts parsing errors into a user-friendly String format.
-    let name: String = args
-        .value_from_str("--name")
-        .map_err(|e| e.to_string())?;
-    let rank: u32 = args
-        .value_from_str("--rank")
-        .map_err(|e| e.to_string())?;
-    let alpha: f32 = args
-        .value_from_str("--alpha")
-        .map_err(|e| e.to_string())?;
+    let name: String = args.value_from_str("--name").map_err(|e| e.to_string())?;
+    let rank: u32 = args.value_from_str("--rank").map_err(|e| e.to_string())?;
+    let alpha: f32 = args.value_from_str("--alpha").map_err(|e| e.to_string())?;
     let population_size: u32 = args
         .value_from_str("--population-size")
         .map_err(|e| e.to_string())?;
@@ -62,7 +52,6 @@ async fn main() -> Result<(), String> {
     let initial_sigma: f32 = args
         .value_from_str("--initial-sigma")
         .map_err(|e| e.to_string())?;
-
 
     // Ensure no unknown arguments were passed.
     let remaining = args.finish();
@@ -78,7 +67,7 @@ async fn main() -> Result<(), String> {
     let model = inferlet::get_auto_model();
     let queue = model.create_queue();
 
-    let adapter_id = queue.allocate_adapters(1)[0];
+    let adapter_id = queue.allocate_adapter();
 
     // Create the Evolution Strategies adapter with the specified hyperparameters.
     queue.initialize_adapter(
