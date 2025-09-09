@@ -11,11 +11,11 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE debug_sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     model_path TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    config JSON
-);
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    config TEXT CHECK(config IS NULL OR json_valid(config))
+) STRICT;
 
--- Validation Checkpoints Table  
+-- Validation Checkpoints Table
 -- Records validation checkpoints comparing backend implementations
 CREATE TABLE checkpoints (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -24,11 +24,12 @@ CREATE TABLE checkpoints (
     reference_backend TEXT NOT NULL,
     alternative_backend TEXT NOT NULL,
     status TEXT CHECK (status IN ('pending', 'running', 'completed', 'failed')) DEFAULT 'pending',
-    tensor_diff JSON,
-    execution_time_ms INTEGER,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    tensor_diff TEXT CHECK(tensor_diff IS NULL OR json_valid(tensor_diff)),
+    execution_time_ms INTEGER CHECK(execution_time_ms IS NULL OR execution_time_ms >= 0),
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(session_id, checkpoint_name),
     FOREIGN KEY (session_id) REFERENCES debug_sessions(id) ON DELETE CASCADE
-);
+) STRICT;
 
 -- Tensor Recording Table
 -- Stores individual tensor recordings with metadata and file path references
@@ -36,12 +37,13 @@ CREATE TABLE tensor_recordings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     checkpoint_id INTEGER NOT NULL,
     tensor_name TEXT NOT NULL,
-    tensor_metadata JSON,  -- {dtype, shape, stride, device, timestamp}
+    tensor_metadata TEXT CHECK(tensor_metadata IS NULL OR json_valid(tensor_metadata)),  -- {dtype, shape, stride, device, timestamp}
     tensor_data_path TEXT, -- Path to binary tensor file
     backend TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(checkpoint_id, backend, tensor_name),
     FOREIGN KEY (checkpoint_id) REFERENCES checkpoints(id) ON DELETE CASCADE
-);
+) STRICT;
 
 -- Indexes for Performance Optimization
 -- Session queries by timestamp
@@ -60,7 +62,7 @@ CREATE INDEX idx_tensor_recordings_backend ON tensor_recordings(backend);
 -- Views for Common Queries
 -- Session overview with checkpoint counts
 CREATE VIEW session_overview AS
-SELECT 
+SELECT
     ds.id,
     ds.model_path,
     ds.created_at,
@@ -73,7 +75,7 @@ GROUP BY ds.id;
 
 -- Checkpoint details with recording counts
 CREATE VIEW checkpoint_details AS
-SELECT 
+SELECT
     c.id,
     c.session_id,
     c.checkpoint_name,
