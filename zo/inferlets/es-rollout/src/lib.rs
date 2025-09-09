@@ -1,7 +1,6 @@
-
 use futures::future::join_all;
 use inferlet::traits::Adapter;
-use inferlet::{self, Sampler};
+use inferlet::{self, Sampler, set_return};
 use pico_args::Arguments;
 use std::ffi::OsString;
 use std::future::Future;
@@ -106,8 +105,9 @@ async fn main() -> Result<(), String> {
         .map_err(|e| format!("Failed to serialize final results: {}", e))?;
 
     // Send the final JSON response back to the caller.
-    inferlet::send(&response_json);
+    //inferlet::send(&response_json);
     // println!("✅ Rollout complete. Sent {} results.", results.len());
 
+    set_return(&response_json);
     Ok(())
 }

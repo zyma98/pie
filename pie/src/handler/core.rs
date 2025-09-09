@@ -122,6 +122,11 @@ impl bindings::pie::inferlet::core::Host for InstanceState {
         Ok(self.arguments().to_vec())
     }
 
+    async fn set_return(&mut self, value: String) -> anyhow::Result<()> {
+        self.return_value = Some(value);
+        Ok(())
+    }
+
     async fn get_model(&mut self, name: String) -> anyhow::Result<Option<Resource<Model>>> {
         if let Some(service_id) = model::model_service_id(&name) {
             let (tx, rx) = oneshot::channel();

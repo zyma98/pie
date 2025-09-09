@@ -155,6 +155,8 @@ class Handler:
 
         for req in reqs:
             self.adapters[req.adapter_ptr] = CmaesAdapter(
+                adapter_id=req.adapter_ptr,
+                adapter_at_layer=self.adapter_at_layer,
                 rank=req.rank,
                 alpha=req.alpha,
                 in_features=cfg.hidden_size,

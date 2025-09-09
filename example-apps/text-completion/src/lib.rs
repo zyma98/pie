@@ -1,5 +1,5 @@
-use inferlet::Sampler;
 use inferlet::traits::Tokenize;
+use inferlet::{Sampler, set_return};
 use pico_args::Arguments;
 use std::ffi::OsString;
 use std::time::Instant;
@@ -15,7 +15,6 @@ Options:
                            (default: "Explain the LLM decoding process ELI5.")
   -n, --max-tokens <INT>   The maximum number of new tokens to generate
                            (default: 256)
-  --output                 Send the final output back to the user.
   -h, --help               Print help information
 "#;
 
@@ -45,9 +44,6 @@ async fn main() -> Result<(), String> {
         .opt_value_from_str(["-n", "--max-tokens"])
         .map_err(|e| e.to_string())?
         .unwrap_or(256);
-
-    // Check for the presence of the --output flag.
-    let send_output = args.contains("--output");
 
     // Ensure no unknown arguments were passed.
     let remaining = args.finish();
@@ -86,11 +82,7 @@ async fn main() -> Result<(), String> {
             start.elapsed() / (token_ids.len() as u32)
         );
     }
-
-    // Send back the output to the user only if the --output flag was provided.
-    if send_output {
-        inferlet::send(&final_text);
-    }
+    set_return(&final_text);
 
     Ok(())
 }

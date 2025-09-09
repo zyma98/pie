@@ -97,6 +97,10 @@ pub fn get_arguments() -> Vec<String> {
     core::get_arguments()
 }
 
+pub fn set_return(value: &str) {
+    core::set_return(value);
+}
+
 /// Retrieve a model by its name.
 ///
 /// Returns `None` if no model with the specified name is found.
