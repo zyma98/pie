@@ -32,6 +32,9 @@ interface core {
     // Receives an incoming message from the remote user client
     receive: func() -> receive-result;
 
+    send-blob: func(blob: blob);
+    receive-blob: func() -> blob-result;
+
     // Publishes a message to a topic (broadcast to all subscribers)
     broadcast: func(topic: string, message: string);
 
@@ -108,6 +111,13 @@ interface core {
         create-queue: func() -> queue;               // Create a new command queue
     }
 
+    resource blob {
+        constructor(init: list<u8>);
+        write: func(bytes: list<u8>);
+        read: func(offset: u64, n: u64) -> list<u8>;
+        size: func() -> u64;
+    }
+
     // Defines task priority levels
     enum priority {
         low,        // Lowest priority
@@ -142,6 +152,15 @@ interface core {
 
         // Retrieves the message if available; None if not ready
         get: func() -> option<string>;
+    }
+
+    // Result of an async receive operation
+    resource blob-result {
+        // Pollable to check readiness
+        pollable: func() -> pollable;
+
+        // Retrieves the message if available; None if not ready
+        get: func() -> option<blob>;
     }
 
     // Represents a subscription to a broadcast topic

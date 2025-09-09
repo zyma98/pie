@@ -1,11 +1,22 @@
 interface adapter {
 
-    use core.{queue, pointer};
+    use core.{queue, pointer, blob, blob-result};
     use forward.{forward-pass};
 
     set-adapter: func(
         pass: borrow<forward-pass>,
         adapter-ptr: pointer
+    );
+
+    download-adapter: func(
+        queue: borrow<queue>,
+        adapter-ptr: pointer
+    ) -> blob-result;
+
+    upload-adapter: func(
+        queue: borrow<queue>,
+        adapter-ptr: pointer,
+        blob: blob
     );
 
 }

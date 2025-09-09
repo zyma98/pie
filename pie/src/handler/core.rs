@@ -21,6 +21,11 @@ pub struct Model {
     pub info: ModelInfo,
 }
 
+#[derive(Debug, Clone)]
+pub struct Blob {
+    pub data: Vec<u8>,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Queue {
     pub service_id: usize,
@@ -48,6 +53,13 @@ pub struct ReceiveResult {
 }
 
 #[derive(Debug)]
+pub struct BlobResult {
+    receiver: oneshot::Receiver<Vec<u8>>,
+    result: Option<Vec<u8>>,
+    done: bool,
+}
+
+#[derive(Debug)]
 pub struct Subscription {
     id: usize,
     topic: String,
@@ -71,6 +83,18 @@ impl Pollable for DebugQueryResult {
 
 #[async_trait]
 impl Pollable for ReceiveResult {
+    async fn ready(&mut self) {
+        if self.done {
+            return;
+        }
+        let res = (&mut self.receiver).await.unwrap();
+        self.result = Some(res);
+        self.done = true;
+    }
+}
+
+#[async_trait]
+impl Pollable for BlobResult {
     async fn ready(&mut self) {
         if self.done {
             return;
@@ -167,6 +191,31 @@ impl bindings::pie::inferlet::core::Host for InstanceState {
             message: tx,
         });
         let res = ReceiveResult {
+            receiver: rx,
+            result: None,
+            done: false,
+        };
+        Ok(self.ctx().table.push(res)?)
+    }
+
+    async fn send_blob(&mut self, blob: Resource<Blob>) -> anyhow::Result<()> {
+        let data = mem::take(&mut self.ctx().table.get_mut(&blob)?.data);
+
+        server::Command::SendBlob {
+            inst_id: self.id(),
+            data,
+        }
+        .dispatch()?;
+        Ok(())
+    }
+
+    async fn receive_blob(&mut self) -> anyhow::Result<Resource<BlobResult>> {
+        let (tx, rx) = oneshot::channel();
+        dispatch_u2i(PushPullCommand::PullBlob {
+            topic: self.id().to_string(),
+            message: tx,
+        });
+        let res = BlobResult {
             receiver: rx,
             result: None,
             done: false,
@@ -562,6 +611,72 @@ impl bindings::pie::inferlet::core::HostReceiveResult for InstanceState {
     }
 
     async fn drop(&mut self, this: Resource<ReceiveResult>) -> anyhow::Result<()> {
+        self.ctx().table.delete(this)?;
+        Ok(())
+    }
+}
+
+impl bindings::pie::inferlet::core::HostBlob for InstanceState {
+    async fn new(
+        &mut self,
+        data: Vec<u8>,
+    ) -> anyhow::Result<Resource<Blob>> {
+        let blob = Blob { data };
+        let res = self.ctx().table.push(blob)?;
+        Ok(res)
+    }
+
+    async fn write(&mut self, this: Resource<Blob>, data: Vec<u8>) -> anyhow::Result<()> {
+        let mut blob = self.ctx().table.get_mut(&this)?;
+        blob.data.extend(data);
+        Ok(())
+    }
+
+    async fn read(
+        &mut self,
+        this: Resource<Blob>,
+        offset: u64,
+        size: u64,
+    ) -> anyhow::Result<Vec<u8>> {
+        let blob = self.ctx().table.get(&this)?;
+        let data = blob
+            .data
+            .get(offset as usize..(offset + size) as usize)
+            .unwrap();
+        Ok(data.to_vec())
+    }
+
+    async fn size(&mut self, this: Resource<Blob>) -> anyhow::Result<u64> {
+        let blob = self.ctx().table.get(&this)?;
+        Ok(blob.data.len() as u64)
+    }
+
+    async fn drop(&mut self, this: Resource<Blob>) -> anyhow::Result<()> {
+        self.ctx().table.delete(this)?;
+        Ok(())
+    }
+}
+
+impl bindings::pie::inferlet::core::HostBlobResult for InstanceState {
+    async fn pollable(
+        &mut self,
+        this: Resource<BlobResult>,
+    ) -> anyhow::Result<Resource<DynPollable>> {
+        subscribe(self.ctx().table, this)
+    }
+
+    async fn get(&mut self, this: Resource<BlobResult>) -> anyhow::Result<Option<Resource<Blob>>> {
+        let has_result = self.ctx().table.get(&this)?.result.is_some();
+        if has_result {
+            let data = mem::take(&mut self.ctx().table.get_mut(&this)?.result).unwrap();
+            let blob = Blob { data };
+            Ok(Some(self.ctx().table.push(blob)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn drop(&mut self, this: Resource<BlobResult>) -> anyhow::Result<()> {
         self.ctx().table.delete(this)?;
         Ok(())
     }

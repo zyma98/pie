@@ -1,3 +1,4 @@
+use crate::handler::core::{Blob, BlobResult, Queue};
 use crate::handler::forward::ForwardPass;
 use crate::instance::InstanceState;
 use crate::resource::ResourceId;
@@ -23,5 +24,22 @@ impl bindings::pie::inferlet::adapter::Host for InstanceState {
         pass.adapter = Some(phys_adapter_ptr);
 
         Ok(())
+    }
+
+    async fn download_adapter(
+        &mut self,
+        queue: Resource<Queue>,
+        adapter_ptr: ResourceId,
+    ) -> anyhow::Result<Resource<BlobResult>> {
+        unimplemented!()
+    }
+
+    async fn upload_adapter(
+        &mut self,
+        queue: Resource<Queue>,
+        adapter_ptr: ResourceId,
+        blob: Resource<Blob>,
+    ) -> anyhow::Result<()> {
+        unimplemented!()
     }
 }

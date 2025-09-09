@@ -388,7 +388,6 @@ def run_zmq_server(socket, handler):
                 case HandlerId.HANDSHAKE.value:
                     resps = handler.handshake(reqs)
                 case HandlerId.HEARTBEAT.value:
-                    # --- MODIFICATION: Update timer upon receiving a heartbeat ---
                     last_heartbeat_time = time.monotonic()
                     resps = handler.heartbeat(reqs)
                 case HandlerId.QUERY.value:
