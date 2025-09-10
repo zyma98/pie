@@ -352,10 +352,6 @@ def run_zmq_server(socket, handler):
         while True:
             # Check for heartbeat timeout before waiting for a message
             if time.monotonic() - last_heartbeat_time > HEARTBEAT_TIMEOUT:
-                print(
-                    f"[!] Did not receive a heartbeat for over {HEARTBEAT_TIMEOUT} seconds. Shutting down.",
-                    file=sys.stderr,
-                )
                 os._exit(1)  # Use os._exit for immediate termination from a thread
 
             # Poll for 1 second to remain responsive to the heartbeat check
@@ -367,7 +363,7 @@ def run_zmq_server(socket, handler):
                 continue
 
             if len(message) < 3:
-                print(f"[!] Received invalid message: {message}", file=sys.stderr)
+                print(f"[!] Received invalid message: {message}")
                 continue
 
             client_identity, corr_id_bytes, handler_id_bytes = message[:3]
@@ -377,13 +373,12 @@ def run_zmq_server(socket, handler):
                 reqs = [DECODERS[handler_id].decode(m) for m in message[3:]]
             except (struct.error, KeyError, msgspec.DecodeError) as e:
                 print(
-                    f"[!] Error decoding request header or payload: {e}",
-                    file=sys.stderr,
+                    f"[!] Error decoding request header or payload: {e}"
                 )
                 continue
 
             if not reqs:
-                print(f"[!] Received empty request body", file=sys.stderr)
+                print(f"[!] Received empty request body")
                 continue
 
             resps = []
@@ -392,6 +387,7 @@ def run_zmq_server(socket, handler):
                 case HandlerId.HANDSHAKE.value:
                     resps = handler.handshake(reqs)
                 case HandlerId.HEARTBEAT.value:
+                    # print(f"[*] Heartbeat received at {time.time()}")
                     last_heartbeat_time = time.monotonic()
                     resps = handler.heartbeat(reqs)
                 case HandlerId.QUERY.value:
@@ -420,13 +416,17 @@ def run_zmq_server(socket, handler):
     except Exception as e:
         print(
             f"\n[!!!] A fatal, unhandled error occurred in the ZMQ server loop: {e}",
-            file=sys.stderr,
         )
         import traceback
         traceback.print_exc()
-        print("[!!!] Terminating the service immediately.", file=sys.stderr)
         os._exit(1)
 
 
 if __name__ == "__main__":
+    # log_file = open("service.log", "w", buffering=1)
+
+    # Redirect stdout and stderr to the log file
+    # sys.stdout = log_file
+    # sys.stderr = log_file
+    # --------------------------
     fire.Fire(main)

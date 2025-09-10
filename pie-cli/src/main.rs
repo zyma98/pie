@@ -333,22 +333,49 @@ async fn start_interactive_session(
             // Clone the Arc for the new task.
             let printer_stdout = Arc::clone(&printer);
             tokio::spawn(async move {
-                let mut reader = BufReader::new(stdout).lines();
-                while let Ok(Some(line)) = reader.next_line().await {
-                    // FIX: Lock the mutex before printing.
-                    let mut p = printer_stdout.lock().await;
-                    p.print(format!("[Backend] {line}")).unwrap();
+                use tokio::io::AsyncReadExt;
+                let mut reader = BufReader::new(stdout);
+                let mut buffer = [0; 1024]; // Read in 1KB chunks
+                loop {
+                    match reader.read(&mut buffer).await {
+                        Ok(0) => break, // EOF, the child process has closed its stdout
+                        Ok(n) => {
+                            // We've received `n` bytes. Convert to a string (lossily) and print.
+                            let output = String::from_utf8_lossy(&buffer[..n]);
+                            let mut p = printer_stdout.lock().await;
+                            // Use `print!` to avoid adding an extra newline
+                            p.print(format!("[Backend] {}", output)).unwrap();
+                        }
+                        Err(e) => {
+                            // Handle read error, e.g., print it and break
+                            let mut p = printer_stdout.lock().await;
+                            p.print(format!("[Backend Read Error] {}", e)).unwrap();
+                            break;
+                        }
+                    }
                 }
             });
 
             // Clone the Arc again for the stderr task.
             let printer_stderr = Arc::clone(&printer);
             tokio::spawn(async move {
-                let mut reader = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = reader.next_line().await {
-                    // FIX: Lock the mutex here as well.
-                    let mut p = printer_stderr.lock().await;
-                    p.print(format!("[Backend] {line}")).unwrap();
+                use tokio::io::AsyncReadExt;
+                let mut reader = BufReader::new(stderr);
+                let mut buffer = [0; 1024];
+                loop {
+                    match reader.read(&mut buffer).await {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            let output = String::from_utf8_lossy(&buffer[..n]);
+                            let mut p = printer_stderr.lock().await;
+                            p.print(format!("[Backend] {}", output)).unwrap();
+                        }
+                        Err(e) => {
+                            let mut p = printer_stderr.lock().await;
+                            p.print(format!("[Backend Read Error] {}", e)).unwrap();
+                            break;
+                        }
+                    }
                 }
             });
 

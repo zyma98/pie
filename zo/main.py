@@ -180,6 +180,11 @@ class ESOrchestrator:
         tqdm.write(f"🚀 Starting ES Training Loop with {len(self.clients)} client(s)")
         tqdm.write("=" * 50)
 
+        tqdm.write("\n🔬 Running initial evaluation before training...")
+        initial_eval_metrics = await self._run_evaluation(step=0)
+        self.wandb_run.log(initial_eval_metrics, step=0)
+        tqdm.write("✅ Initial evaluation complete.")
+
         for step in range(1, self.config.TRAINING_STEPS + 1):
             start_time = time.time()
             tqdm.write(f"\n--- Step {step}/{self.config.TRAINING_STEPS} ---")
