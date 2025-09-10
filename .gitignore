@@ -219,3 +219,6 @@ logs
 cuda-protocol-tests
 metal-protocol-tests
 cuda_artifacts.tar*
+
+# Github Spec-kit
+.spec-kit/
