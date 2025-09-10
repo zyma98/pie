@@ -43,7 +43,7 @@ class TestValidationReport:
             },
             "speedup_factor": 1.25
         }
-        
+
         report = ValidationReport(
             session_id=1,
             report_type="summary",
@@ -57,7 +57,7 @@ class TestValidationReport:
             first_divergence_point="post_mlp",
             report_content="Validation completed with minor differences in MLP layer."
         )
-        
+
         assert report.session_id == 1
         assert report.report_type == "summary"
         assert report.overall_status == "pass"
@@ -75,7 +75,7 @@ class TestValidationReport:
         """Test report type validation."""
         valid_types = ["summary", "detailed"]  # Removed "html" - that's an export format
         performance_summary = {"reference_backend": {"total_time_ms": 100}}
-        
+
         # Test valid report types
         for report_type in valid_types:
             report = ValidationReport(
@@ -110,7 +110,7 @@ class TestValidationReport:
         """Test overall status validation."""
         valid_statuses = ["pass", "fail", "partial", "error"]
         performance_summary = {"reference_backend": {"total_time_ms": 100}}
-        
+
         # Test valid statuses
         for status in valid_statuses:
             report = ValidationReport(
@@ -144,7 +144,7 @@ class TestValidationReport:
     def test_checkpoint_count_validation(self):
         """Test checkpoint count consistency validation."""
         performance_summary = {"reference_backend": {"total_time_ms": 100}}
-        
+
         # Valid checkpoint counts
         report = ValidationReport(
             session_id=1,
@@ -158,7 +158,7 @@ class TestValidationReport:
             performance_summary=performance_summary,
             report_content="Test report"
         )
-        
+
         # Should validate that total = passed + failed + error + skipped
         assert report.total_checkpoints == 10
         assert report.passed_checkpoints + report.failed_checkpoints + report.error_checkpoints + report.skipped_checkpoints == 10
@@ -182,7 +182,7 @@ class TestValidationReport:
     def test_overall_status_consistency(self):
         """Test overall status reflects checkpoint outcomes accurately."""
         performance_summary = {"reference_backend": {"total_time_ms": 100}}
-        
+
         # Test "pass" status requires all non-skipped checkpoints passed
         report_pass = ValidationReport(
             session_id=1,
@@ -261,7 +261,7 @@ class TestValidationReport:
             "speedup_factor": 1.25,
             "performance_improvement": "20% faster"
         }
-        
+
         report = ValidationReport(
             session_id=1,
             report_type="summary",
@@ -280,7 +280,7 @@ class TestValidationReport:
             "reference_backend": {"total_time_ms": 150},
             # Missing alternative_backend
         }
-        
+
         with pytest.raises(ValueError, match="performance_summary must include reference and alternative timing"):
             ValidationReport(
                 session_id=1,
@@ -299,7 +299,7 @@ class TestValidationReport:
         """Test first divergence point must reference valid checkpoint name."""
         performance_summary = {"reference_backend": {"total_time_ms": 100}, "alternative_backend": {"total_time_ms": 90}}
         valid_checkpoint_names = ["post_embedding", "post_rope", "post_attention", "pre_mlp", "post_mlp", "final_output"]
-        
+
         # Test valid checkpoint names
         for checkpoint in valid_checkpoint_names:
             report = ValidationReport(
@@ -340,17 +340,11 @@ class TestValidationReport:
             mock_session_instance.id = 1
             mock_session_instance.status = "completed"
             mock_session.load.return_value = mock_session_instance
-            
-            # Mock checkpoints
-            mock_checkpoints = [
-                MagicMock(checkpoint_name="post_attention", comparison_status="pass", execution_time_reference_ms=80, execution_time_alternative_ms=60),
-                MagicMock(checkpoint_name="post_mlp", comparison_status="fail", execution_time_reference_ms=70, execution_time_alternative_ms=65),
-                MagicMock(checkpoint_name="final_output", comparison_status="pass", execution_time_reference_ms=50, execution_time_alternative_ms=45)
-            ]
-            
+
+
             # Test report generation
             report = ValidationReport.generate_from_session(session_id=1, report_type="summary")
-            
+
             assert report.session_id == 1
             assert isinstance(report.total_checkpoints, int)
             assert isinstance(report.performance_summary, dict)
@@ -363,7 +357,7 @@ class TestValidationReport:
             "alternative_backend": {"total_time_ms": 120},
             "speedup_factor": 1.25
         }
-        
+
         report = ValidationReport(
             session_id=1,
             report_type="detailed",  # Content type is detailed
@@ -376,12 +370,12 @@ class TestValidationReport:
             performance_summary=performance_summary,
             report_content="Detailed report with comprehensive analysis"
         )
-        
+
         # Test HTML export (format concern)
         with patch('builtins.open', mock_open()) as mock_file:
             report.export_html("/path/to/report.html")
             mock_file.assert_called_once_with("/path/to/report.html", 'w')
-        
+
         # Test getting HTML representation of detailed content
         html_content = report.to_html()
         assert "<html>" in html_content
@@ -394,14 +388,14 @@ class TestValidationReport:
             "reference_backend": {"total_time_ms": 150},
             "alternative_backend": {"total_time_ms": 120}
         }
-        
+
         # Mock detailed checkpoint data
         with patch('debug_framework.models.validation_checkpoint.ValidationCheckpoint') as mock_checkpoint:
             mock_checkpoint.get_by_session.return_value = [
                 MagicMock(checkpoint_name="post_attention", comparison_status="pass"),
                 MagicMock(checkpoint_name="post_mlp", comparison_status="fail")
             ]
-            
+
             report = ValidationReport(
                 session_id=1,
                 report_type="detailed",
@@ -413,7 +407,7 @@ class TestValidationReport:
                 performance_summary=performance_summary,
                 report_content="Detailed analysis with checkpoint breakdown"
             )
-            
+
             # Test detailed content includes checkpoint information
             detailed_content = report.get_detailed_content()
             assert "checkpoint breakdown" in detailed_content.lower()
@@ -426,7 +420,7 @@ class TestValidationReport:
             "reference_backend": {"total_time_ms": 150},
             "alternative_backend": {"total_time_ms": 120}
         }
-        
+
         report = ValidationReport(
             session_id=1,
             report_type="summary",
@@ -438,16 +432,16 @@ class TestValidationReport:
             performance_summary=performance_summary,
             report_content="Test report content"
         )
-        
+
         # Mock database operations
         with patch('debug_framework.services.database_manager.DatabaseManager') as mock_db:
             mock_db_instance = MagicMock()
             mock_db.return_value = mock_db_instance
-            
+
             # Test save operation
             report.save()
             mock_db_instance.insert_validation_report.assert_called_once()
-            
+
             # Test load operation
             mock_db_instance.get_validation_report.return_value = {
                 'id': 1,
@@ -463,7 +457,7 @@ class TestValidationReport:
                 'report_content': 'Test report content',
                 'generated_at': datetime.now().isoformat()
             }
-            
+
             loaded_report = ValidationReport.load(1)
             assert loaded_report.session_id == 1
             assert loaded_report.overall_status == "pass"
@@ -472,11 +466,11 @@ class TestValidationReport:
     def test_json_serialization(self):
         """Test JSON serialization/deserialization."""
         performance_summary = {
-            "reference_backend": {"total_time_ms": 150, "checkpoints": {"post_attention": 80}},
-            "alternative_backend": {"total_time_ms": 120, "checkpoints": {"post_attention": 60}},
+            "reference_backend": {"total_time_ms": 150, "checkpoint_times": {"post_attention": 80}},
+            "alternative_backend": {"total_time_ms": 120, "checkpoint_times": {"post_attention": 60}},
             "speedup_factor": 1.25
         }
-        
+
         report = ValidationReport(
             session_id=1,
             report_type="summary",
@@ -490,13 +484,13 @@ class TestValidationReport:
             first_divergence_point=None,
             report_content="JSON test report"
         )
-        
+
         # Test serialization
         report_dict = report.to_dict()
         assert report_dict["session_id"] == 1
         assert report_dict["report_type"] == "summary"
         assert report_dict["performance_summary"] == performance_summary
-        
+
         # Test deserialization
         restored_report = ValidationReport.from_dict(report_dict)
         assert restored_report.session_id == report.session_id
@@ -515,7 +509,7 @@ class TestValidationReport:
                 "checkpoint_times": {"post_attention": 90, "post_mlp": 60}
             }
         }
-        
+
         report = ValidationReport(
             session_id=1,
             report_type="summary",
@@ -527,11 +521,11 @@ class TestValidationReport:
             performance_summary=performance_summary,
             report_content="Performance analysis"
         )
-        
+
         # Test performance calculations
         speedup = report.calculate_overall_speedup()
         assert speedup == 200 / 150  # 1.33x speedup
-        
+
         checkpoint_speedups = report.calculate_checkpoint_speedups()
         assert checkpoint_speedups["post_attention"] == 120 / 90
         assert checkpoint_speedups["post_mlp"] == 80 / 60
@@ -540,7 +534,7 @@ class TestValidationReport:
     def test_report_filtering_and_search(self):
         """Test report filtering and search capabilities."""
         performance_summary = {"reference_backend": {"total_time_ms": 100}, "alternative_backend": {"total_time_ms": 90}}
-        
+
         report = ValidationReport(
             session_id=1,
             report_type="detailed",
@@ -553,16 +547,16 @@ class TestValidationReport:
             first_divergence_point="post_mlp",
             report_content="Detailed report with post_mlp checkpoint failure and attention success"
         )
-        
+
         # Test content search
         assert report.contains_keyword("post_mlp") is True
         assert report.contains_keyword("attention") is True
         assert report.contains_keyword("nonexistent") is False
-        
+
         # Test status filtering
         assert report.matches_status("partial") is True
         assert report.matches_status("pass") is False
-        
+
         # Test checkpoint filtering
         assert report.has_failures() is True
         assert report.has_errors() is False
@@ -571,7 +565,7 @@ class TestValidationReport:
     def test_report_export_formats(self):
         """Test different report export formats."""
         performance_summary = {"reference_backend": {"total_time_ms": 100}, "alternative_backend": {"total_time_ms": 90}}
-        
+
         report = ValidationReport(
             session_id=1,
             report_type="summary",
@@ -583,17 +577,17 @@ class TestValidationReport:
             performance_summary=performance_summary,
             report_content="Export format test"
         )
-        
+
         # Test JSON export
         with patch('builtins.open', mock_open()) as mock_file:
             report.export_json("/path/to/report.json")
             mock_file.assert_called_with("/path/to/report.json", 'w')
-        
+
         # Test CSV export (summary data)
         with patch('builtins.open', mock_open()) as mock_file:
             report.export_csv("/path/to/report.csv")
             mock_file.assert_called_with("/path/to/report.csv", 'w')
-        
+
         # Test text export
         with patch('builtins.open', mock_open()) as mock_file:
             report.export_text("/path/to/report.txt")
