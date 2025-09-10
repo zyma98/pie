@@ -3,8 +3,7 @@ name: Lint Python (PR changed files)
 on:
   pull_request:
     paths:
-      - 'backend/backend-python/config/**/*.py'
-      - 'backend/backend-python/model/**/*.py'
+      - 'backend/backend-python/**/*.py'
 
 jobs:
   lint:
@@ -18,37 +17,38 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Compute changed Python files (PR)
+      - name: Compute changed Python files under backend/backend-python
         id: changes
         shell: bash
         run: |
           set -euo pipefail
-
-          PR_NUMBER="${{ github.event.pull_request.number }}"
-          BASE_REF="${{ github.event.pull_request.base.ref }}"
+          # PR base/head SHAs (avoid github.sha merge commit semantics)
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
 
-          # Fetch PR head commit via special ref and the base branch to ensure both sides are present
-          git fetch --no-tags --prune --depth=1 origin "pull/${PR_NUMBER}/head:pr_head"
-          git fetch --no-tags --prune --depth=1 origin "${BASE_REF}:pr_base"
+          # Ensure both sides exist locally (robust for forks)
+          git fetch --no-tags --prune --depth=1 origin "${{ github.event.pull_request.base.ref }}":pr_base || true
+          git fetch --no-tags --prune --depth=1 origin "pull/${{ github.event.pull_request.number }}/head":pr_head || true
 
-          # Option A: two-dot diff (base..head) for files changed in the PR
-          FILES=$(git diff --name-only --diff-filter=ACMRT pr_base pr_head -- '*.py' \
-            | grep -E '^backend/backend-python/(config|model)/.*\.py$' || true)
+          LEFT=$(git rev-parse --verify pr_base 2>/dev/null || echo "$BASE_SHA")
+          RIGHT=$(git rev-parse --verify pr_head 2>/dev/null || echo "$HEAD_SHA")
 
-          # Output as space-separated for easy consumption
+          FILES=$(git diff --name-only --diff-filter=ACMRT "$LEFT" "$RIGHT" -- \
+                    'backend/backend-python' \
+                  | grep -E '\.py$' || true)
+
           FILES="${FILES//$'\n'/ }"
           echo "files=${FILES}" >> "$GITHUB_OUTPUT"
 
-      - name: Install uv
+      - name: Install uv (provides uvx)
         run: pipx install uv
 
-      - name: Lint changed files with Black
+      - name: Run Black on changed files (no build)
         shell: bash
         run: |
           FILES="${{ steps.changes.outputs.files }}"
           if [ -z "$FILES" ]; then
-            echo "No matching Python files changed."
+            echo "No Python files changed under backend/backend-python."
             exit 0
           fi
           echo "Linting: $FILES"
