@@ -113,8 +113,8 @@ interface core {
 
     resource blob {
         constructor(init: list<u8>);
-        write: func(bytes: list<u8>);
-        read: func(n: u32) -> list<u8>;
+        read: func(offset: u64, n: u64) -> list<u8>;
+        size: func() -> u64;
     }
 
     // Defines task priority levels

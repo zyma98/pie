@@ -1,6 +1,6 @@
 use inferlet::traits::Adapter;
 use inferlet::wstd::time::Duration;
-use inferlet::{self, traits::Evolve};
+use inferlet::{self, get_auto_model, store_exists, store_set, traits::Evolve};
 use pico_args::Arguments;
 use std::ffi::OsString;
 
@@ -64,22 +64,27 @@ async fn main() -> Result<(), String> {
 
     // --- 2. Initialization and Adapter Creation ---
     println!("🔧 Initializing model and queue...");
-    let model = inferlet::get_auto_model();
+    let model = get_auto_model();
     let queue = model.create_queue();
 
-    let adapter_id = queue.allocate_adapter();
+    if !store_exists(&name) {
+        let adapter_id = queue.allocate_adapter();
 
-    // Create the Evolution Strategies adapter with the specified hyperparameters.
-    queue.initialize_adapter(
-        adapter_id,
-        rank,
-        alpha,
-        population_size,
-        mu_fraction,
-        initial_sigma,
-    );
+        // Create the Evolution Strategies adapter with the specified hyperparameters.
+        queue.initialize_adapter(
+            adapter_id,
+            rank,
+            alpha,
+            population_size,
+            mu_fraction,
+            initial_sigma,
+        );
 
-    queue.export_adapter(adapter_id, &name);
+        queue.export_adapter(adapter_id, &name);
+        //store_set(&name, "");
+    }
+
+    // queue.upload_adapter(adapter_id, "")
 
     inferlet::wstd::task::sleep(Duration::from_millis(100)).await;
     println!("✅ Adapter '{}' created successfully.", name);

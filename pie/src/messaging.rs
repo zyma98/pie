@@ -1,6 +1,7 @@
 use crate::service;
 use crate::service::Service;
 use crate::utils::IdPool;
+use bytes::Bytes;
 use dashmap::DashMap;
 use std::collections::VecDeque;
 use std::sync::{Arc, OnceLock};
@@ -62,12 +63,12 @@ pub enum PushPullCommand {
 
     PushBlob {
         topic: String,
-        message: Vec<u8>,
+        message: Bytes,
     },
 
     PullBlob {
         topic: String,
-        message: oneshot::Sender<Vec<u8>>,
+        message: oneshot::Sender<Bytes>,
     },
 }
 
@@ -195,8 +196,8 @@ enum PushPullStringQueue {
 
 /// A queue for a given topic, holding either waiting blobs or pending pull requests for blobs.
 enum PushPullBlobQueue {
-    Messages(VecDeque<Vec<u8>>),
-    PendingPulls(VecDeque<oneshot::Sender<Vec<u8>>>),
+    Messages(VecDeque<Bytes>),
+    PendingPulls(VecDeque<oneshot::Sender<Bytes>>),
 }
 
 pub struct PushPull {
@@ -206,7 +207,7 @@ pub struct PushPull {
     string_queue_by_topic: Arc<DashMap<String, PushPullStringQueue>>,
 
     // Fields for Blob-based messages (Vec<u8>)
-    tx_blob: UnboundedSender<(String, Vec<u8>)>,
+    tx_blob: UnboundedSender<(String, Bytes)>,
     _event_loop_handle_blob: tokio::task::JoinHandle<()>,
     blob_queue_by_topic: Arc<DashMap<String, PushPullBlobQueue>>,
 }
@@ -273,7 +274,7 @@ impl PushPull {
 
     /// The event loop that listens for pushed blob messages and matches them with pulls.
     async fn event_loop_blob(
-        mut rx: UnboundedReceiver<(String, Vec<u8>)>,
+        mut rx: UnboundedReceiver<(String, Bytes)>,
         queue_by_topic: Arc<DashMap<String, PushPullBlobQueue>>,
     ) {
         while let Some((topic, message)) = rx.recv().await {

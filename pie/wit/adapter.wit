@@ -10,12 +10,14 @@ interface adapter {
 
     download-adapter: func(
         queue: borrow<queue>,
-        adapter-ptr: pointer
+        adapter-ptr: pointer,
+        name: string
     ) -> blob-result;
 
     upload-adapter: func(
         queue: borrow<queue>,
         adapter-ptr: pointer,
+        name: string,
         blob: blob
     );
 

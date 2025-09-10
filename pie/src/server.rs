@@ -6,6 +6,7 @@ use crate::service::{Service, ServiceError, install_service};
 use crate::utils::IdPool;
 use crate::{auth, messaging, model, runtime, service};
 use anyhow::Result;
+use bytes::Bytes;
 use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -201,7 +202,7 @@ pub enum Command {
     },
     SendBlob {
         inst_id: InstanceId,
-        data: Vec<u8>,
+        data: Bytes,
     },
     DetachInstance {
         inst_id: InstanceId,
@@ -909,7 +910,7 @@ impl Client {
                 if final_hash == blob_hash {
                     dispatch_u2i(messaging::PushPullCommand::PushBlob {
                         topic: inst_id.to_string(),
-                        message: mem::take(&mut inflight.buffer),
+                        message: Bytes::from(mem::take(&mut inflight.buffer)),
                     });
                     self.send_response(corr_id, true, "Blob sent to instance".to_string())
                         .await;
@@ -927,7 +928,7 @@ impl Client {
     }
 
     /// Handles an internal command to send a blob to the connected client.
-    async fn handle_send_blob(&mut self, inst_id: InstanceId, data: Vec<u8>) {
+    async fn handle_send_blob(&mut self, inst_id: InstanceId, data:Bytes) {
         if !self.authenticated {
             return;
         }

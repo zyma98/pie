@@ -185,12 +185,14 @@ pub struct UpdateAdapterRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UploadAdapterRequest {
     pub adapter_ptr: u32,
+    pub name: String,
     pub adapter_data: Vec<u8>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DownloadAdapterRequest {
     pub adapter_ptr: u32,
+    pub name: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

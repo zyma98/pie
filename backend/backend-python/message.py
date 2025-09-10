@@ -89,11 +89,13 @@ class UpdateAdapterRequest(msgspec.Struct, gc=False):
 
 class UploadAdapterRequest(msgspec.Struct, gc=False):
     adapter_ptr: int
+    name: str
     adapter_data: bytes
 
 
 class DownloadAdapterRequest(msgspec.Struct, gc=False):
     adapter_ptr: int
+    name: str
 
 
 class DownloadAdapterResponse(msgspec.Struct, gc=False):

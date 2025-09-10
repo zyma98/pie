@@ -353,7 +353,7 @@ class CmaesAdapter(Adapter):
             for _ in range(num_layers)
         ]
 
-    def upload(self, data: bytes) -> None:
+    def upload(self, name: str, data: bytes) -> None:
         """
         Loads the adapter's state from a file and populates its parameters and state.
 
@@ -362,7 +362,7 @@ class CmaesAdapter(Adapter):
         slices of `self.adapter_at_layer`. It also restores all hyperparameters and
         the internal state of the CMA-ES optimizer. The 'data' parameter is ignored.
         """
-        filename = f"adapter_{self.adapter_id}.pt"
+        filename = f"adapter_{name}.pt"
         # Load the state dictionary, mapping tensors to the adapter's device.
         state_dict = torch.load(filename, map_location=self.device)
 
@@ -425,7 +425,7 @@ class CmaesAdapter(Adapter):
             self.adapter_at_layer[i][0][self.adapter_id].copy_(loaded_down_weights[i])
             self.adapter_at_layer[i][1][self.adapter_id].copy_(loaded_up_weights[i])
 
-    def download(self) -> bytes:
+    def download(self, name: str) -> bytes:
         """
         Snapshots the adapter's current parameters and state into a file.
 
@@ -434,7 +434,7 @@ class CmaesAdapter(Adapter):
         to f"adapter_{self.adapter_id}.pt". It returns an empty bytes object as
         per the instructions.
         """
-        filename = f"adapter_{self.adapter_id}.pt"
+        filename = f"adapter_{name}.pt"
 
         # Extract the weight tensors for this specific adapter.
         # We use .clone().cpu() for safe, device-independent saving.

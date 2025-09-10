@@ -76,6 +76,11 @@ pub struct Model {
     pub(crate) inner: Rc<core::Model>,
 }
 
+#[derive(Debug)]
+pub struct Blob {
+    pub(crate) inner: core::Blob,
+}
+
 pub enum Resource {
     KvPage = 0,
     Embed = 1,
@@ -145,6 +150,23 @@ pub async fn receive() -> String {
     let pollable = future.pollable();
     AsyncPollable::new(pollable).wait_for().await;
     future.get().unwrap()
+}
+
+/// Sends a message to the remote user client.
+pub fn send_blob(blob: Blob) {
+    core::send_blob(blob.inner)
+}
+
+/// Receives an incoming message from the remote user client.
+///
+/// This is an asynchronous operation that returns a `ReceiveResult`.
+pub async fn receive_blob() -> Blob {
+    let future = core::receive_blob(); // Changed from messaging::receive
+    let pollable = future.pollable();
+    AsyncPollable::new(pollable).wait_for().await;
+    let blob = future.get().unwrap();
+
+    Blob { inner: blob }
 }
 
 /// Publishes a message to a topic, broadcasting it to all subscribers.
@@ -313,6 +335,14 @@ impl Queue {
 
     pub fn release_exported_resources(&self, resource: Resource, name: &str) {
         core::release_exported_resources(&self.inner, resource as u32, name)
+    }
+}
+
+impl Blob {
+    pub fn new(data: Vec<u8>) -> Blob {
+        let data = core::Blob::new(&data);
+
+        Blob { inner: data }
     }
 }
 

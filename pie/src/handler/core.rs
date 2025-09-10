@@ -23,7 +23,7 @@ pub struct Model {
 
 #[derive(Debug, Clone)]
 pub struct Blob {
-    pub data: Vec<u8>,
+    pub data: Bytes,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -54,9 +54,9 @@ pub struct ReceiveResult {
 
 #[derive(Debug)]
 pub struct BlobResult {
-    receiver: oneshot::Receiver<Vec<u8>>,
-    result: Option<Vec<u8>>,
-    done: bool,
+    pub(crate) receiver: oneshot::Receiver<Bytes>,
+    pub(crate) result: Option<Bytes>,
+    pub(crate) done: bool,
 }
 
 #[derive(Debug)]
@@ -101,6 +101,7 @@ impl Pollable for BlobResult {
         }
         let res = (&mut self.receiver).await.unwrap();
         self.result = Some(res);
+
         self.done = true;
     }
 }
@@ -621,15 +622,9 @@ impl bindings::pie::inferlet::core::HostBlob for InstanceState {
         &mut self,
         data: Vec<u8>,
     ) -> anyhow::Result<Resource<Blob>> {
-        let blob = Blob { data };
+        let blob = Blob { data:Bytes::from(data) };
         let res = self.ctx().table.push(blob)?;
         Ok(res)
-    }
-
-    async fn write(&mut self, this: Resource<Blob>, data: Vec<u8>) -> anyhow::Result<()> {
-        let mut blob = self.ctx().table.get_mut(&this)?;
-        blob.data.extend(data);
-        Ok(())
     }
 
     async fn read(
