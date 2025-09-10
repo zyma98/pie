@@ -50,8 +50,12 @@ class TrainingConfig:
     MU_FRACTION: float = 0.5
     MAX_TOKENS_GEN: int = 512
 
+    # --- Checkpointing Configuration ---
+    INITIAL_CHECKPOINT_NAME: Optional[str] = None #"evo-countdown-v1-step-7"
+    CHECKPOINT_EVERY_N_STEPS: int = 5
+
     # --- Evaluation Configuration ---
-    EVAL_EVERY_N_STEPS: int = 20
+    EVAL_EVERY_N_STEPS: int = 2
     EVAL_TASKS_PER_WORKER: int = 16
 
     # --- Token Budgets ---
@@ -194,7 +198,8 @@ class ESOrchestrator:
 
             scores, metrics = self._score_and_aggregate(base_seeds, rollout_results)
 
-            await self._run_update_phase(base_seeds, scores)
+            # Pass the current step to the update phase for checkpointing
+            await self._run_update_phase(base_seeds, scores, step)
 
             step_duration = time.time() - start_time
             metrics["perf/step_duration_sec"] = step_duration
@@ -202,7 +207,6 @@ class ESOrchestrator:
 
             tqdm.write(
                 f"Step {step}: mean_reward={metrics['mean_reward']:.4f} | "
-                f"success={metrics['success_rate/train']:.3f} | "
                 f"episodes={metrics['num_finished_episodes']} | duration={step_duration:.1f}s"
             )
 
@@ -214,7 +218,6 @@ class ESOrchestrator:
 
         tqdm.write("\n🎉 Training finished!")
         wandb.summary["final_mean_score"] = metrics["mean_reward"]
-        wandb.summary["final_success_rate_train"] = metrics["success_rate/train"]
 
     async def teardown(self):
         """Clean up resources."""
@@ -275,6 +278,17 @@ class ESOrchestrator:
             "--alpha", str(self.config.LORA_ALPHA), "--population-size", str(self.config.POPULATION_SIZE),
             "--mu-fraction", str(self.config.MU_FRACTION), "--initial-sigma", str(self.config.INITIAL_SIGMA),
         ]
+
+        # ▼▼▼ MODIFICATION START ▼▼▼
+        # Add checkpoint loading logic. Pass --upload with the checkpoint name if provided,
+        # or with an empty string if not.
+        if self.config.INITIAL_CHECKPOINT_NAME:
+            tqdm.write(f"📂 Loading initial checkpoint: {self.config.INITIAL_CHECKPOINT_NAME}")
+            init_args.extend(["--upload", self.config.INITIAL_CHECKPOINT_NAME])
+        else:
+            init_args.extend(["--upload", ""])
+        # ▲▲▲ MODIFICATION END ▲▲▲
+
         init_tasks = [
             launch_and_get_result(client, self.program_hashes["es-init"], init_args, f"C{i}-Init", self.config.VERBOSE_WORKER_LOGS)
             for i, client in enumerate(self.clients)
@@ -322,7 +336,6 @@ class ESOrchestrator:
             for text, task in zip(rollout_results["texts"], rollout_results["tasks"])
         ]
         scores = [float(ri.get("reward", 0.0)) for ri in reward_infos]
-        answer_rewards = [float(ri.get("answer_reward", 0.0)) for ri in reward_infos]
 
         scores_by_seed = defaultdict(list)
         for s, sc in zip(rollout_results["seeds"], scores):
@@ -343,7 +356,6 @@ class ESOrchestrator:
         metrics = {
             "mean_reward": float(np.mean(scores)) if scores else 0.0,
             "std_reward": float(np.std(scores)) if scores else 0.0,
-            "success_rate/train": float(np.mean(answer_rewards)) if answer_rewards else 0.0,
             "num_finished_episodes": len(rollout_results["texts"]),
             "mean_response_len": float(np.mean(out_lens)) if out_lens else 0.0,
             "es/mean_population_score": float(np.mean(aggregated_scores)),
@@ -353,8 +365,10 @@ class ESOrchestrator:
         }
         return aggregated_scores, metrics
 
-    async def _run_update_phase(self, base_seeds, aggregated_scores):
-        """Broadcasts the update command to all clients."""
+    # ▼▼▼ MODIFICATION START ▼▼▼
+    # Added 'step' parameter to handle periodic checkpointing
+    async def _run_update_phase(self, base_seeds, aggregated_scores, step: int):
+        """Broadcasts the update command to all clients and handles checkpointing."""
         tqdm.write("Phase: Update")
         update_args = [
             "--name", self.config.ADAPTER_NAME,
@@ -362,6 +376,14 @@ class ESOrchestrator:
             "--scores", ",".join(map(str, aggregated_scores)),
             "--max-sigma", str(self.config.MAX_SIGMA),
         ]
+
+        # Add checkpoint saving logic every N steps
+        if step > 0 and step % self.config.CHECKPOINT_EVERY_N_STEPS == 0:
+            checkpoint_name = f"{self.config.ADAPTER_NAME}-step-{step}"
+            tqdm.write(f"💾 Saving checkpoint: {checkpoint_name}")
+            update_args.extend(["--download", checkpoint_name])
+        # ▲▲▲ MODIFICATION END ▲▲▲
+
         update_tasks = [
             launch_and_get_result(client, self.program_hashes["es-update"], update_args, f"C{i}-Update", self.config.VERBOSE_WORKER_LOGS)
             for i, client in enumerate(self.clients)
@@ -388,9 +410,8 @@ class ESOrchestrator:
         answer_rewards = [float(ri.get("answer_reward", 0.0)) for ri in reward_infos]
 
         eval_mean_reward = float(np.mean(scores)) if scores else 0.0
-        eval_success_rate = float(np.mean(answer_rewards)) if answer_rewards else 0.0
 
-        tqdm.write(f"✅ Eval Complete: mean_reward={eval_mean_reward:.4f}, success_rate={eval_success_rate:.3f}")
+        tqdm.write(f"✅ Eval Complete: mean_reward={eval_mean_reward:.4f}")
 
         # Log examples to W&B
         num_to_log = min(10, len(results["texts"]))
@@ -402,12 +423,10 @@ class ESOrchestrator:
 
         metrics = {
             "eval/mean_reward": eval_mean_reward,
-            "eval/success_rate": eval_success_rate,
             "eval/duration_seconds": time.time() - eval_start_time,
             "eval/examples": _create_eval_wandb_html(examples),
         }
         if step == self.config.TRAINING_STEPS:
-            wandb.summary["final_eval_success_rate"] = metrics["eval/success_rate"]
             wandb.summary["final_eval_mean_reward"] = metrics["eval/mean_reward"]
         return metrics
 
@@ -490,6 +509,8 @@ class ESOrchestrator:
 async def main():
     """High-level entry point to configure and run the training orchestrator."""
     config = TrainingConfig()
+    # Example of how to use the new checkpointing features:
+    # config.INITIAL_CHECKPOINT_NAME = "evo-countdown-v1-step-10" # Resume from a checkpoint
     orchestrator = ESOrchestrator(config)
     try:
         await orchestrator.setup()

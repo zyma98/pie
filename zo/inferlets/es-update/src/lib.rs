@@ -1,4 +1,3 @@
-
 use inferlet::traits::{Adapter, Evolve};
 use inferlet::wstd::time::Duration;
 use inferlet::{self};
@@ -16,6 +15,7 @@ Options:
       --seeds <I64,...>          A comma-separated list of i64 seeds corresponding to the rollouts.
       --scores <F32,...>         A comma-separated list of f32 scores for each rollout.
       --max-sigma <F32>          The maximum sigma to use when updating the adapter.
+      --download <STRING>        Optional: Download the updated adapter to the specified path.
   -h, --help                     Print this help information.
 "#;
 
@@ -59,6 +59,20 @@ async fn main() -> Result<(), String> {
         .value_from_str("--max-sigma")
         .map_err(|e| e.to_string())?;
 
+    // Parse the optional --download argument.
+    let download: Option<String> = args
+        .opt_value_from_str("--download")
+        .map_err(|e| e.to_string())?;
+
+    // Ensure no unknown arguments were passed.
+    let remaining = args.finish();
+    if !remaining.is_empty() {
+        return Err(format!(
+            "Unknown arguments found: {:?}. Use --help for usage.",
+            remaining
+        ));
+    }
+
     // --- 2. Input Validation ---
     if seeds.is_empty() {
         return Err("At least one seed and score must be provided.".to_string());
@@ -89,6 +103,17 @@ async fn main() -> Result<(), String> {
 
     // Perform the update operation with max_sigma.
     queue.update_adapter(es_adapter, scores, seeds, max_sigma);
+
+    // If a download path was provided, download the adapter.
+    if let Some(download_path) = &download {
+        if !download_path.is_empty() {
+            println!(
+                "📥 Downloading adapter '{}' to '{}'...",
+                name, download_path
+            );
+            let _ = queue.download_adapter(es_adapter, download_path).await;
+        }
+    }
 
     // sleep for 100ms
     inferlet::wstd::task::sleep(Duration::from_millis(100)).await;

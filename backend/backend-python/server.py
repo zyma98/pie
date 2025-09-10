@@ -40,8 +40,8 @@ class HandlerId(enum.Enum):
     EMBED_IMAGE = 4
     INITIALIZE_ADAPTER = 5
     UPDATE_ADAPTER = 6
-    UPLOAD_HANDLER = 7
-    DOWNLOAD_HANDLER = 8
+    UPLOAD_ADAPTER = 7
+    DOWNLOAD_ADAPTER = 8
 
 
 def main(
@@ -340,8 +340,8 @@ def run_zmq_server(socket, handler):
             InitializeAdapterRequest
         ),
         HandlerId.UPDATE_ADAPTER.value: msgspec.msgpack.Decoder(UpdateAdapterRequest),
-        HandlerId.UPLOAD_HANDLER.value: msgspec.msgpack.Decoder(UploadAdapterRequest),
-        HandlerId.DOWNLOAD_HANDLER.value: msgspec.msgpack.Decoder(DownloadAdapterRequest),
+        HandlerId.UPLOAD_ADAPTER.value: msgspec.msgpack.Decoder(UploadAdapterRequest),
+        HandlerId.DOWNLOAD_ADAPTER.value: msgspec.msgpack.Decoder(DownloadAdapterRequest),
     }
     MSGPACK_ENCODER = msgspec.msgpack.Encoder()
 
@@ -400,10 +400,10 @@ def run_zmq_server(socket, handler):
                     handler.initialize_adapter(reqs)
                 case HandlerId.UPDATE_ADAPTER.value:
                     handler.update_adapter(reqs)
-                case HandlerId.UPLOAD_HANDLER.value:
-                    handler.upload_handler(reqs)
-                case HandlerId.DOWNLOAD_HANDLER.value:
-                    resps = handler.download_handler(reqs)
+                case HandlerId.UPLOAD_ADAPTER.value:
+                    handler.upload_adapter(reqs)
+                case HandlerId.DOWNLOAD_ADAPTER.value:
+                    resps = handler.download_adapter(reqs)
                 case _:
                     print(f"[!] Unknown handler ID: {handler_id}", file=sys.stderr)
 

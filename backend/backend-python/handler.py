@@ -196,7 +196,7 @@ class Handler:
             if req.adapter_ptr in self.adapters:
                 adapter = self.adapters[req.adapter_ptr]
                 if isinstance(adapter, CmaesAdapter):
-                    adapter.upload(req.adapter_data)
+                    adapter.upload(req.name, req.adapter_data)
 
     @torch.inference_mode()
     def download_adapter(self, reqs: list[message.DownloadAdapterRequest]) -> list[message.DownloadAdapterResponse]:
@@ -205,7 +205,7 @@ class Handler:
             if req.adapter_ptr in self.adapters:
                 adapter = self.adapters[req.adapter_ptr]
                 if isinstance(adapter, CmaesAdapter):
-                    data = adapter.download()
+                    data = adapter.download(req.name)
                     resp = message.DownloadAdapterResponse(adapter_data=data)
                     resps.append(resp)
 
