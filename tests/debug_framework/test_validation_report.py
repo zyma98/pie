@@ -10,7 +10,7 @@ TDD: This test MUST FAIL until the ValidationReport model is implemented.
 import pytest
 import json
 from datetime import datetime
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, mock_open
 
 # Proper TDD pattern - use try/except for conditional loading
 try:
