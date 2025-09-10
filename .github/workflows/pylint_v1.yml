@@ -1,76 +1,52 @@
-name: Lint Python (changed files)
+name: Lint Python (PR changed files)
 
 on:
-  push:
-    paths:
-      - 'backend/backend-python/**/*.py'
   pull_request:
     paths:
-      - 'backend/backend-python/**/*.py'
+      - 'backend/backend-python/config/**/*.py'
+      - 'backend/backend-python/model/**/*.py'
 
 jobs:
   lint:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
     steps:
-      - name: Checkout
+      - name: Checkout (full history for reliable diffs)
         uses: actions/checkout@v4
         with:
-          # Full history ensures diffs across commits/branches work reliably
           fetch-depth: 0
 
-      # --- Push: compute changed files between before and after ---
-      - name: Determine changed Python files (push)
-        if: github.event_name == 'push'
-        id: changes_push
+      - name: Compute changed Python files (PR)
+        id: changes
         shell: bash
         run: |
           set -euo pipefail
-          BEFORE="${{ github.event.before }}"
-          AFTER="${{ github.sha }}"
-          # Handle first commit on a new branch where BEFORE is all zeros
-          if [ "$BEFORE" = "0000000000000000000000000000000000000000" ] || [ -z "$BEFORE" ]; then
-            git diff-tree --no-commit-id --name-only -r --diff-filter=ACMRT "$AFTER" -- '*.py' \
-            | grep -E '^backend/backend-python/(config|model)/.*\.py$' || true
-          else
-            git diff --name-only --diff-filter=ACMRT "$BEFORE" "$AFTER" -- '*.py' \
-            | grep -E '^backend/backend-python/(config|model)/.*\.py$' || true
-          fi | tr '\n' ' ' | sed 's/ *$//' | awk '{print "files="$0}' >> "$GITHUB_OUTPUT"
 
-      # --- PR: compute changed files between base and head (not the merge SHA) ---
-      - name: Determine changed Python files (pull_request)
-        if: github.event_name == 'pull_request'
-        id: changes_pr
-        shell: bash
-        run: |
-          set -euo pipefail
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          BASE_REF="${{ github.event.pull_request.base.ref }}"
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
-          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
-          # Ensure base is available locally (defensive; checkout@v4 usually suffices with fetch-depth:0)
-          git fetch origin "${{ github.event.pull_request.base.ref }}":"refs/remotes/origin/${{ github.event.pull_request.base.ref }}" --depth=1 || true
-          git diff --name-only --diff-filter=ACMRT "$BASE_SHA" "$HEAD_SHA" -- '*.py' \
-          | grep -E '^backend/backend-python/(config|model)/.*\.py$' || true \
-          | tr '\n' ' ' | sed 's/ *$//' | awk '{print "files="$0}' >> "$GITHUB_OUTPUT"
+
+          # Fetch PR head commit via special ref and the base branch to ensure both sides are present
+          git fetch --no-tags --prune --depth=1 origin "pull/${PR_NUMBER}/head:pr_head"
+          git fetch --no-tags --prune --depth=1 origin "${BASE_REF}:pr_base"
+
+          # Option A: two-dot diff (base..head) for files changed in the PR
+          FILES=$(git diff --name-only --diff-filter=ACMRT pr_base pr_head -- '*.py' \
+            | grep -E '^backend/backend-python/(config|model)/.*\.py$' || true)
+
+          # Output as space-separated for easy consumption
+          FILES="${FILES//$'\n'/ }"
+          echo "files=${FILES}" >> "$GITHUB_OUTPUT"
 
       - name: Install uv
         run: pipx install uv
 
-      - name: Lint changed files with Black (push)
-        if: github.event_name == 'push'
+      - name: Lint changed files with Black
         shell: bash
         run: |
-          FILES="${{ steps.changes_push.outputs.files }}"
-          if [ -z "$FILES" ]; then
-            echo "No matching Python files changed."
-            exit 0
-          fi
-          echo "Linting: $FILES"
-          uvx black --check $FILES
-
-      - name: Lint changed files with Black (pull_request)
-        if: github.event_name == 'pull_request'
-        shell: bash
-        run: |
-          FILES="${{ steps.changes_pr.outputs.files }}"
+          FILES="${{ steps.changes.outputs.files }}"
           if [ -z "$FILES" ]; then
             echo "No matching Python files changed."
             exit 0
