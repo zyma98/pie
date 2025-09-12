@@ -3,32 +3,14 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from torch.utils.data import Dataset
+from rewards import format_reward, extract_answer
 
-SYSTEM_MESSAGE = (
-    "You are a helpful assistant. You first think about the reasoning process "
-    "in your mind and then provide the user with the answer."
-)
-USER_TEMPLATE = (
-    "Using the numbers {numbers}, create an equation that equals {target}. "
-    "You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. "
-    "Return the final answer in <answer> </answer> tags, for example <answer> (1 + 2) / 3 </answer>."
-)
-RESPONSE_PROMPT = "Let me solve this step by step."
-
-
-def format_prompt(numbers: list[int], target: int) -> str:
-    """Prefix is the *actual* input to the model."""
-    user_message = USER_TEMPLATE.format(numbers=numbers, target=target)
-
-    prompt = "<|begin_of_text|>"
-    prompt += f"<|start_header_id|>system<|end_header_id|>\n\n{SYSTEM_MESSAGE}<|eot_id|>"
-    prompt += f"<|start_header_id|>user<|end_header_id|>\n\n{user_message}<|eot_id|>"
-    prompt += f"<|start_header_id|>assistant<|end_header_id|>\n\n{RESPONSE_PROMPT}"
+def format_problem(numbers: list[int], target: int) -> str:
+    prompt = f"Using the numbers {numbers}, create an equation that equals {target}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Please reason step by step."
     return prompt
 
 
-class CountdownTasksDataset(Dataset):
+class CountdownDataset:
     """Prepare Countdown Tasks for training"""
 
     def __init__(
@@ -49,7 +31,8 @@ class CountdownTasksDataset(Dataset):
     def __getitem__(self, idx):
         item = self.data.iloc[idx].to_dict()
         item.update({
-            "prompt": format_prompt(item["nums"], item["target"])
+            "problem": format_problem(item["nums"], item["target"]),
+            "verifier": lambda response: verify_answer(response, item["nums"], item["target"])
         })
         return item
 
@@ -57,15 +40,7 @@ class CountdownTasksDataset(Dataset):
 def answer_reward_function(
         response: str, numbers: list[int] = None, target: int = None
 ) -> float:
-    """
-    Checks if the answer uses all numbers exactly once and evaluates to the target
-    """
-    answer_regex = r"<answer>(.*?)<\/answer>"
-    answer_match = re.search(answer_regex, response, re.DOTALL)
-    if not answer_match:
-        return 0.0
-
-    answer_content = answer_match.group(1)
+    answer_content = extract_answer(response)
     if not answer_content:
         return 0.0
 
@@ -74,7 +49,8 @@ def answer_reward_function(
         return 0.0
 
     # Check if the answer uses all numbers exactly once
-    used_numbers = [int(n) for n in re.findall(r"\d+", answer_content)]
+    used_numbers = [int(n) for n in re.split(r'[\s()*/+-]+', answer_content) if n]
+
     if sorted(used_numbers) != sorted(numbers):
         return 0.0
 
@@ -89,21 +65,21 @@ def answer_reward_function(
     return 0.0
 
 
-def reward_function(
+def verify_answer(
         response: str,
         numbers: list[int] = None,
         target: int = None,
-        end_token: str = None,
 ) -> dict[str, Any]:
     """Reward function for Countdown Tasks.
 
     Total reward = 0.1 * format_reward + answer_reward
     """
-    answer_reward = answer_reward_function(response, numbers, target)
+    answer_reward_value = answer_reward_function(response, numbers, target)
+    format_reward_value = format_reward(response)
+
+    total_reward = 0.1 * format_reward_value + answer_reward_value
     return {
-        "reward": answer_reward,
-        "reward_info": {
-            "format_reward": 0.0,
-            "answer_reward": answer_reward,
-        },
+        "reward": total_reward,
+        "format_reward": format_reward_value,
+        "answer_reward": answer_reward_value,
     }

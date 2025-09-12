@@ -1,71 +1,29 @@
 use futures::future::join_all;
+use inferlet::bindings::pie::inferlet::core::store_delete;
+use inferlet::stop_condition::{StopCondition, ends_with_any, max_len};
 use inferlet::traits::Adapter;
-use inferlet::{self, Sampler, set_return};
-use pico_args::Arguments;
-use std::ffi::OsString;
+use inferlet::{self, Args, Result, Sampler, bail, store_get, store_set};
+use serde::Deserialize;
 use std::future::Future;
 use std::pin::Pin;
 
-/// Defines the command-line interface and help message.
-const HELP: &str = r#"
-Usage: es-rollout [OPTIONS]
-
-Performs a parallel rollout for an Evolution Strategies adapter. It applies a
-unique seed to the model for each batch of tasks and generates outputs.
-
-Options:
-      --name <STRING>            The name of the adapter to use.
-      --seeds <I64,...>          A comma-separated list of i64 seeds for the adapter.
-      --tasks-json <JSON_STRING> A JSON string representing an array of task prompts.
-      --max-num-outputs <INT>    The maximum number of new tokens to generate per task.
-  -h, --help                     Print this help information.
-"#;
+#[derive(Deserialize, Debug)]
+struct Rollout {
+    uid: String,
+    task: String,
+    seed: i64,
+}
 
 #[inferlet::main]
-async fn main() -> Result<(), String> {
-    // --- 1. Argument Parsing ---
-    let mut args = Arguments::from_vec(
-        inferlet::get_arguments()
-            .into_iter()
-            .map(OsString::from)
-            .collect(),
-    );
-
-    if args.contains(["-h", "--help"]) {
-        println!("{}", HELP);
-        return Ok(());
-    }
-
+async fn main(mut args: Args) -> Result<String> {
     // Parse required arguments.
-    let name: String = args.value_from_str("--name").map_err(|e| e.to_string())?;
-
-    let max_num_outputs: usize = args
-        .value_from_str("--max-num-outputs")
-        .map_err(|e| e.to_string())?;
-
-    // Parse comma-separated list for seeds.
-    let seeds: Vec<i64> = args
-        .value_from_fn("--seeds", |s| {
-            s.split(',')
-                .map(|v| v.parse::<i64>().map_err(|_| "Invalid seed value"))
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .map_err(|e| e.to_string())?;
+    let name: String = args.value_from_str("--name")?;
+    let system_prompt: String = args.value_from_str("--system-prompt")?;
+    let max_num_outputs: usize = args.value_from_str("--max-num-outputs")?;
 
     // Parse the tasks from a JSON string.
-    let tasks_json: String = args
-        .value_from_str("--tasks-json")
-        .map_err(|e| e.to_string())?;
-    let tasks: Vec<String> = serde_json::from_str(&tasks_json)
-        .map_err(|e| format!("Failed to parse tasks JSON: {}", e))?;
-
-    if tasks.len() != seeds.len() {
-        return Err(format!(
-            "The number of tasks ({}) must the same as the number of seeds ({}).",
-            tasks.len(),
-            seeds.len()
-        ));
-    }
+    let rollouts_str: String = args.value_from_str("--tasks-json")?;
+    let rollouts: Vec<Rollout> = serde_json::from_str(&rollouts_str)?;
 
     // The futures vector for a single-threaded (Wasm) environment does not need the `Send` bound.
     let mut futures: Vec<Pin<Box<dyn Future<Output = String>>>> = vec![];
@@ -76,38 +34,57 @@ async fn main() -> Result<(), String> {
 
     let es_adapter = queue.import_adapter(&name);
 
+    let stop_cond = max_len(max_num_outputs).or(ends_with_any(model.eos_tokens()));
+
     // println!("🚀 Starting parallel rollout...");
-    for i in 0..seeds.len() {
-        let task = tasks[i].clone();
-        let seed = seeds[i];
+    for rollout in rollouts {
+        let stop_cond_ = stop_cond.clone();
+        let sampler = Sampler::top_p(0.6, 0.95);
 
         let mut ctx = model.create_context();
         ctx.set_adapter(es_adapter);
-        ctx.set_adapter_random_seed(seed);
+        ctx.set_adapter_random_seed(rollout.seed);
+        ctx.fill_system(&system_prompt);
+        ctx.fill_user(&rollout.task);
 
-        // Create an async block that owns the forked context and the task string.
+        // check if the task has preempted copies in the past
+        if let Some(prev_tokens) = store_get(&rollout.uid) {
+            let prev_tokens: Vec<u32> = serde_json::from_str(&prev_tokens)?;
+            ctx.fill_tokens(prev_tokens);
+        }
+
         let generation_future = async move {
-            ctx.fill(&task);
-            ctx.generate_until(Sampler::top_p(0.6, 0.95), max_num_outputs)
-                .await
+            let mut generated_token_ids = Vec::new();
+
+            loop {
+                let next_token_id = ctx.decode_step(&sampler).await;
+                ctx.fill_token(next_token_id);
+                generated_token_ids.push(next_token_id);
+                if stop_cond_.check(&generated_token_ids) {
+                    break;
+                }
+
+                // cache the tokens in case it gets preemptived
+                store_set(
+                    &rollout.uid,
+                    &serde_json::to_string(&generated_token_ids).unwrap(),
+                );
+            }
+
+            // clear up the cache
+            store_delete(&rollout.uid);
+
+            ctx.tokenizer.detokenize(&generated_token_ids)
         };
 
-        // Box the future to store it in the vector with other futures.
         futures.push(Box::pin(generation_future));
     }
 
-    // --- 4. Collect Results and Send ---
     // println!("⏳ Waiting for {} tasks to complete...", futures.len());
     let results: Vec<String> = join_all(futures).await;
 
     // Serialize the collected text outputs into a JSON string array.
-    let response_json = serde_json::to_string(&results)
-        .map_err(|e| format!("Failed to serialize final results: {}", e))?;
+    let response_json = serde_json::to_string(&results)?;
 
-    // Send the final JSON response back to the caller.
-    //inferlet::send(&response_json);
-    // println!("✅ Rollout complete. Sent {} results.", results.len());
-
-    set_return(&response_json);
-    Ok(())
+    Ok(response_json)
 }

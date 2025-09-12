@@ -17,8 +17,9 @@ from tqdm.auto import tqdm
 
 # Assume pie is an installed library
 from pie import PieClient, Instance, Event
-# Use the refactored imports
-from countdown import CountdownTasksDataset, reward_function
+# Use the refactored dataset imports
+from countdown import CountdownDataset
+from openr1math import OpenR1MathDataset
 
 
 # ==============================================================================
@@ -32,7 +33,12 @@ class TrainingConfig:
     SERVER_URIS: List[str] = field(default_factory=lambda: ["ws://127.0.0.1:8080"])
     SCRIPT_DIR: Path = Path(__file__).resolve().parent
     WASM_DIR: Path = SCRIPT_DIR / "inferlets" / "target" / "wasm32-wasip2" / "release"
+
+    # --- Dataset Configuration ---
+    DATASET_NAME: str = "countdown"  # "countdown" or "math"
+    # Path for file-based datasets like Countdown
     DATA_PATH: str = "./Countdown-Tasks-3to4"
+    DATASET_TEST_SIZE: int = 256
 
     # --- Inferlet WASM Paths ---
     INFERLET_WASM_PATHS: Dict[str, Path] = field(default_factory=dict)
@@ -48,10 +54,14 @@ class TrainingConfig:
     INITIAL_SIGMA: float = 0.005
     MAX_SIGMA: float = 0.014
     MU_FRACTION: float = 0.5
-    MAX_TOKENS_GEN: int = 512
+    MAX_TOKENS_GEN: int = 1024
+    SYSTEM_PROMPT: str = (
+        "You are a helpful AI Assistant that provides well-reasoned and detailed responses. "
+        "You first think about the reasoning process as an internal monologue and then provide the user with the answer. Respond in the following format: <think>\n...\n</think>\n<answer>\n...\n</answer>"
+    )
 
     # --- Checkpointing Configuration ---
-    INITIAL_CHECKPOINT_NAME: Optional[str] = None #"evo-countdown-v1-step-7"
+    INITIAL_CHECKPOINT_NAME: Optional[str] = None
     CHECKPOINT_EVERY_N_STEPS: int = 5
 
     # --- Evaluation Configuration ---
@@ -59,7 +69,7 @@ class TrainingConfig:
     EVAL_TASKS_PER_WORKER: int = 16
 
     # --- Token Budgets ---
-    DEFAULT_MAX_TOKENS_PER_SERVER: int = 512 * 198
+    DEFAULT_MAX_TOKENS_PER_SERVER: int = 512 * 100
     MAX_TOKENS_PER_SERVER: Dict[str, int] = field(default_factory=dict)
 
     # --- W&B Config ---
@@ -69,7 +79,7 @@ class TrainingConfig:
     WANDB_TAGS: List[str] = field(default_factory=lambda: ["es", "countdown", "lora"])
 
     # --- Logging ---
-    VERBOSE_WORKER_LOGS: bool = False
+    VERBOSE_WORKER_LOGS: bool = True
 
     def __post_init__(self):
         """Set up dynamic paths and dictionaries after initialization."""
@@ -81,6 +91,8 @@ class TrainingConfig:
         self.MAX_TOKENS_PER_SERVER = {
             uri: self.DEFAULT_MAX_TOKENS_PER_SERVER for uri in self.SERVER_URIS
         }
+        # Update adapter name based on dataset
+        self.ADAPTER_NAME = f"evo-{self.DATASET_NAME}-v1"
 
 
 # ==============================================================================
@@ -135,7 +147,15 @@ def _create_eval_wandb_html(generations: List[Dict]) -> wandb.Html:
     ]
     style = 'style="border: 1px solid #ddd; padding: 8px;"'
     for item in generations:
-        prompt_html = f"<pre>nums = {item['task']['nums']}\ntarget = {item['task']['target']}</pre>"
+        task_content = item['task']
+        # Generic prompt handling for different dataset structures
+        if 'problem' in task_content:
+            prompt_html = f"<pre>{html.escape(task_content['problem'])}</pre>"
+        elif 'nums' in task_content and 'target' in task_content:
+            prompt_html = f"<pre>nums = {task_content['nums']}\ntarget = {task_content['target']}</pre>"
+        else:
+            prompt_html = "<pre>N/A</pre>"
+
         text_html = f"<pre>{html.escape(item['text'])}</pre>"
         success_icon = "✅" if item['answer_reward'] == 1.0 else "❌"
         table_rows.append(
@@ -198,7 +218,6 @@ class ESOrchestrator:
 
             scores, metrics = self._score_and_aggregate(base_seeds, rollout_results)
 
-            # Pass the current step to the update phase for checkpointing
             await self._run_update_phase(base_seeds, scores, step)
 
             step_duration = time.time() - start_time
@@ -241,13 +260,30 @@ class ESOrchestrator:
         wandb.define_metric("*", step_metric="step")
 
     def _load_datasets(self):
-        """Loads the training and evaluation datasets."""
-        self.train_dataset = CountdownTasksDataset(self.config.DATA_PATH, "train", 100)
-        self.eval_dataset = CountdownTasksDataset(self.config.DATA_PATH, "test")
+        """Loads the training and evaluation datasets based on config."""
+        tqdm.write(f"💿 Loading dataset: {self.config.DATASET_NAME}")
+        if self.config.DATASET_NAME == "countdown":
+            self.train_dataset = CountdownDataset(
+                self.config.DATA_PATH, "train", self.config.DATASET_TEST_SIZE
+            )
+            self.eval_dataset = CountdownDataset(
+                self.config.DATA_PATH, "test", self.config.DATASET_TEST_SIZE
+            )
+        elif self.config.DATASET_NAME == "math":
+            self.train_dataset = OpenR1MathDataset(
+                "train", self.config.DATASET_TEST_SIZE
+            )
+            self.eval_dataset = OpenR1MathDataset(
+                "test", self.config.DATASET_TEST_SIZE
+            )
+        else:
+            raise ValueError(f"Unknown dataset name: {self.config.DATASET_NAME}")
+
         wandb.config.update({
             "dataset_size_train_view": len(self.train_dataset),
             "dataset_size_eval": len(self.eval_dataset),
         }, allow_val_change=True)
+        tqdm.write("✅ Datasets loaded.")
 
     async def _upload_inferlets(self):
         """Loads and uploads WASM binaries to all clients."""
@@ -279,15 +315,11 @@ class ESOrchestrator:
             "--mu-fraction", str(self.config.MU_FRACTION), "--initial-sigma", str(self.config.INITIAL_SIGMA),
         ]
 
-        # ▼▼▼ MODIFICATION START ▼▼▼
-        # Add checkpoint loading logic. Pass --upload with the checkpoint name if provided,
-        # or with an empty string if not.
         if self.config.INITIAL_CHECKPOINT_NAME:
             tqdm.write(f"📂 Loading initial checkpoint: {self.config.INITIAL_CHECKPOINT_NAME}")
             init_args.extend(["--upload", self.config.INITIAL_CHECKPOINT_NAME])
         else:
             init_args.extend(["--upload", ""])
-        # ▲▲▲ MODIFICATION END ▲▲▲
 
         init_tasks = [
             launch_and_get_result(client, self.program_hashes["es-init"], init_args, f"C{i}-Init", self.config.VERBOSE_WORKER_LOGS)
@@ -301,7 +333,7 @@ class ESOrchestrator:
         if desc == "evaluation":
             num_tasks = len(dataset)
             all_tasks = [dataset[i] for i in range(num_tasks)]
-            seeds_to_run = base_seeds  # These are all 0 for eval
+            seeds_to_run = base_seeds
         else:  # Training
             num_tasks = self.config.POPULATION_SIZE * self.config.TASKS_PER_SEED
             task_indices = np.random.choice(len(dataset), size=(self.config.POPULATION_SIZE, self.config.TASKS_PER_SEED))
@@ -329,13 +361,17 @@ class ESOrchestrator:
                 results["caps"][uri_i] = cap_i
         return results
 
+    # ▼▼▼ MODIFICATION START ▼▼▼
     def _score_and_aggregate(self, base_seeds, rollout_results):
-        """Scores generations and aggregates them by seed."""
+        """Scores generations and aggregates them by seed using generic verifier."""
         reward_infos = [
-            reward_function(text, task["nums"], task["target"])
+            task["verifier"](text)
             for text, task in zip(rollout_results["texts"], rollout_results["tasks"])
         ]
+        # Extract all reward components
         scores = [float(ri.get("reward", 0.0)) for ri in reward_infos]
+        format_rewards = [float(ri.get("format_reward", 0.0)) for ri in reward_infos]
+        answer_rewards = [float(ri.get("answer_reward", 0.0)) for ri in reward_infos]
 
         scores_by_seed = defaultdict(list)
         for s, sc in zip(rollout_results["seeds"], scores):
@@ -355,6 +391,8 @@ class ESOrchestrator:
 
         metrics = {
             "mean_reward": float(np.mean(scores)) if scores else 0.0,
+            "mean_format_reward": float(np.mean(format_rewards)) if format_rewards else 0.0,
+            "mean_answer_reward": float(np.mean(answer_rewards)) if answer_rewards else 0.0,
             "std_reward": float(np.std(scores)) if scores else 0.0,
             "num_finished_episodes": len(rollout_results["texts"]),
             "mean_response_len": float(np.mean(out_lens)) if out_lens else 0.0,
@@ -365,8 +403,8 @@ class ESOrchestrator:
         }
         return aggregated_scores, metrics
 
-    # ▼▼▼ MODIFICATION START ▼▼▼
-    # Added 'step' parameter to handle periodic checkpointing
+    # ▲▲▲ MODIFICATION END ▲▲▲
+
     async def _run_update_phase(self, base_seeds, aggregated_scores, step: int):
         """Broadcasts the update command to all clients and handles checkpointing."""
         tqdm.write("Phase: Update")
@@ -377,12 +415,10 @@ class ESOrchestrator:
             "--max-sigma", str(self.config.MAX_SIGMA),
         ]
 
-        # Add checkpoint saving logic every N steps
         if step > 0 and step % self.config.CHECKPOINT_EVERY_N_STEPS == 0:
             checkpoint_name = f"{self.config.ADAPTER_NAME}-step-{step}"
             tqdm.write(f"💾 Saving checkpoint: {checkpoint_name}")
             update_args.extend(["--download", checkpoint_name])
-        # ▲▲▲ MODIFICATION END ▲▲▲
 
         update_tasks = [
             launch_and_get_result(client, self.program_hashes["es-update"], update_args, f"C{i}-Update", self.config.VERBOSE_WORKER_LOGS)
@@ -403,17 +439,16 @@ class ESOrchestrator:
         )
 
         reward_infos = [
-            reward_function(text, task["nums"], task["target"])
+            task["verifier"](text)
             for text, task in zip(results["texts"], results["tasks"])
         ]
+        # Extract all reward components
         scores = [float(ri.get("reward", 0.0)) for ri in reward_infos]
+        format_rewards = [float(ri.get("format_reward", 0.0)) for ri in reward_infos]
         answer_rewards = [float(ri.get("answer_reward", 0.0)) for ri in reward_infos]
 
-        eval_mean_reward = float(np.mean(scores)) if scores else 0.0
+        tqdm.write(f"✅ Eval Complete: mean_reward={np.mean(scores):.4f}")
 
-        tqdm.write(f"✅ Eval Complete: mean_reward={eval_mean_reward:.4f}")
-
-        # Log examples to W&B
         num_to_log = min(10, len(results["texts"]))
         indices = np.random.choice(len(results["texts"]), size=num_to_log, replace=False)
         examples = [{
@@ -422,13 +457,17 @@ class ESOrchestrator:
         } for i in indices]
 
         metrics = {
-            "eval/mean_reward": eval_mean_reward,
+            "eval/mean_reward": np.mean(scores) if scores else 0.0,
+            "eval/mean_format_reward": np.mean(format_rewards) if format_rewards else 0.0,
+            "eval/mean_answer_reward": np.mean(answer_rewards) if answer_rewards else 0.0,
             "eval/duration_seconds": time.time() - eval_start_time,
             "eval/examples": _create_eval_wandb_html(examples),
         }
         if step == self.config.TRAINING_STEPS:
             wandb.summary["final_eval_mean_reward"] = metrics["eval/mean_reward"]
         return metrics
+
+    # ▲▲▲ MODIFICATION END ▲▲▲
 
     async def _client_rollout_worker(
             self, client, server_uri, program_hash, work_queue, queue_lock, client_id, pbar, batch_size
@@ -448,16 +487,20 @@ class ESOrchestrator:
 
         async def _run_batch_with_retry(seeds, tasks, who, max_retries=1):
             for attempt in range(max_retries + 1):
-                tasks_json = json.dumps([item["prompt"] for item in tasks])
+                # Use "problem" key which is consistent across new datasets
+                tasks_json = json.dumps([item["problem"] for item in tasks])
                 args = ["--name", self.config.ADAPTER_NAME, "--seeds", ",".join(map(str, seeds)),
-                        "--tasks-json", tasks_json, "--max-num-outputs", str(self.config.MAX_TOKENS_GEN)]
+                        "--tasks-json", tasks_json, "--max-num-outputs", str(self.config.MAX_TOKENS_GEN),
+                        "--system-prompt", self.config.SYSTEM_PROMPT]
                 res_json = await launch_and_get_result(client, program_hash, args, f"{who}-try{attempt + 1}", self.config.VERBOSE_WORKER_LOGS)
                 if res_json:
                     try:
                         texts = json.loads(res_json)
-                        if isinstance(texts, list) and len(texts) == len(seeds): return texts
+                        if isinstance(texts, list) and len(texts) == len(seeds):
+                            return texts
                     except (json.JSONDecodeError, TypeError):
                         pass
+
             return None
 
         capacity = _compute_capacity()
@@ -487,6 +530,7 @@ class ESOrchestrator:
                     texts_out.extend(texts)
                     seeds_out.extend(seeds)
                     tasks_out.extend(tasks)
+
                 if pbar: pbar.update(len(seeds))
 
                 new_seeds, new_tasks = await _pop_batch()
@@ -509,15 +553,17 @@ class ESOrchestrator:
 async def main():
     """High-level entry point to configure and run the training orchestrator."""
     config = TrainingConfig()
-    # Example of how to use the new checkpointing features:
-    # config.INITIAL_CHECKPOINT_NAME = "evo-countdown-v1-step-10" # Resume from a checkpoint
+    # Example: Switch to the math dataset
+    # config.DATASET_NAME = "math"
+
+    # Example: Resume from a checkpoint
+    # config.INITIAL_CHECKPOINT_NAME = "evo-countdown-v1-step-10"
     orchestrator = ESOrchestrator(config)
     try:
         await orchestrator.setup()
         await orchestrator.train()
     except Exception as e:
         tqdm.write(f"\nAn unexpected error occurred: {e}")
-        # In a real scenario, you might want more specific error handling
         raise
     finally:
         await orchestrator.teardown()
