@@ -396,15 +396,15 @@ class ValidationCheckpoint:
         if self.reference_result is not None:
             # Create temporary file for reference tensor data
             with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix='.tensor') as temp_file:
-                # In a real implementation, this would serialize the actual tensor data
-                temp_file.write(b"mock_reference_tensor_data")
+                # Serialize the actual tensor data
+                temp_file.write(self.reference_result.tobytes())
                 reference_path = temp_file.name
 
             reference_metadata = {
-                "dtype": "float32",  # Would be extracted from actual tensor
-                "shape": [32, 128, 64],  # Would be extracted from actual tensor
-                "stride": [8192, 64, 1],  # Would be extracted from actual tensor
-                "device": "cpu"  # Would be extracted from actual tensor
+                "dtype": str(self.reference_result.dtype),
+                "shape": list(self.reference_result.shape),
+                "stride": list(self.reference_result.strides),
+                "device": "cpu"  # Default for numpy arrays
             }
 
             reference_device_info = {
@@ -428,15 +428,15 @@ class ValidationCheckpoint:
         if self.alternative_result is not None:
             # Create temporary file for alternative tensor data
             with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix='.tensor') as temp_file:
-                # In a real implementation, this would serialize the actual tensor data
-                temp_file.write(b"mock_alternative_tensor_data")
+                # Serialize the actual tensor data
+                temp_file.write(self.alternative_result.tobytes())
                 alternative_path = temp_file.name
 
             alternative_metadata = {
-                "dtype": "float32",  # Would be extracted from actual tensor
-                "shape": [32, 128, 64],  # Would be extracted from actual tensor
-                "stride": [8192, 64, 1],  # Would be extracted from actual tensor
-                "device": "metal:0"  # Would be extracted from actual tensor
+                "dtype": str(self.alternative_result.dtype),
+                "shape": list(self.alternative_result.shape),
+                "stride": list(self.alternative_result.strides),
+                "device": "metal:0"  # Would be determined by actual device context
             }
 
             alternative_device_info = {

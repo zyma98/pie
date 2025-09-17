@@ -13,6 +13,18 @@ import flashinfer as ops
 
 from config.common import ModelInfo
 
+# Import debug framework checkpoint decorator
+try:
+    from debug_framework.decorators.checkpoint_decorator import checkpoint_validation
+    CHECKPOINT_DECORATOR_AVAILABLE = True
+except ImportError:
+    CHECKPOINT_DECORATOR_AVAILABLE = False
+    # Fallback no-op decorator
+    def checkpoint_validation(*args, **kwargs):
+        def decorator(func):
+            return func
+        return decorator
+
 
 class Handler:
     """TODO: Add class docstring."""
@@ -176,6 +188,14 @@ class Handler:
                 pass
 
     @torch.inference_mode()
+    @checkpoint_validation(
+        checkpoint_name="handler_forward_pass",
+        capture_tensors=True,
+        include_metadata=True,
+        tolerance=1e-5,
+        backend_comparison=None,
+        performance_monitoring=True
+    )
     def forward_pass(self, reqs: list[message.ForwardPassRequest]):
         """
         Processes a batch of forward pass requests through the language model.

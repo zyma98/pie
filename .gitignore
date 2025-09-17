@@ -26,6 +26,7 @@ Cargo.lock
 
 # Other local ide/environment
 .claude
+.codex
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -219,6 +220,7 @@ logs
 cuda-protocol-tests*
 metal-protocol-tests*
 cuda_artifacts.tar*
+tensor_references
 
 # Github Spec-kit
 .spec-kit/

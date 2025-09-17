@@ -16,9 +16,11 @@ def main():
         print("Debug Framework CLI Tools", file=sys.stderr)
         print("", file=sys.stderr)
         print("Available commands:", file=sys.stderr)
-        print("  debug-validate    - Validate kernel implementations", file=sys.stderr)
-        print("  plugin-compile    - Compile backend plugins", file=sys.stderr)
-        print("  session-report    - Generate session reports", file=sys.stderr)
+        print("  debug-validate      - Validate kernel implementations", file=sys.stderr)
+        print("  plugin-compile      - Compile backend plugins", file=sys.stderr)
+        print("  session-report      - Generate session reports", file=sys.stderr)
+        print("  generate-references - Generate tensor reference files", file=sys.stderr)
+        print("  verify-references   - Verify tensor reference files against fresh inference", file=sys.stderr)
         print("", file=sys.stderr)
         print("Usage:", file=sys.stderr)
         print("  python -m debug_framework.cli <command> [args...]", file=sys.stderr)
@@ -27,6 +29,8 @@ def main():
         print("  python -m debug_framework.cli debug-validate --backend metal", file=sys.stderr)
         print("  python -m debug_framework.cli plugin-compile --search .", file=sys.stderr)
         print("  python -m debug_framework.cli session-report --list", file=sys.stderr)
+        print("  python -m debug_framework.cli generate-references --output-dir refs", file=sys.stderr)
+        print("  python -m debug_framework.cli verify-references --reference-dir refs/session_123", file=sys.stderr)
         sys.exit(1)
 
     command = sys.argv[1]
@@ -39,7 +43,9 @@ def main():
     command_map = {
         "debug-validate": cli_dir / "debug_validate.py",
         "plugin-compile": cli_dir / "plugin_compile.py",
-        "session-report": cli_dir / "session_report.py"
+        "session-report": cli_dir / "session_report.py",
+        "generate-references": cli_dir / "generate_references.py",
+        "verify-references": cli_dir / "verify_references.py"
     }
 
     if command not in command_map:

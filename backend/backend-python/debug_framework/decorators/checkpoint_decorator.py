@@ -220,12 +220,26 @@ def _extract_tensor_data(result: Any) -> Optional[np.ndarray]:
     # Handle PyTorch tensors
     if hasattr(result, 'detach') and hasattr(result, 'cpu'):
         try:
-            # Convert PyTorch tensor to numpy with minimal copying
-            if hasattr(result, 'numpy'):
-                return result.detach().cpu().numpy()
+            # Detach and move to CPU first
+            tensor_cpu = result.detach().cpu()
+
+            # Handle bfloat16 which is not supported by numpy directly
+            if 'bfloat16' in str(tensor_cpu.dtype):
+                # print(f"DEBUG: Converting bfloat16 to float32 for numpy compatibility")
+                # Import torch locally to avoid import issues
+                import torch
+                tensor_cpu = tensor_cpu.to(torch.float32)
+
+            if hasattr(tensor_cpu, 'numpy'):
+                numpy_result = tensor_cpu.numpy()
+                # print(f"DEBUG: Converted to numpy: shape={numpy_result.shape}, dtype={numpy_result.dtype}")
+                return numpy_result
             else:
-                return np.array(result.detach().cpu())
-        except Exception:
+                numpy_result = np.array(tensor_cpu)
+                # print(f"DEBUG: Converted via np.array: shape={numpy_result.shape}, dtype={numpy_result.dtype}")
+                return numpy_result
+        except Exception as e:
+            # print(f"DEBUG: Failed to convert PyTorch tensor to numpy: {e}")
             return None
 
     # Handle tuples/lists (common in attention outputs)
