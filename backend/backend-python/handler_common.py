@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import time
 from contextlib import contextmanager, nullcontext
 
@@ -140,7 +139,7 @@ class Handler:
                     value = "pong"
             resp = message.QueryResponse(value=value)
             resps.append(resp)
-        return resp
+        return resps
 
     def embed_image(self, reqs: list[message.EmbedImageRequest]):
         """
@@ -519,7 +518,7 @@ class ForwardPassBatch:
 
         num_logit_requests = len(self.indices_for_logits)
         # Initialize result containers. Using lists of Nones helps place results correctly.
-        final_dists = [None] * num_logit_requests
+        final_dists: list[tuple[list[int], list[float]] | None] = [None] * num_logit_requests
         final_tokens_tensor = torch.empty(
             num_logit_requests, dtype=torch.long, device=self._handler.device
         )
