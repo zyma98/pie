@@ -142,10 +142,10 @@ class FlashInferL4maBackend(L4maBackend):
         self._workspace_buffer: Optional[torch.Tensor] = None
         # Type ignore: FlashInfer types are optional dependencies not available in CI
         self._decode_wrapper: Optional[  # type: ignore[name-defined]
-            ops.BatchDecodeWithPagedKVCacheWrapper
+            ops.BatchDecodeWithPagedKVCacheWrapper  # type: ignore[name-defined]
         ] = None
         self._prefill_wrapper: Optional[  # type: ignore[name-defined]
-            ops.BatchPrefillWithPagedKVCacheWrapper
+            ops.BatchPrefillWithPagedKVCacheWrapper  # type: ignore[name-defined]
         ] = None
 
     def _ensure_workspace(self, device: torch.device | str) -> None:
