@@ -106,8 +106,8 @@ class Handler:
     ) -> list[message.HandshakeResponse]:
         """Handle handshake requests."""
         resps = []
-        for _req in reqs:
-            # _req.version
+        for _ in reqs:
+            # Request details not currently used
 
             resp = message.HandshakeResponse(
                 version=self.model_info.version,
@@ -169,10 +169,10 @@ class Handler:
     @torch.inference_mode()
     def initialize_adapter(self, reqs: list[message.InitializeAdapterRequest]):
         """Initialize adapter functionality."""
-        _cfg = self.lm.config
+        # cfg = self.lm.config  # Available if needed
 
-        for _req in reqs:
-            pass
+        for _ in reqs:
+            pass  # Request details not currently used
 
     @torch.inference_mode()
     def update_adapter(self, reqs: list[message.UpdateAdapterRequest]):
@@ -221,18 +221,20 @@ class Handler:
     ) -> list[message.HeartbeatResponse]:
         """Handle heartbeat requests to keep the connection alive."""
         resps = []
-        for _req in reqs:
+        for _ in reqs:
             resps.append(message.HeartbeatResponse())
         return resps
 
-    def upload_handler(self, _reqs: list[message.UploadAdapterRequest]):
+    def upload_handler(self, reqs: list[message.UploadAdapterRequest]):
         """Handle adapter upload requests."""
+        _ = reqs  # Parameter not currently used
         raise NotImplementedError("upload_handler not yet implemented")
 
     def download_handler(
-        self, _reqs: list[message.DownloadAdapterRequest]
+        self, reqs: list[message.DownloadAdapterRequest]
     ) -> list[message.DownloadAdapterResponse]:
         """Handle adapter download requests."""
+        _ = reqs  # Parameter not currently used
         raise NotImplementedError("download_handler not yet implemented")
 
 

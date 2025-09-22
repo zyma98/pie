@@ -43,6 +43,7 @@ from message import (
 
 class HandlerId(enum.Enum):
     """Enumeration of handler message types."""
+
     HANDSHAKE = 0
     HEARTBEAT = 1
     QUERY = 2
@@ -163,16 +164,16 @@ def register(config: Dict[str, Any], endpoint: str) -> None:
     controller_addr = f"ws://{config['controller_host']}:{config['controller_port']}"
     try:
         with connect(controller_addr) as websocket:
-            websocket.send(
-                msgpack.packb(
-                    {
-                        "type": "authenticate",
-                        "corr_id": 0,
-                        "token": config["auth_token"],
-                    },
-                    use_bin_type=True,
-                )
+            auth_msg = msgpack.packb(
+                {
+                    "type": "authenticate",
+                    "corr_id": 0,
+                    "token": config["auth_token"],
+                },
+                use_bin_type=True,
             )
+            if auth_msg is not None:
+                websocket.send(auth_msg)
             auth_response = msgpack.unpackb(websocket.recv(), raw=False)
             if not auth_response.get("successful"):
                 print(
@@ -180,18 +181,18 @@ def register(config: Dict[str, Any], endpoint: str) -> None:
                 )
                 sys.exit(1)
 
-            websocket.send(
-                msgpack.packb(
-                    {
-                        "type": "attach_remote_service",
-                        "corr_id": 0,
-                        "endpoint": endpoint,
-                        "service_name": config["model"],
-                        "service_type": "model",
-                    },
-                    use_bin_type=True,
-                )
+            reg_msg = msgpack.packb(
+                {
+                    "type": "attach_remote_service",
+                    "corr_id": 0,
+                    "endpoint": endpoint,
+                    "service_name": config["model"],
+                    "service_type": "model",
+                },
+                use_bin_type=True,
             )
+            if reg_msg is not None:
+                websocket.send(reg_msg)
             reg_response = msgpack.unpackb(websocket.recv(), raw=False)
             if not reg_response.get("successful"):
                 print(
@@ -265,7 +266,7 @@ def run_zmq_server(socket: zmq.Socket, handler: Any) -> None:
 
             client_identity, corr_id_bytes, handler_id_bytes = message[:3]
             try:
-                _corr_id = struct.unpack(">I", corr_id_bytes)[0]
+                _ = struct.unpack(">I", corr_id_bytes)[0]  # corr_id extracted but not used
                 handler_id = struct.unpack(">I", handler_id_bytes)[0]
                 reqs = [decoders[handler_id].decode(m) for m in message[3:]]
             except (struct.error, KeyError, msgspec.DecodeError) as exc:

@@ -6,7 +6,10 @@ from config.common import ModelInfo
 from model.l4ma import L4maForCausalLM, create_fusion_map as create_l4ma_fusion_map
 from model.l4ma_runtime import FlashInferL4maBackend
 from model.qwen3 import Qwen3ForCausalLM, create_fusion_map as create_qwen3_fusion_map
-from model.gptoss import GPTOSSForCausalLM, create_fusion_map as create_gptoss_fusion_map
+from model.gptoss import (
+    GPTOSSForCausalLM,
+    create_fusion_map as create_gptoss_fusion_map,
+)
 
 
 def create_model_and_fusion_map(model_info: ModelInfo):
