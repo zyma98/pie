@@ -327,26 +327,29 @@ class ForwardPassBatch:
             self.adapter_subpass_needed = True
 
         # Handle KV cache pages
-        self.kv_page_indices.extend(req.kv_page_ptrs)
+        kv_page_ptrs = req.kv_page_ptrs or []
+        self.kv_page_indices.extend(kv_page_ptrs)
         self.kv_page_indptr.append(len(self.kv_page_indices))
-        self.kv_last_page_lengths.append(req.kv_page_last_len)
+        self.kv_last_page_lengths.append(req.kv_page_last_len or 0)
 
         # Handle output mappings for embeddings that need to be stored
-        for token_idx, storage_ptr in zip(
-            req.output_embed_indices, req.output_embed_ptrs
-        ):
+        output_embed_indices = req.output_embed_indices or []
+        output_embed_ptrs = req.output_embed_ptrs or []
+        for token_idx, storage_ptr in zip(output_embed_indices, output_embed_ptrs):
             self.indices_for_embed_storage.append(
                 token_idx + self.total_tokens_in_batch
             )
             self.embed_storage_pointers.append(storage_ptr)
 
         # Handle output mappings for tokens requiring logits.
-        for token_idx in req.output_token_indices:
+        output_token_indices = req.output_token_indices or []
+        for token_idx in output_token_indices:
             self.indices_for_logits.append(token_idx + self.total_tokens_in_batch)
 
         # Extract sampler configurations.
         # sampler_idx=0 is for distributions, existing samplers are shifted by +1.
-        for sampler_config in req.output_token_samplers:
+        output_token_samplers = req.output_token_samplers or []
+        for sampler_config in output_token_samplers:
             params = {}
             sampler_idx = sampler_config["sampler"]
             self.sampler_type.append(sampler_idx)
@@ -384,10 +387,16 @@ class ForwardPassBatch:
                 f"input tokens ({len(req.input_tokens)})."
             )
 
-        sequence_length = (
-            self._handler.kv_page_size * (len(req.kv_page_ptrs) - 1)
-            + req.kv_page_last_len
-        )
+        kv_page_ptrs = req.kv_page_ptrs or []
+        kv_page_last_len = req.kv_page_last_len or 0
+
+        # Ensure we have at least one page for proper computation
+        if len(kv_page_ptrs) >= 1:
+            sequence_length = (
+                self._handler.kv_page_size * (len(kv_page_ptrs) - 1) + kv_page_last_len
+            )
+        else:
+            sequence_length = kv_page_last_len
         context_length = sequence_length - len(req.input_tokens)
 
         request_attention_mask = np.zeros(
@@ -613,7 +622,8 @@ class ForwardPassBatch:
         responses = []
         cursor = 0
         for req in self._original_reqs:
-            num_outputs = len(req.output_token_indices)
+            output_token_indices = req.output_token_indices or []
+            num_outputs = len(output_token_indices)
             request_dists = []
             request_tokens = []
 

@@ -69,12 +69,12 @@ class ForwardPassRequest(msgspec.Struct, gc=False):
     adapter: Optional[int]
     adapter_seed: Optional[int]
     mask: list[list[int]]
-    kv_page_ptrs: list[int]
-    kv_page_last_len: int
-    output_token_indices: list[int]
-    output_token_samplers: list[dict]
-    output_embed_ptrs: list[int]
-    output_embed_indices: list[int]
+    kv_page_ptrs: list[int] = msgspec.field(default_factory=list)
+    kv_page_last_len: int = 0
+    output_token_indices: list[int] = msgspec.field(default_factory=list)
+    output_token_samplers: list[dict] = msgspec.field(default_factory=list)
+    output_embed_ptrs: list[int] = msgspec.field(default_factory=list)
+    output_embed_indices: list[int] = msgspec.field(default_factory=list)
 
 
 class ForwardPassResponse(msgspec.Struct, gc=False):
