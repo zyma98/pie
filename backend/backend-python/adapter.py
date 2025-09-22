@@ -76,7 +76,6 @@ class AdapterSubpass:
             x = xs[x_start:x_end]
 
             rand_seeds = self.rand_seeds[i : i + count]
-            _ = rand_seeds.any().item()  # Check for noise injection (unused for now)
 
             assert x.shape[0] == rand_seeds.shape[0], "Batch size must match seeds."
 
