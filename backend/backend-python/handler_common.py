@@ -335,6 +335,11 @@ class ForwardPassBatch:
         # Handle output mappings for embeddings that need to be stored
         output_embed_indices = req.output_embed_indices or []
         output_embed_ptrs = req.output_embed_ptrs or []
+        if len(output_embed_indices) != len(output_embed_ptrs):
+            raise ValueError(
+                f"Mismatch between output_embed_indices length ({len(output_embed_indices)}) "
+                f"and output_embed_ptrs length ({len(output_embed_ptrs)})"
+            )
         for token_idx, storage_ptr in zip(output_embed_indices, output_embed_ptrs):
             self.indices_for_embed_storage.append(
                 token_idx + self.total_tokens_in_batch
@@ -397,7 +402,17 @@ class ForwardPassBatch:
             )
         else:
             sequence_length = kv_page_last_len
-        context_length = sequence_length - len(req.input_tokens)
+
+        # Validate sequence_length is sufficient for input tokens
+        input_token_count = len(req.input_tokens)
+        if sequence_length < input_token_count:
+            raise ValueError(
+                f"Insufficient sequence length ({sequence_length}) for input tokens "
+                f"({input_token_count}). Sequence length must be at least equal to "
+                f"the number of input tokens."
+            )
+
+        context_length = sequence_length - input_token_count
 
         request_attention_mask = np.zeros(
             (len(req.input_tokens), sequence_length), dtype=np.bool_

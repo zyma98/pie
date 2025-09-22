@@ -48,6 +48,7 @@ class _FlashInferForwardContext(L4maForwardContext):
         config: L4maArch,
         inputs: RuntimeInputs,
         wrapper: FlashInferWrapper,  # type: ignore[name-defined]
+        kv_layout: str,
         batch_indices: torch.Tensor,
         batch_positions: torch.Tensor,
         metadata: FlashInferRuntimeMetadata,
@@ -55,6 +56,7 @@ class _FlashInferForwardContext(L4maForwardContext):
         self._config = config
         self._inputs = inputs
         self.wrapper = wrapper
+        self._kv_layout = kv_layout
         self._batch_indices = batch_indices
         self._batch_positions = batch_positions
         self._metadata = metadata
@@ -105,7 +107,7 @@ class _FlashInferForwardContext(L4maForwardContext):
             kv_indices=self._inputs.kv_page_indices,
             kv_indptr=self._inputs.kv_page_indptr,
             kv_last_page_len=self._inputs.kv_last_page_lens,
-            kv_layout="NHD",
+            kv_layout=self._kv_layout,
         )
 
     def run_attention(
@@ -233,6 +235,7 @@ class FlashInferL4maBackend(L4maBackend):
             config=config,
             inputs=inputs,
             wrapper=wrapper,
+            kv_layout=self.kv_layout,
             batch_indices=batch_indices,
             batch_positions=batch_positions,
             metadata=metadata,
