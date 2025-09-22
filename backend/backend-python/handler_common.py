@@ -51,7 +51,7 @@ class Handler:
         self.max_adapter_rank = max_adapter_rank
         self.dtype = dtype
         self.device = device
-        self.logits_dtype = torch.float32
+        self.logits_dtype = dtype
 
         self.kv_cache_at_layer = [
             torch.zeros(
@@ -490,15 +490,6 @@ class ForwardPassBatch:
 
         logits = self._handler.lm.lm_head(logits_input)
 
-        if logits.size(0) and logits.size(1) > 0:
-            print(
-                "[LogitsDebug] logits shape=",
-                logits.shape,
-                "min=",
-                float(logits.min()),
-                "max=",
-                float(logits.max()),
-            )
 
         # Promote logits to handler dtype for numerically stable softmax on Metal/MPS
         if logits.dtype != self.logits_dtype:
@@ -512,22 +503,9 @@ class ForwardPassBatch:
         ).unsqueeze(1)
         scaled_logits = logits / torch.clamp(temperatures, min=1e-6)
 
-        print(
-            "[LogitsDebug] scaled logits min=",
-            float(torch.min(scaled_logits)),
-            "max=",
-            float(torch.max(scaled_logits)),
-        )
 
         # We compute probabilities for the entire batch of logit requests
         probs = torch.softmax(scaled_logits, dim=-1)
-
-        print(
-            "[LogitsDebug] probs min=",
-            float(torch.min(probs)),
-            "max=",
-            float(torch.max(probs)),
-        )
 
         if not torch.isfinite(probs).all():
             raise RuntimeError("Non-finite probabilities produced by LM head")
@@ -617,6 +595,9 @@ class ForwardPassBatch:
                     raise ValueError(f"Unknown sampler index: {sampler_idx}")
 
                 # Place sampled tokens into the main tensor at their original batch positions
+                # Ensure sampled tokens have the correct dtype (torch.long for token indices)
+                if sampled.dtype != torch.long:
+                    sampled = sampled.to(torch.long)
                 final_tokens_tensor.scatter_(0, indices_tensor, sampled)
 
         # Distribute batched results back to individual responses
