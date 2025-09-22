@@ -71,7 +71,7 @@ class _TorchProfiler:
             _ = exc  # Exception info not currently used
             stop_event = torch.cuda.Event(enable_timing=True)
             stop_event.record(stream=torch.cuda.current_stream())
-            torch.cuda.synchronize()
+            stop_event.synchronize()
             if self.start_event is not None:
                 elapsed_ms = self.start_event.elapsed_time(stop_event)
             else:
