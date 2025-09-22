@@ -84,47 +84,47 @@ class FlashInferOps(BackendOps):
         self, image_blob: bytes, dtype: torch.dtype, device: str
     ) -> torch.Tensor:
         """Decode image using FlashInfer."""
-        if not self.available:
+        if not self.available or self.ops is None:
             raise RuntimeError("FlashInfer not available for image decoding")
-        return self.ops.image.decode_image(image_blob, dtype=dtype, device=device)
+        return self.ops.image.decode_image(image_blob, dtype=dtype, device=device)  # type: ignore
 
     def sampling_from_probs(self, probs: torch.Tensor) -> torch.Tensor:
         """Sample using FlashInfer."""
-        if not self.available:
+        if not self.available or self.ops is None:
             raise RuntimeError("FlashInfer not available for sampling")
-        return self.ops.sampling.sampling_from_probs(probs)
+        return self.ops.sampling.sampling_from_probs(probs)  # type: ignore
 
     def top_p_sampling_from_probs(
         self, probs: torch.Tensor, top_p: torch.Tensor
     ) -> torch.Tensor:
         """Top-p sampling using FlashInfer."""
-        if not self.available:
+        if not self.available or self.ops is None:
             raise RuntimeError("FlashInfer not available for top-p sampling")
-        return self.ops.sampling.top_p_sampling_from_probs(probs, top_p=top_p)
+        return self.ops.sampling.top_p_sampling_from_probs(probs, top_p=top_p)  # type: ignore
 
     def top_k_sampling_from_probs(
         self, probs: torch.Tensor, top_k: torch.Tensor
     ) -> torch.Tensor:
         """Top-k sampling using FlashInfer."""
-        if not self.available:
+        if not self.available or self.ops is None:
             raise RuntimeError("FlashInfer not available for top-k sampling")
-        return self.ops.sampling.top_k_sampling_from_probs(probs, top_k=top_k)
+        return self.ops.sampling.top_k_sampling_from_probs(probs, top_k=top_k)  # type: ignore
 
     def min_p_sampling_from_probs(
         self, probs: torch.Tensor, min_p: torch.Tensor
     ) -> torch.Tensor:
         """Min-p sampling using FlashInfer."""
-        if not self.available:
+        if not self.available or self.ops is None:
             raise RuntimeError("FlashInfer not available for min-p sampling")
-        return self.ops.sampling.min_p_sampling_from_probs(probs, min_p=min_p)
+        return self.ops.sampling.min_p_sampling_from_probs(probs, min_p=min_p)  # type: ignore
 
     def top_k_top_p_sampling_from_probs(
         self, probs: torch.Tensor, top_k: torch.Tensor, top_p: torch.Tensor
     ) -> torch.Tensor:
         """Combined top-k and top-p sampling using FlashInfer."""
-        if not self.available:
+        if not self.available or self.ops is None:
             raise RuntimeError("FlashInfer not available for combined sampling")
-        return self.ops.sampling.top_k_top_p_sampling_from_probs(
+        return self.ops.sampling.top_k_top_p_sampling_from_probs(  # type: ignore
             probs, top_k=top_k, top_p=top_p
         )
 

@@ -1,8 +1,15 @@
+"""
+PyTorch CUDA profiler for hierarchical performance analysis.
+
+This module provides a profiler that tracks nested operations and reports
+timing statistics in a hierarchical tree structure.
+"""
+
 from __future__ import annotations
 
-from collections import defaultdict
 from contextlib import ContextDecorator
 from dataclasses import dataclass, field
+
 import numpy as np
 import torch
 
@@ -12,6 +19,7 @@ class _TorchProfiler:
 
     @dataclass
     class Node:
+        """Represents a profiling node in the call tree."""
         name: str
         parent: _TorchProfiler.Node | None
         children: list[_TorchProfiler.Node] = field(default_factory=list)
@@ -45,6 +53,7 @@ class _TorchProfiler:
         return self.Timer(self, self._node_map[full_path])
 
     class Timer(ContextDecorator):
+        """Context manager for timing a specific profiling scope."""
         def __init__(self, profiler: _TorchProfiler, node: _TorchProfiler.Node):
             self.profiler = profiler
             self.node = node
@@ -76,8 +85,8 @@ class _TorchProfiler:
         for node in self._node_map.values():
             if node.times:
                 node.count = len(node.times)
-                node.mean = np.mean(node.times)
-                node.std = np.std(node.times)
+                node.mean = float(np.mean(node.times))
+                node.std = float(np.std(node.times))
 
         def calculate_total(node: _TorchProfiler.Node) -> float:
             children_total = sum(calculate_total(child) for child in node.children)
@@ -87,9 +96,9 @@ class _TorchProfiler:
         calculate_total(self.root)
 
         print("\n--- 🌲 Performance Report 🌲 ---")
-        print(
-            f"{'Operation':<50} {'Avg Latency (ms)':<20} {'% of Parent':<15} {'Std Dev (ms)':<20} {'Samples':<10}"
-        )
+        headers = f"{'Operation':<50} {'Avg Latency (ms)':<20} {'% of Parent':<15}"
+        headers += f" {'Std Dev (ms)':<20} {'Samples':<10}"
+        print(headers)
         print("-" * 115)
 
         def print_node(
