@@ -62,14 +62,18 @@ class _TorchProfiler:
         def __enter__(self):
             self.profiler.active_node = self.node
             self.start_event = torch.cuda.Event(enable_timing=True)
-            self.start_event.record()
+            self.start_event.record(stream=torch.cuda.current_stream())
             return self
 
         def __exit__(self, *exc):
+            _ = exc  # Exception info not currently used
             stop_event = torch.cuda.Event(enable_timing=True)
-            stop_event.record()
+            stop_event.record(stream=torch.cuda.current_stream())
             torch.cuda.synchronize()
-            elapsed_ms = self.start_event.elapsed_time(stop_event)
+            if self.start_event is not None:
+                elapsed_ms = self.start_event.elapsed_time(stop_event)
+            else:
+                elapsed_ms = 0.0
             self.node.times.append(elapsed_ms)
 
             if self.node.parent:
