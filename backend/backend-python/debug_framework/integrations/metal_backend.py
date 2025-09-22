@@ -24,13 +24,38 @@ class MetalBackend(BackendInterface):
     tensor operations, executing on Apple's Metal Performance Shaders.
     """
 
-    def __init__(self, metal_backend_path: Optional[str] = None):
+    def __init__(self, metal_backend_path: Optional[str] = None, model_metadata: Optional[Dict[str, Any]] = None):
         super().__init__(BackendType.METAL)
         self.metal_backend_path = metal_backend_path
         self._metal_executor = None
         self._metallib_path: Optional[str] = None
         self._available_kernels: Dict[str, bool] = {}
         self._device_info: Optional[str] = None
+
+        # Store model metadata for attention parameters
+        self._model_metadata = model_metadata or {}
+        self._attention_config = self._extract_attention_config()
+
+    def _extract_attention_config(self) -> Dict[str, int]:
+        """Extract attention configuration from model metadata."""
+        if not self._model_metadata:
+            # Return default values if no metadata available
+            return {
+                'num_query_heads': 32,
+                'num_kv_heads': 32,
+                'head_size': 128,
+                'page_size': 16
+            }
+
+        # Extract from architecture section of metadata
+        architecture = self._model_metadata.get('architecture', {})
+
+        return {
+            'num_query_heads': architecture.get('num_query_heads', 32),
+            'num_kv_heads': architecture.get('num_key_value_heads', 32),  # Note: different key name in metadata
+            'head_size': architecture.get('head_size', 128),
+            'page_size': 16  # This is not in model metadata, it's a runtime parameter
+        }
 
     def initialize(self) -> bool:
         """Initialize Metal backend."""
@@ -161,11 +186,11 @@ class MetalBackend(BackendInterface):
             if not self._available_kernels.get('attention', False):
                 raise RuntimeError("Metal attention kernels not available")
 
-            # Execute Metal attention kernel
-            num_query_heads = kwargs.get('num_query_heads', 32)
-            num_kv_heads = kwargs.get('num_kv_heads', 32)
-            head_size = kwargs.get('head_size', 128)
-            page_size = kwargs.get('page_size', 16)
+            # Use attention configuration from model metadata
+            num_query_heads = self._attention_config['num_query_heads']
+            num_kv_heads = self._attention_config['num_kv_heads']
+            head_size = self._attention_config['head_size']
+            page_size = self._attention_config['page_size']
 
             result = self._metal_executor.execute_attention(
                 query.astype(np.float32),
@@ -196,6 +221,98 @@ class MetalBackend(BackendInterface):
             self.increment_error_count()
             raise RuntimeError(f"Metal attention computation failed: {e}")
 
+    def run_attention_with_kv_cache(
+        self,
+        query: np.ndarray,
+        kv_cache: np.ndarray,
+        kv_page_indices: Optional[np.ndarray] = None,
+        kv_page_indptr: Optional[np.ndarray] = None,
+        kv_last_page_lens: Optional[np.ndarray] = None,
+        **kwargs
+    ) -> TensorComputationResult:
+        """
+        Run attention computation using L4MA/FlashInfer KV cache layout.
+
+        This method calls the Metal kernel with the EXACT SAME KV cache layout as L4MA/FlashInfer.
+
+        Args:
+            query: Query tensor from FlashInfer [batch*seq, num_heads, head_size]
+            kv_cache: KV cache tensor from L4MA in paged format
+            kv_page_indices: Page indices for KV cache
+            kv_page_indptr: Page pointers for KV cache
+            kv_last_page_lens: Last page lengths for KV cache
+            **kwargs: Additional parameters
+
+        Returns:
+            TensorComputationResult with attention output using REAL FlashInfer inputs
+        """
+        start_time = time.perf_counter()
+
+        try:
+            if not self._metal_executor:
+                raise RuntimeError("Metal executor not initialized")
+
+            # Check if attention kernels are available
+            if not self._available_kernels.get('attention', False):
+                raise RuntimeError("Metal attention kernels not available")
+
+            # Convert query to 2D format expected by Metal binding
+            if len(query.shape) == 3:  # [batch*seq, num_heads, head_size]
+                batch_seq, num_heads, head_size = query.shape
+                query_2d = query.reshape(batch_seq, num_heads * head_size)
+            elif len(query.shape) == 2:  # Already [batch*seq, num_heads * head_size]
+                query_2d = query
+                batch_seq = query.shape[0]
+            else:
+                raise ValueError(f"Unsupported query shape: {query.shape}")
+
+            # Create default page indices if not provided (for debug framework)
+            if kv_page_indices is None or kv_page_indptr is None or kv_last_page_lens is None:
+                # Simple debug setup
+                kv_page_indices = np.array([0], dtype=np.int32)
+                kv_page_indptr = np.array([0, 1], dtype=np.int32)
+                kv_last_page_lens = np.array([batch_seq], dtype=np.int32)
+
+            # Use the new Metal binding method that accepts L4MA KV cache format
+            # Pass all parameters as positional arguments (pybind11 requirement)
+            result = self._metal_executor.execute_attention_with_kv_cache(
+                query_2d.astype(np.float32),
+                kv_cache.astype(np.float32),
+                kv_page_indices.astype(np.int32),
+                kv_page_indptr.astype(np.int32),
+                kv_last_page_lens.astype(np.int32),
+                self._attention_config['num_query_heads'],
+                self._attention_config['num_kv_heads'],
+                self._attention_config['head_size'],
+                self._attention_config['page_size']
+            )
+
+            computation_time = time.perf_counter() - start_time
+            self.record_performance("attention_kv_cache", computation_time)
+
+            print(f"✅ Metal KV cache attention completed:")
+            print(f"   Query: {query.shape} → Output: {result.shape}")
+            print(f"   KV cache: {kv_cache.shape}")
+            print(f"   Computation time: {computation_time:.4f}s")
+
+            return TensorComputationResult(
+                output=result,
+                computation_time=computation_time,
+                backend_type=self.backend_type,
+                metadata={
+                    'operation': 'metal_attention_kv_cache',
+                    'query_shape': query.shape,
+                    'kv_cache_shape': kv_cache.shape,
+                    'device': self._device_info,
+                    'kernels_available': self._available_kernels.get('attention', False),
+                    'use_real_kv_cache': True
+                }
+            )
+
+        except Exception as e:
+            self.increment_error_count()
+            raise RuntimeError(f"Metal KV cache attention computation failed: {e}")
+
     def run_mlp(
         self,
         hidden_states: np.ndarray,
@@ -217,18 +334,10 @@ class MetalBackend(BackendInterface):
             if not self._available_kernels.get('mlp', False):
                 raise RuntimeError("Metal MLP kernels not available")
 
-            # Execute Metal MLP kernel
-            # For debug framework, create dummy weight tensors
-            batch_size, hidden_dim = hidden_states.shape
-            gate_weight = np.random.randn(hidden_dim, hidden_dim * 4).astype(np.float32)
-            up_weight = np.random.randn(hidden_dim, hidden_dim * 4).astype(np.float32)
-            down_weight = np.random.randn(hidden_dim * 4, hidden_dim).astype(np.float32)
-
+            # Execute Metal MLP kernel (simplified for debug framework)
+            # The C++ bindings handle the MLP computation internally
             result = self._metal_executor.execute_mlp(
-                hidden_states.astype(np.float32),
-                gate_weight,
-                up_weight,
-                down_weight
+                hidden_states.astype(np.float32)
             )
 
             computation_time = time.perf_counter() - start_time

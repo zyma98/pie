@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from contextlib import contextmanager, nullcontext
 
@@ -11,6 +12,7 @@ import torch
 import message
 from adapter import AdapterSubpass
 from config.common import ModelInfo
+from debug_utils import is_tensor_debug_enabled
 
 # Import debug framework checkpoint decorator
 try:
@@ -61,6 +63,7 @@ class Handler:
         self.max_adapter_rank = max_adapter_rank
         self.dtype = dtype
         self.device = device
+        self.logits_dtype = torch.float32
 
         self.kv_cache_at_layer = [
             torch.zeros(
@@ -273,6 +276,7 @@ class ForwardPassBatch:
     def __init__(self, handler: Handler):
         """Initializes the batch processor."""
         self._handler = handler
+        self.logits_dtype = getattr(handler, "logits_dtype", handler.dtype)
         self._original_reqs: list[message.ForwardPassRequest] = []
 
         # Inputs for the model
@@ -414,6 +418,26 @@ class ForwardPassBatch:
         )
         input_embeds = self._handler.lm.model.embed_tokens(token_ids_tensor)
 
+        if input_embeds.numel() and is_tensor_debug_enabled():
+            embed_min, embed_max = input_embeds.aminmax()
+            has_nan = torch.isnan(input_embeds).any().item()
+            has_inf = torch.isinf(input_embeds).any().item()
+            print(
+                "[MetalTensorDebug] stage=input_embeds",
+                "dtype=",
+                input_embeds.dtype,
+                "device=",
+                input_embeds.device,
+                "min=",
+                float(embed_min),
+                "max=",
+                float(embed_max),
+                "has_nan=",
+                bool(has_nan),
+                "has_inf=",
+                bool(has_inf),
+            )
+
         return {
             "input_embeds": input_embeds,
             "position_ids": torch.as_tensor(
@@ -457,18 +481,53 @@ class ForwardPassBatch:
             ]
 
         # Calculate logits for all required tokens (both dists and samples)
-        logits = self._handler.lm.lm_head(output_embeds[self.indices_for_logits])
+        logits_input = output_embeds[self.indices_for_logits]
+        if logits_input.dtype != self.logits_dtype:
+            logits_input = logits_input.to(self.logits_dtype)
+
+        logits = self._handler.lm.lm_head(logits_input)
+
+        if logits.size(0) and logits.size(1) > 0:
+            print(
+                "[LogitsDebug] logits shape=",
+                logits.shape,
+                "min=",
+                float(logits.min()),
+                "max=",
+                float(logits.max()),
+            )
+
+        # Promote logits to handler dtype for numerically stable softmax on Metal/MPS
+        if logits.dtype != self.logits_dtype:
+            logits = logits.to(dtype=self.logits_dtype)
 
         # Apply temperature scaling to all logits
         temperatures = torch.tensor(
             [p["temperature"] for p in self.sampler_params],
             device=self._handler.device,
-            dtype=self._handler.dtype,
+            dtype=self.logits_dtype,
         ).unsqueeze(1)
         scaled_logits = logits / torch.clamp(temperatures, min=1e-6)
 
+        print(
+            "[LogitsDebug] scaled logits min=",
+            float(torch.min(scaled_logits)),
+            "max=",
+            float(torch.max(scaled_logits)),
+        )
+
         # We compute probabilities for the entire batch of logit requests
         probs = torch.softmax(scaled_logits, dim=-1)
+
+        print(
+            "[LogitsDebug] probs min=",
+            float(torch.min(probs)),
+            "max=",
+            float(torch.max(probs)),
+        )
+
+        if not torch.isfinite(probs).all():
+            raise RuntimeError("Non-finite probabilities produced by LM head")
 
         # Group requests by sampler type for efficient batch processing
         sampler_groups = {}

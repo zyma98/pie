@@ -81,7 +81,8 @@ class MetalKernelValidator:
         metal_backend_path: Optional[str] = None,
         artifact_manager: Optional[ArtifactManager] = None,
         tolerance: float = 1e-5,
-        enable_performance_profiling: bool = True
+        enable_performance_profiling: bool = True,
+        model_metadata: Optional[Dict[str, Any]] = None
     ):
         """
         Initialize the Metal kernel validator.
@@ -104,7 +105,7 @@ class MetalKernelValidator:
         self.metal_backend = None
         if METAL_INTEGRATION_AVAILABLE and self.is_macos:
             try:
-                self.metal_backend = MetalBackend(metal_backend_path)
+                self.metal_backend = MetalBackend(metal_backend_path, model_metadata)
                 self.metal_available = self.metal_backend.initialize()
             except Exception as e:
                 warnings.warn(f"Failed to initialize Metal backend: {e}")
