@@ -2,15 +2,16 @@
 
 import os
 
-# Import debug framework checkpoint decorator
-try:
-    from debug_framework.decorators.checkpoint_decorator import checkpoint_validation
-except ImportError:
-    def checkpoint_validation(*args, **kwargs):
-        """Fallback no-op decorator when debug framework is not available."""
-        def decorator(func):
-            return func
-        return decorator
+def checkpoint_validation(*args, **kwargs):
+    """No-op decorator for checkpoint validation.
+
+    Accepts any arguments including checkpoint_name, capture_tensors,
+    include_metadata, etc. but ignores them and returns the original function.
+    Used as a placeholder since debug framework is not available.
+    """
+    def decorator(func):
+        return func
+    return decorator
 
 
 def is_tensor_debug_enabled() -> bool:

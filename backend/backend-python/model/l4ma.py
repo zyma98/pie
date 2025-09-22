@@ -15,6 +15,7 @@ from torch import nn
 
 from adapter import AdapterSubpass
 from config.l4ma import L4maArch
+from config.common import TensorLoader
 from .l4ma_runtime import L4maBackend, L4maForwardContext, RuntimeInputs
 from debug_utils import is_tensor_debug_enabled, checkpoint_validation
 
