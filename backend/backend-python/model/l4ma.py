@@ -481,7 +481,7 @@ class L4maDecoderLayer(nn.Module):
             pre_norm_nan = torch.isnan(hidden_states).any().item()
             pre_norm_inf = torch.isinf(hidden_states).any().item()
             weight = self.input_layernorm.weight
-            weight_min, weight_max = weight.aminmax()
+            weight_min, weight_max = tuple(weight.aminmax())
             with torch.no_grad():
                 manual_input = hidden_states.to(torch.float32)
                 eps = self.input_layernorm.eps or 1e-6
@@ -502,7 +502,7 @@ class L4maDecoderLayer(nn.Module):
                 "max=",
                 float(weight_max),
                 "sample=",
-                [float(x) for x in weight.flatten()[:8].cpu()],
+                weight.flatten().detach().cpu().numpy().tolist()[:8],
             )
             print(
                 "[MetalTensorDebug]",
@@ -584,7 +584,7 @@ class L4maDecoderLayer(nn.Module):
             post_attn_norm_nan = torch.isnan(hidden_states).any().item()
             post_attn_norm_inf = torch.isinf(hidden_states).any().item()
             weight = self.post_attention_layernorm.weight
-            weight_min, weight_max = weight.aminmax()
+            weight_min, weight_max = tuple(weight.aminmax())
             with torch.no_grad():
                 manual_input = residual.to(torch.float32)
                 eps = self.post_attention_layernorm.eps or 1e-6
@@ -605,7 +605,7 @@ class L4maDecoderLayer(nn.Module):
                 "max=",
                 float(weight_max),
                 "sample=",
-                [float(x) for x in weight.flatten()[:8].cpu()],
+                weight.flatten().detach().cpu().numpy().tolist()[:8],
             )
             print(
                 "[MetalTensorDebug]",

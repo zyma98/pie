@@ -740,9 +740,6 @@ requires-dist = [
 ]
 provides-extras = ["cuda", "macos", "debug"]
 
-[package.metadata.requires-dev]
-debug = [{ name = "mypy", specifier = ">=1.17.1" }]
-
 [[package]]
 name = "platformdirs"
 version = "4.3.8"
