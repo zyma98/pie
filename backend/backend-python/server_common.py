@@ -266,7 +266,9 @@ def run_zmq_server(socket: zmq.Socket, handler: Any) -> None:
 
             client_identity, corr_id_bytes, handler_id_bytes = message[:3]
             try:
-                _ = struct.unpack(">I", corr_id_bytes)[0]  # corr_id extracted but not used
+                _ = struct.unpack(">I", corr_id_bytes)[
+                    0
+                ]  # corr_id extracted but not used
                 handler_id = struct.unpack(">I", handler_id_bytes)[0]
                 reqs = [decoders[handler_id].decode(m) for m in message[3:]]
             except (struct.error, KeyError, msgspec.DecodeError) as exc:
