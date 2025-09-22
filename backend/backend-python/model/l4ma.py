@@ -16,20 +16,7 @@ from torch import nn
 from adapter import AdapterSubpass
 from config.l4ma import L4maArch
 from .l4ma_runtime import L4maBackend, L4maForwardContext, RuntimeInputs
-from debug_utils import is_tensor_debug_enabled
-
-# Import debug framework checkpoint decorator
-try:
-    from debug_framework.decorators.checkpoint_decorator import checkpoint_validation
-    CHECKPOINT_DECORATOR_AVAILABLE = True
-except ImportError:
-    CHECKPOINT_DECORATOR_AVAILABLE = False
-
-    def checkpoint_validation(*args, **kwargs):  # type: ignore[override]
-        def decorator(func):
-            return func
-
-        return decorator
+from debug_utils import is_tensor_debug_enabled, checkpoint_validation
 
 VERSION = "0.1.0"
 

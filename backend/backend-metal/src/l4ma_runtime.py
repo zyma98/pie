@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
-import os
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -17,6 +17,7 @@ if str(BACKEND_PYTHON_PATH) not in sys.path:
 
 from model.l4ma_runtime.base import L4maBackend, L4maForwardContext, RuntimeInputs
 from config.l4ma import L4maArch
+from debug_utils import is_tensor_debug_enabled, is_capture_debug_enabled
 
 try:  # pragma: no cover - optional dependency guard
     from debug_framework.integrations.metal_backend import MetalBackend
@@ -53,6 +54,20 @@ class _MetalForwardContext(L4maForwardContext):
         self._inputs = inputs
         self._backend = backend
         self._metadata = metadata
+
+        capture_env = os.environ.get("METAL_CAPTURE_BOTH_PATHS", "0").lower()
+        self._capture_both_paths = capture_env in {"1", "true", "yes", "on"}
+        force_env = os.environ.get("METAL_FORCE_REFERENCE_OUTPUT", "0").lower()
+        self._force_reference_output = force_env in {"1", "true", "yes", "on"}
+
+
+        self._capture_output_dir: Path | None = None
+        self._capture_counter = 0
+        if self._capture_both_paths:
+            capture_dir_env = os.environ.get("METAL_CAPTURE_OUTPUT_DIR")
+            if capture_dir_env:
+                self._capture_output_dir = Path(capture_dir_env).expanduser()
+                self._capture_output_dir.mkdir(parents=True, exist_ok=True)
 
         # Derive batch indices/positions in a backend-agnostic way.
         self._batch_indices = self._compute_batch_indices(inputs.qo_indptr, inputs.num_tokens, device=config.device)
@@ -136,7 +151,7 @@ class _MetalForwardContext(L4maForwardContext):
         page_size = self._metadata.page_size
         kv_indices = self._inputs.kv_page_indices
 
-        if key_states.numel():
+        if key_states.numel() and is_tensor_debug_enabled():
             k_min, k_max = key_states.aminmax()
             k_nan = torch.isnan(key_states).any().item()
             k_inf = torch.isinf(key_states).any().item()
@@ -156,7 +171,7 @@ class _MetalForwardContext(L4maForwardContext):
                 bool(k_inf),
             )
 
-        if value_states.numel():
+        if value_states.numel() and is_tensor_debug_enabled():
             v_min, v_max = value_states.aminmax()
             v_nan = torch.isnan(value_states).any().item()
             v_inf = torch.isinf(value_states).any().item()
@@ -198,8 +213,13 @@ class _MetalForwardContext(L4maForwardContext):
             raise RuntimeError("Metal backend is not available")
 
         try:
-            query_np = query_states.detach().cpu().numpy()
-            cache_np = kv_cache_layer.detach().cpu().numpy()
+            original_dtype = query_states.dtype
+
+            query_cpu = query_states.detach().to(device="cpu", dtype=torch.float32)
+            cache_cpu = kv_cache_layer.detach().to(device="cpu", dtype=torch.float32)
+
+            query_np = query_cpu.numpy()
+            cache_np = cache_cpu.numpy()
             kv_indices_np = self._inputs.kv_page_indices.detach().cpu().numpy()
             kv_indptr_np = self._inputs.kv_page_indptr.detach().cpu().numpy()
             kv_last_len_np = self._inputs.kv_last_page_lens.detach().cpu().numpy()
@@ -225,14 +245,15 @@ class _MetalForwardContext(L4maForwardContext):
                 kv_page_indptr=kv_indptr_np,
                 kv_last_page_lens=kv_last_len_np,
             )
-
         except Exception as exc:
             raise RuntimeError(f"Metal attention execution failed: {exc}") from exc
 
         if not hasattr(result, "output") or result.output is None:
             raise RuntimeError("Metal attention execution returned no output")
 
-        output = torch.from_numpy(result.output).to(device=query_states.device, dtype=query_states.dtype)
+        output = torch.from_numpy(result.output).to(device=query_states.device, dtype=torch.float32)
+        if output.dtype != original_dtype:
+            output = output.to(original_dtype)
         if not torch.isfinite(output).all():
             raise RuntimeError("Metal attention execution produced non-finite values")
 
@@ -242,12 +263,87 @@ class _MetalForwardContext(L4maForwardContext):
                   "max=", float(output.max()),
                   "has_nan=", bool(torch.isnan(output).any()))
 
-        if os.environ.get("METAL_DEBUG_COMPARE", "0") == "1":
+        debug_compare = os.environ.get("METAL_DEBUG_COMPARE", "0") == "1"
+        compute_reference = self._capture_both_paths or debug_compare or self._force_reference_output
+        ref_output: torch.Tensor | None = None
+
+        if compute_reference:
             ref_output = self._compute_torch_reference(layer_idx, query_states, kv_cache_layer)
-            diff = torch.max(torch.abs(output - ref_output)).item()
+
+        if self._capture_both_paths and ref_output is not None:
+            self._record_attention_snapshot(layer_idx, output, ref_output)
+
+        if debug_compare and ref_output is not None:
+            diff = torch.max(torch.abs(output.to(torch.float32) - ref_output.to(torch.float32))).item()
             print("[MetalCompareDebug] max |metal - torch| =", diff)
 
+        if self._force_reference_output and ref_output is not None:
+            if ref_output.dtype != original_dtype:
+                ref_output = ref_output.to(original_dtype)
+            output = ref_output.to(device=query_states.device)
+            if is_capture_debug_enabled():
+                print(
+                    "[MetalCaptureDebug]",
+                    f"layer={layer_idx}",
+                    "using_reference_output=1",
+                )
+
         return output.view(query_states.size(0), -1)
+
+    def _record_attention_snapshot(
+        self,
+        layer_idx: int,
+        metal_output: torch.Tensor,
+        reference_output: torch.Tensor,
+    ) -> None:
+        metal_cpu = metal_output.detach().to(device="cpu", dtype=torch.float32)
+        reference_cpu = reference_output.detach().to(device="cpu", dtype=torch.float32)
+
+        if metal_cpu.numel() == 0:
+            return
+
+        diff_cpu = metal_cpu - reference_cpu
+        abs_diff_cpu = diff_cpu.abs()
+        token_norms = abs_diff_cpu.max(dim=1).values
+        metal_min, metal_max = float(metal_cpu.min().item()), float(metal_cpu.max().item())
+        ref_min, ref_max = float(reference_cpu.min().item()), float(reference_cpu.max().item())
+        diff_max = float(abs_diff_cpu.max().item())
+        diff_mean = float(abs_diff_cpu.mean().item()) if abs_diff_cpu.numel() else 0.0
+
+        worst_token_idx = int(token_norms.argmax().item()) if token_norms.numel() else -1
+        worst_token = int(self._inputs.batch_token_indices[worst_token_idx].item()) if worst_token_idx >= 0 and hasattr(self._inputs, "batch_token_indices") else worst_token_idx
+
+        if is_capture_debug_enabled():
+            print(
+                "[MetalCaptureDebug]",
+                f"layer={layer_idx}",
+                f"tokens={metal_cpu.size(0)}",
+                f"metal_min={metal_min:.6f}",
+                f"metal_max={metal_max:.6f}",
+                f"ref_min={ref_min:.6f}",
+                f"ref_max={ref_max:.6f}",
+                f"diff_max={diff_max:.6f}",
+                f"diff_mean={diff_mean:.6f}",
+                f"worst_token={worst_token}",
+            )
+
+        if self._capture_output_dir:
+            capture_path = self._capture_output_dir / (
+                f"layer_{layer_idx:02d}_capture_{self._capture_counter:03d}.pt"
+            )
+            torch.save(
+                {
+                    "layer_idx": layer_idx,
+                    "metal": metal_cpu,
+                    "reference": reference_cpu,
+                    "diff_max": diff_max,
+                    "diff_mean": diff_mean,
+                    "worst_token_idx": worst_token_idx,
+                    "token_norms": token_norms,
+                },
+                capture_path,
+            )
+        self._capture_counter += 1
 
     def _compute_torch_reference(
         self,
@@ -282,7 +378,7 @@ class _MetalForwardContext(L4maForwardContext):
         key_tensor = torch.cat(keys, dim=0)
         value_tensor = torch.cat(values, dim=0)
 
-        if key_tensor.numel():
+        if key_tensor.numel() and is_tensor_debug_enabled():
             key_tensor_min, key_tensor_max = key_tensor.aminmax()
             key_tensor_nan = torch.isnan(key_tensor).any().item()
             key_tensor_inf = torch.isinf(key_tensor).any().item()
@@ -302,7 +398,7 @@ class _MetalForwardContext(L4maForwardContext):
                 bool(key_tensor_inf),
             )
 
-        if value_tensor.numel():
+        if value_tensor.numel() and is_tensor_debug_enabled():
             value_tensor_min, value_tensor_max = value_tensor.aminmax()
             value_tensor_nan = torch.isnan(value_tensor).any().item()
             value_tensor_inf = torch.isinf(value_tensor).any().item()
@@ -340,7 +436,7 @@ class _MetalForwardContext(L4maForwardContext):
             is_causal=True,
         )
 
-        if attn_out.numel():
+        if attn_out.numel() and is_tensor_debug_enabled():
             ref_min, ref_max = attn_out.aminmax()
             ref_nan = torch.isnan(attn_out).any().item()
             ref_inf = torch.isinf(attn_out).any().item()

@@ -966,3 +966,21 @@ class GPTOSSForCausalLM(nn.Module):
         'torch.nn.modules.module' so must be overridden in child class.
         """
         raise NotImplementedError("Should not be called")
+
+
+__all__ = [
+    "convert_mxfp4_to_bf16",
+    "create_fusion_map",
+    "GPTOSSTensorLoader",
+    "GPTOSSRMSNorm",
+    "GPTOSSRotaryEmbedding",
+    "swiglu",
+    "GPTOSSAttention",
+    "GPTOSSRouter",
+    "GPTOSSExperts",
+    "GPTOSSMlp",
+    "GPTOSSDecoderLayer",
+    "GPTOSSModel",
+    "GPTOSSForCausalLM",
+    "VERSION",
+]

@@ -498,3 +498,15 @@ class Qwen3ForCausalLM(nn.Module):
         'torch.nn.modules.module' so must be overridden in child class.
         """
         raise NotImplementedError("Should not be called")
+
+
+__all__ = [
+    "create_fusion_map",
+    "Qwen3TensorLoader",
+    "Qwen3Mlp",
+    "Qwen3Attention",
+    "Qwen3DecoderLayer",
+    "Qwen3Model",
+    "Qwen3ForCausalLM",
+    "VERSION",
+]

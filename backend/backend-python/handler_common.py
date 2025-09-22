@@ -12,19 +12,7 @@ import torch
 import message
 from adapter import AdapterSubpass
 from config.common import ModelInfo
-from debug_utils import is_tensor_debug_enabled
-
-# Import debug framework checkpoint decorator
-try:
-    from debug_framework.decorators.checkpoint_decorator import checkpoint_validation
-    CHECKPOINT_DECORATOR_AVAILABLE = True
-except ImportError:
-    CHECKPOINT_DECORATOR_AVAILABLE = False
-    # Fallback no-op decorator
-    def checkpoint_validation(*args, **kwargs):
-        def decorator(func):
-            return func
-        return decorator
+from debug_utils import is_tensor_debug_enabled, checkpoint_validation
 
 
 class Handler:
@@ -225,6 +213,21 @@ class Handler:
             responses = batch.package_responses(output_embeds)
 
         return responses
+
+    def heartbeat(self, reqs: list[message.HeartbeatRequest]) -> list[message.HeartbeatResponse]:
+        """Handle heartbeat requests to keep the connection alive."""
+        resps = []
+        for req in reqs:
+            resps.append(message.HeartbeatResponse())
+        return resps
+
+    def upload_handler(self, reqs: list[message.UploadAdapterRequest]):
+        """Handle adapter upload requests."""
+        raise NotImplementedError("upload_handler not yet implemented")
+
+    def download_handler(self, reqs: list[message.DownloadAdapterRequest]) -> list[message.DownloadAdapterResponse]:
+        """Handle adapter download requests."""
+        raise NotImplementedError("download_handler not yet implemented")
 
 
 @contextmanager
