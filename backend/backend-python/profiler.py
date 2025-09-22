@@ -20,6 +20,7 @@ class _TorchProfiler:
     @dataclass
     class Node:
         """Represents a profiling node in the call tree."""
+
         name: str
         parent: _TorchProfiler.Node | None
         children: list[_TorchProfiler.Node] = field(default_factory=list)
@@ -54,6 +55,7 @@ class _TorchProfiler:
 
     class Timer(ContextDecorator):
         """Context manager for timing a specific profiling scope."""
+
         def __init__(self, profiler: _TorchProfiler, node: _TorchProfiler.Node):
             self.profiler = profiler
             self.node = node

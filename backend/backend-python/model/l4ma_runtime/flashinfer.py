@@ -12,6 +12,7 @@ from .base import L4maBackend, L4maForwardContext, RuntimeInputs
 
 try:  # pragma: no cover - optional dependency guard
     import flashinfer as ops  # type: ignore[import]
+
     # FlashInfer wrapper types - using object as fallback for type checking
     # Union type not available when FlashInfer is missing
     FlashInferWrapper = object  # type: ignore[misc]
@@ -127,9 +128,7 @@ class FlashInferL4maBackend(L4maBackend):
         return ops is not None
 
     def __init__(
-        self,
-        workspace_size_bytes: int = 128 * 1024 * 1024,
-        kv_layout: str = "NHD"
+        self, workspace_size_bytes: int = 128 * 1024 * 1024, kv_layout: str = "NHD"
     ) -> None:
         if ops is None:
             raise RuntimeError(
