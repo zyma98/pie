@@ -69,6 +69,11 @@ def load_model(
 
                     if name in model_state_keys and name not in loaded_keys:
                         tensor_data = reader.read_tensor(name, to="torch")
+                        if tensor_data is None:
+                            print(
+                                f"    Warning: Could not read tensor '{name}'. Skipping."
+                            )
+                            continue
                         param = model.state_dict()[name]
 
                         if tensor_data.shape != param.shape:
@@ -76,24 +81,52 @@ def load_model(
                                 f"    Warning: Shape mismatch for tensor '{name}'. Skipping."
                             )
                             continue
-                        if tensor_data.dtype != param.dtype:
-                            tensor_data = tensor_data.to(dtype=param.dtype)
-                        if tensor_data.device != param.device:
-                            tensor_data = tensor_data.to(device=param.device)
+                        # Ensure dtype/device compatibility using a single conversion
+                        if hasattr(tensor_data, "to"):
+                            needs_conversion = False
+                            conversion_kwargs = {}
+
+                            if hasattr(tensor_data, "dtype"):
+                                tensor_dtype = getattr(tensor_data, "dtype")
+                                if tensor_dtype != param.dtype:
+                                    conversion_kwargs["dtype"] = param.dtype
+                                    needs_conversion = True
+
+                            if hasattr(tensor_data, "device"):
+                                tensor_device = getattr(tensor_data, "device")
+                                if tensor_device != param.device:
+                                    conversion_kwargs["device"] = param.device
+                                    needs_conversion = True
+
+                            if needs_conversion:
+                                to_method = getattr(tensor_data, "to")
+                                tensor_data = to_method(**conversion_kwargs)
 
                         if name == "model.layers.0.input_layernorm.weight":
                             print("[ModelLoaderDebug] copying", name)
+                            dtype_val = getattr(tensor_data, "dtype", "unknown")
+                            device_val = getattr(tensor_data, "device", "unknown")
+                            min_val = (
+                                float(tensor_data.min())
+                                if hasattr(tensor_data, "min")
+                                else "unknown"
+                            )
+                            max_val = (
+                                float(tensor_data.max())
+                                if hasattr(tensor_data, "max")
+                                else "unknown"
+                            )
                             print(
                                 "[ModelLoaderDebug] source",
                                 name,
                                 "dtype=",
-                                tensor_data.dtype,
+                                dtype_val,
                                 "device=",
-                                tensor_data.device,
+                                device_val,
                                 "min=",
-                                float(tensor_data.min()),
+                                min_val,
                                 "max=",
-                                float(tensor_data.max()),
+                                max_val,
                             )
                             print(
                                 "[ModelLoaderDebug] target before copy",
@@ -132,10 +165,15 @@ def load_model(
                 loaded_keys.add(target_name)
 
         if "lm_head.weight" in model_state_keys and "lm_head.weight" not in loaded_keys:
-            model.state_dict()["lm_head.weight"].copy_(
-                model.model.embed_tokens.weight, non_blocking=True
-            )
-            loaded_keys.add("lm_head.weight")
+            if hasattr(model, "model") and hasattr(model.model, "embed_tokens"):
+                embed_tokens = getattr(model.model, "embed_tokens")
+                if hasattr(embed_tokens, "weight"):
+                    target_tensor = model.state_dict()["lm_head.weight"]
+                    source_tensor = getattr(embed_tokens, "weight").to(
+                        dtype=target_tensor.dtype, device=target_tensor.device
+                    )
+                    target_tensor.copy_(source_tensor, non_blocking=True)
+                    loaded_keys.add("lm_head.weight")
 
         missing_keys = model_state_keys - loaded_keys
         if missing_keys:
