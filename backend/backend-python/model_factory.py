@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 from config.common import ModelInfo
+from model.l4ma import L4maForCausalLM, create_fusion_map as create_l4ma_fusion_map
+from model.l4ma_runtime import FlashInferL4maBackend
+from model.qwen3 import Qwen3ForCausalLM, create_fusion_map as create_qwen3_fusion_map
+from model.gptoss import GPTOSSForCausalLM, create_fusion_map as create_gptoss_fusion_map
 
 
 def create_model_and_fusion_map(model_info: ModelInfo):
@@ -10,12 +14,6 @@ def create_model_and_fusion_map(model_info: ModelInfo):
     arch_type = model_info.architecture.type.lower()
 
     if arch_type == "l4ma":
-        from model.l4ma import (
-            L4maForCausalLM,
-            create_fusion_map as create_l4ma_fusion_map,
-        )
-        from model.l4ma_runtime import FlashInferL4maBackend
-
         if not FlashInferL4maBackend.is_available():
             raise RuntimeError(
                 "FlashInfer backend is not available; cannot instantiate L4MA model."
@@ -27,21 +25,11 @@ def create_model_and_fusion_map(model_info: ModelInfo):
         return model, fusion_map
 
     if arch_type == "qwen3":
-        from model.qwen3 import (
-            Qwen3ForCausalLM,
-            create_fusion_map as create_qwen3_fusion_map,
-        )
-
         model = Qwen3ForCausalLM(model_info.architecture)
         fusion_map = create_qwen3_fusion_map(model)
         return model, fusion_map
 
     if arch_type == "gptoss":
-        from model.gptoss import (
-            GPTOSSForCausalLM,
-            create_fusion_map as create_gptoss_fusion_map,
-        )
-
         model = GPTOSSForCausalLM(model_info.architecture)
         fusion_map = create_gptoss_fusion_map(model)
         return model, fusion_map

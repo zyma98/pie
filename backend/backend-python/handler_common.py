@@ -104,9 +104,10 @@ class Handler:
     def handshake(
         self, reqs: list[message.HandshakeRequest]
     ) -> list[message.HandshakeResponse]:
+        """Handle handshake requests."""
         resps = []
-        for req in reqs:
-            # req.version
+        for _req in reqs:
+            # _req.version
 
             resp = message.HandshakeResponse(
                 version=self.model_info.version,
@@ -131,6 +132,7 @@ class Handler:
         return resps
 
     def query(self, reqs: list[message.QueryRequest]) -> list[message.QueryResponse]:
+        """Handle query requests."""
         resps = []
         for req in reqs:
             value = "unknown query"
@@ -148,7 +150,8 @@ class Handler:
         for req in reqs:
             if len(req.embed_ptrs) > self.max_num_embeds:
                 raise ValueError(
-                    f"Number of embed pointers {len(req.embed_ptrs)} exceeds maximum {self.max_num_embeds}."
+                    f"Number of embed pointers {len(req.embed_ptrs)} exceeds "
+                    f"maximum {self.max_num_embeds}."
                 )
 
             image_tensor = self.ops.decode_image(
@@ -165,15 +168,15 @@ class Handler:
 
     @torch.inference_mode()
     def initialize_adapter(self, reqs: list[message.InitializeAdapterRequest]):
+        """Initialize adapter functionality."""
+        _cfg = self.lm.config
 
-        cfg = self.lm.config
-
-        for req in reqs:
+        for _req in reqs:
             pass
 
     @torch.inference_mode()
     def update_adapter(self, reqs: list[message.UpdateAdapterRequest]):
-
+        """Update adapter functionality."""
         for req in reqs:
             if req.adapter_ptr in self.adapters:
                 pass
@@ -218,16 +221,16 @@ class Handler:
     ) -> list[message.HeartbeatResponse]:
         """Handle heartbeat requests to keep the connection alive."""
         resps = []
-        for req in reqs:
+        for _req in reqs:
             resps.append(message.HeartbeatResponse())
         return resps
 
-    def upload_handler(self, reqs: list[message.UploadAdapterRequest]):
+    def upload_handler(self, _reqs: list[message.UploadAdapterRequest]):
         """Handle adapter upload requests."""
         raise NotImplementedError("upload_handler not yet implemented")
 
     def download_handler(
-        self, reqs: list[message.DownloadAdapterRequest]
+        self, _reqs: list[message.DownloadAdapterRequest]
     ) -> list[message.DownloadAdapterResponse]:
         """Handle adapter download requests."""
         raise NotImplementedError("download_handler not yet implemented")
@@ -393,7 +396,8 @@ class ForwardPassBatch:
             expected_len = context_length + i + 1
             if len(decoded_mask) != expected_len:
                 raise ValueError(
-                    f"Decoded mask for token {i} has length {len(decoded_mask)}, but expected {expected_len}"
+                    f"Decoded mask for token {i} has length {len(decoded_mask)}, "
+                    f"but expected {expected_len}"
                 )
             request_attention_mask[i, :expected_len] = decoded_mask
 

@@ -153,13 +153,13 @@ def load_model(
             f"Fatal Error: Failed to read a ztensor file. Error: {exc}",
             file=sys.stderr,
         )
-        raise SystemExit(1)
+        raise SystemExit(1) from exc
     except Exception as exc:
         print(
             f"An unexpected fatal error occurred during model loading: {exc}",
             file=sys.stderr,
         )
-        raise SystemExit(1)
+        raise SystemExit(1) from exc
 
 
 __all__ = ["load_model"]

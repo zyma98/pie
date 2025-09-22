@@ -3,7 +3,7 @@
 import os
 
 
-def checkpoint_validation(*args, **kwargs):
+def checkpoint_validation(*_args, **_kwargs):
     """No-op decorator for checkpoint validation.
 
     Accepts any arguments including checkpoint_name, capture_tensors,

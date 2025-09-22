@@ -7,7 +7,6 @@ at runtime based on availability and configuration.
 """
 
 from __future__ import annotations
-from typing import Any, Optional, Union
 import torch
 
 
@@ -72,7 +71,7 @@ class FlashInferOps(BackendOps):
     def __init__(self):
         super().__init__("flashinfer")
         try:
-            import flashinfer as ops
+            import flashinfer as ops  # pylint: disable=import-outside-toplevel
 
             self.ops = ops
             self.available = True
