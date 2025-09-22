@@ -413,7 +413,7 @@ class L4maDecoderLayer(nn.Module):
 
         residual = hidden_states
 
-        if hidden_states.numel():
+        if hidden_states.numel() and is_tensor_debug_enabled():
             pre_norm_min, pre_norm_max = hidden_states.aminmax()
             pre_norm_nan = torch.isnan(hidden_states).any().item()
             pre_norm_inf = torch.isinf(hidden_states).any().item()
@@ -463,7 +463,7 @@ class L4maDecoderLayer(nn.Module):
 
         hidden_states = self._input_normalization(hidden_states)
 
-        if hidden_states.numel():
+        if hidden_states.numel() and is_tensor_debug_enabled():
             post_norm_min, post_norm_max = hidden_states.aminmax()
             post_norm_nan = torch.isnan(hidden_states).any().item()
             post_norm_inf = torch.isinf(hidden_states).any().item()
@@ -493,7 +493,7 @@ class L4maDecoderLayer(nn.Module):
 
         hidden_states = residual + hidden_states
 
-        if hidden_states.numel():
+        if hidden_states.numel() and is_tensor_debug_enabled():
             post_attn_min, post_attn_max = hidden_states.aminmax()
             post_attn_nan = torch.isnan(hidden_states).any().item()
             post_attn_inf = torch.isinf(hidden_states).any().item()
@@ -516,7 +516,7 @@ class L4maDecoderLayer(nn.Module):
         residual = hidden_states
         hidden_states = self._post_attention_normalization(hidden_states)
 
-        if hidden_states.numel():
+        if hidden_states.numel() and is_tensor_debug_enabled():
             post_attn_norm_min, post_attn_norm_max = hidden_states.aminmax()
             post_attn_norm_nan = torch.isnan(hidden_states).any().item()
             post_attn_norm_inf = torch.isinf(hidden_states).any().item()
@@ -568,7 +568,7 @@ class L4maDecoderLayer(nn.Module):
 
         hidden_states = residual + hidden_states
 
-        if hidden_states.numel():
+        if hidden_states.numel() and is_tensor_debug_enabled():
             post_mlp_min, post_mlp_max = hidden_states.aminmax()
             post_mlp_nan = torch.isnan(hidden_states).any().item()
             post_mlp_inf = torch.isinf(hidden_states).any().item()
