@@ -39,6 +39,7 @@ from message import (
     UploadAdapterRequest,
 )
 
+
 class HandlerId(enum.Enum):
     HANDSHAKE = 0
     HEARTBEAT = 1
@@ -49,6 +50,7 @@ class HandlerId(enum.Enum):
     UPDATE_ADAPTER = 6
     UPLOAD_HANDLER = 7
     DOWNLOAD_HANDLER = 8
+
 
 @dataclass
 class ServerConfig:
@@ -223,10 +225,14 @@ def run_zmq_server(socket: zmq.Socket, handler: Any) -> None:
         HandlerId.QUERY.value: msgspec.msgpack.Decoder(QueryRequest),
         HandlerId.FORWARD_PASS.value: msgspec.msgpack.Decoder(ForwardPassRequest),
         HandlerId.EMBED_IMAGE.value: msgspec.msgpack.Decoder(EmbedImageRequest),
-        HandlerId.INITIALIZE_ADAPTER.value: msgspec.msgpack.Decoder(InitializeAdapterRequest),
+        HandlerId.INITIALIZE_ADAPTER.value: msgspec.msgpack.Decoder(
+            InitializeAdapterRequest
+        ),
         HandlerId.UPDATE_ADAPTER.value: msgspec.msgpack.Decoder(UpdateAdapterRequest),
         HandlerId.UPLOAD_HANDLER.value: msgspec.msgpack.Decoder(UploadAdapterRequest),
-        HandlerId.DOWNLOAD_HANDLER.value: msgspec.msgpack.Decoder(DownloadAdapterRequest),
+        HandlerId.DOWNLOAD_HANDLER.value: msgspec.msgpack.Decoder(
+            DownloadAdapterRequest
+        ),
     }
 
     poller = zmq.Poller()
@@ -236,7 +242,10 @@ def run_zmq_server(socket: zmq.Socket, handler: Any) -> None:
         while True:
             # Check for heartbeat timeout before waiting for a message
             if time.monotonic() - last_heartbeat_time > HEARTBEAT_TIMEOUT:
-                print(f"[!] Heartbeat timeout after {HEARTBEAT_TIMEOUT}s, exiting", file=sys.stderr)
+                print(
+                    f"[!] Heartbeat timeout after {HEARTBEAT_TIMEOUT}s, exiting",
+                    file=sys.stderr,
+                )
                 os._exit(1)  # Use os._exit for immediate termination from a thread
 
             # Poll for 1 second to remain responsive to the heartbeat check
@@ -304,6 +313,7 @@ def run_zmq_server(socket: zmq.Socket, handler: Any) -> None:
             file=sys.stderr,
         )
         import traceback
+
         traceback.print_exc()
         os._exit(1)
 

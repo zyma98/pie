@@ -16,7 +16,9 @@ from config.common import ModelInfo
 CreateModelFn = Callable[[ModelInfo], Tuple[torch.nn.Module, dict]]
 
 
-def load_model(config: dict, create_model_fn: CreateModelFn) -> tuple[torch.nn.Module, ModelInfo]:
+def load_model(
+    config: dict, create_model_fn: CreateModelFn
+) -> tuple[torch.nn.Module, ModelInfo]:
     """Load a model using the provided factory function and fusion metadata."""
 
     model_name = config["model"]

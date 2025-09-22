@@ -2,6 +2,7 @@
 
 import os
 
+
 def checkpoint_validation(*args, **kwargs):
     """No-op decorator for checkpoint validation.
 
@@ -9,16 +10,28 @@ def checkpoint_validation(*args, **kwargs):
     include_metadata, etc. but ignores them and returns the original function.
     Used as a placeholder since debug framework is not available.
     """
+
     def decorator(func):
         return func
+
     return decorator
 
 
 def is_tensor_debug_enabled() -> bool:
     """Check if MetalTensorDebug logging is enabled via environment variable."""
-    return os.environ.get("METAL_DEBUG_TENSOR", "0").lower() in {"1", "true", "yes", "on"}
+    return os.environ.get("METAL_DEBUG_TENSOR", "0").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def is_capture_debug_enabled() -> bool:
     """Check if MetalCaptureDebug logging is enabled via environment variable."""
-    return os.environ.get("METAL_DEBUG_CAPTURE", "0").lower() in {"1", "true", "yes", "on"}
+    return os.environ.get("METAL_DEBUG_CAPTURE", "0").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }

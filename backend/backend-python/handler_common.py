@@ -185,7 +185,7 @@ class Handler:
         include_metadata=True,
         tolerance=1e-5,
         backend_comparison=None,
-        performance_monitoring=True
+        performance_monitoring=True,
     )
     def forward_pass(self, reqs: list[message.ForwardPassRequest]):
         """
@@ -213,7 +213,9 @@ class Handler:
 
         return responses
 
-    def heartbeat(self, reqs: list[message.HeartbeatRequest]) -> list[message.HeartbeatResponse]:
+    def heartbeat(
+        self, reqs: list[message.HeartbeatRequest]
+    ) -> list[message.HeartbeatResponse]:
         """Handle heartbeat requests to keep the connection alive."""
         resps = []
         for req in reqs:
@@ -224,7 +226,9 @@ class Handler:
         """Handle adapter upload requests."""
         raise NotImplementedError("upload_handler not yet implemented")
 
-    def download_handler(self, reqs: list[message.DownloadAdapterRequest]) -> list[message.DownloadAdapterResponse]:
+    def download_handler(
+        self, reqs: list[message.DownloadAdapterRequest]
+    ) -> list[message.DownloadAdapterResponse]:
         """Handle adapter download requests."""
         raise NotImplementedError("download_handler not yet implemented")
 
@@ -489,7 +493,6 @@ class ForwardPassBatch:
 
         logits = self._handler.lm.lm_head(logits_input)
 
-
         # Promote logits to handler dtype for numerically stable softmax on Metal/MPS
         if logits.dtype != self.logits_dtype:
             logits = logits.to(dtype=self.logits_dtype)
@@ -501,7 +504,6 @@ class ForwardPassBatch:
             dtype=self.logits_dtype,
         ).unsqueeze(1)
         scaled_logits = logits / torch.clamp(temperatures, min=1e-6)
-
 
         # We compute probabilities for the entire batch of logit requests
         probs = torch.softmax(scaled_logits, dim=-1)
@@ -518,7 +520,9 @@ class ForwardPassBatch:
 
         num_logit_requests = len(self.indices_for_logits)
         # Initialize result containers. Using lists of Nones helps place results correctly.
-        final_dists: list[tuple[list[int], list[float]] | None] = [None] * num_logit_requests
+        final_dists: list[tuple[list[int], list[float]] | None] = [
+            None
+        ] * num_logit_requests
         final_tokens_tensor = torch.empty(
             num_logit_requests, dtype=torch.long, device=self._handler.device
         )

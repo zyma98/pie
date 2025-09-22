@@ -42,7 +42,10 @@ class _FlashInferForwardContext(L4maForwardContext):
         *,
         config: L4maArch,
         inputs: RuntimeInputs,
-        wrapper: ops.BatchDecodeWithPagedKVCacheWrapper | ops.BatchPrefillWithPagedKVCacheWrapper,
+        wrapper: (
+            ops.BatchDecodeWithPagedKVCacheWrapper
+            | ops.BatchPrefillWithPagedKVCacheWrapper
+        ),
         batch_indices: torch.Tensor,
         batch_positions: torch.Tensor,
         metadata: FlashInferRuntimeMetadata,
@@ -115,7 +118,9 @@ class FlashInferL4maBackend(L4maBackend):
         """Return True if the FlashInfer runtime dependency is present."""
         return ops is not None
 
-    def __init__(self, workspace_size_bytes: int = 128 * 1024 * 1024, kv_layout: str = "NHD") -> None:
+    def __init__(
+        self, workspace_size_bytes: int = 128 * 1024 * 1024, kv_layout: str = "NHD"
+    ) -> None:
         if ops is None:
             raise RuntimeError(
                 "flashinfer is not available. Install flashinfer-python to use FlashInferL4maBackend."
@@ -130,7 +135,10 @@ class FlashInferL4maBackend(L4maBackend):
 
     def _ensure_workspace(self, device: torch.device | str) -> None:
         tensor_device = torch.device(device)
-        if self._workspace_buffer is not None and self._workspace_buffer.device == tensor_device:
+        if (
+            self._workspace_buffer is not None
+            and self._workspace_buffer.device == tensor_device
+        ):
             return
 
         self._workspace_buffer = torch.empty(
