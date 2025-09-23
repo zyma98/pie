@@ -9,7 +9,10 @@ import numpy as np
 import torch
 
 import message
-from adapter import AdapterSubpass
+
+# Safe import of adapter functionality
+from adapter_import_utils import ensure_adapter_available
+
 from config.common import ModelInfo
 from debug_utils import is_tensor_debug_enabled, checkpoint_validation
 
@@ -435,8 +438,9 @@ class ForwardPassBatch:
 
         adapter_subpass = None
         if self.adapter_subpass_needed:
+            adapter_subpass_class = ensure_adapter_available()
             seeds_tensor = torch.as_tensor(self.seeds, device=device, dtype=torch.long)
-            adapter_subpass = AdapterSubpass(
+            adapter_subpass = adapter_subpass_class(
                 adapter_at_layer=self._handler.adapter_at_layer,
                 adapter_indices=self.adapter_indices,
                 adapter_extras=self._handler.adapters,

@@ -7,8 +7,8 @@ from typing import Optional
 
 import torch
 
-from config.l4ma import L4maArch
-from .base import L4maBackend, L4maForwardContext, RuntimeInputs
+from common import L4maArch
+from common_model.l4ma_runtime import L4maBackend, L4maForwardContext, RuntimeInputs
 
 try:  # pragma: no cover - optional dependency guard
     import flashinfer as ops  # type: ignore[import]
@@ -63,10 +63,12 @@ class _FlashInferForwardContext(L4maForwardContext):
 
     @property
     def batch_indices(self) -> torch.Tensor:
+        """Get the batch indices tensor."""
         return self._batch_indices
 
     @property
     def batch_positions(self) -> torch.Tensor:
+        """Get the batch positions tensor."""
         return self._batch_positions
 
     @property
@@ -80,6 +82,7 @@ class _FlashInferForwardContext(L4maForwardContext):
         key_states: torch.Tensor,
         position_ids: torch.Tensor,
     ) -> None:
+        """Apply RoPE encoding to query and key states."""
         if ops is None:
             raise RuntimeError("FlashInfer not available")
         ops.apply_llama31_rope_pos_ids_inplace(  # type: ignore
@@ -95,6 +98,7 @@ class _FlashInferForwardContext(L4maForwardContext):
         value_states: torch.Tensor,
         kv_cache_layer: torch.Tensor,
     ) -> None:
+        """Append key and value states to the KV cache."""
         _ = layer_idx  # Parameter not currently used
         if ops is None:
             raise RuntimeError("FlashInfer not available")
@@ -116,6 +120,7 @@ class _FlashInferForwardContext(L4maForwardContext):
         query_states: torch.Tensor,
         kv_cache_layer: torch.Tensor,
     ) -> torch.Tensor:
+        """Run attention computation using FlashInfer."""
         _ = layer_idx  # Parameter not currently used
         attn_output = self.wrapper.run(query_states, kv_cache_layer)
         return attn_output.reshape(attn_output.size(0), -1)
@@ -178,6 +183,7 @@ class FlashInferL4maBackend(L4maBackend):
         config: L4maArch,
         inputs: RuntimeInputs,
     ) -> L4maForwardContext:
+        """Create a forward context for FlashInfer execution."""
         self._ensure_workspace(config.device)
 
         if ops is None:
