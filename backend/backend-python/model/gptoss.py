@@ -8,11 +8,10 @@ import torch
 from torch import nn
 import torch.distributed as dist
 
+from common import AdapterSubpass, TensorLoader
 import flashinfer as ops
-from adapter import AdapterSubpass
 
 from config.gptoss import GPTOSSArch
-from config.common import TensorLoader
 
 VERSION = "0.1.0"
 

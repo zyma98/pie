@@ -6,11 +6,10 @@ from typing import List, Dict
 import torch
 from torch import nn
 
+from common import AdapterSubpass, TensorLoader
 import flashinfer as ops
-from adapter import AdapterSubpass
 
 from config.qwen3 import Qwen3Arch
-from config.common import TensorLoader
 
 VERSION = "0.1.0"
 

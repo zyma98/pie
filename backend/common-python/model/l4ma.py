@@ -12,7 +12,8 @@ from torch import nn
 
 from debug_utils import is_tensor_debug_enabled, checkpoint_validation
 
-from adapter import AdapterSubpass
+# Safe import of adapter functionality
+from adapter_import_utils import AdapterSubpass
 from config.l4ma import L4maArch
 from config.common import TensorLoader
 from .l4ma_runtime import L4maBackend, L4maForwardContext, RuntimeInputs

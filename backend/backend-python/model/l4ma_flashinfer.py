@@ -7,8 +7,7 @@ from typing import Optional
 
 import torch
 
-from config.l4ma import L4maArch
-from .base import L4maBackend, L4maForwardContext, RuntimeInputs
+from common import L4maArch, L4maBackend, L4maForwardContext, RuntimeInputs
 
 try:  # pragma: no cover - optional dependency guard
     import flashinfer as ops  # type: ignore[import]
