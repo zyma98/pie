@@ -34,7 +34,7 @@ class TrainingConfig:
     WASM_DIR: Path = SCRIPT_DIR / "inferlets" / "target" / "wasm32-wasip2" / "release"
 
     # --- Dataset Configuration ---
-    DATASET_NAME: str = "countdown"  # "countdown" or "math"
+    DATASET_NAME: str = "math"  # "countdown" or "math"
     # Path for file-based datasets like Countdown
     DATA_PATH: str = "./Countdown-Tasks-3to4"
 
@@ -52,7 +52,7 @@ class TrainingConfig:
     INITIAL_SIGMA: float = 0.005
     MAX_SIGMA: float = 0.014
     MU_FRACTION: float = 0.5
-    MAX_TOKENS_GEN: int = 512
+    MAX_TOKENS_GEN: int = 1024
     SYSTEM_PROMPT: str = (
         "You are a helpful AI Assistant that provides well-reasoned and detailed responses. "
         "You first think about the reasoning process as an internal monologue and then provide the user with the answer. Respond in the following format: <think>\n...\n</think>\n<answer>\n...\n</answer>"
@@ -349,7 +349,7 @@ class ESOrchestrator:
                         capacity_dict[uri_i] = new_cap
                 else:
                     # No preemption, cautiously probe upwards.
-                    new_cap = min(max_capacity_val, int(old_cap * 1.1))
+                    new_cap = min(max_capacity_val, int(old_cap * 1.3))
                     if new_cap != old_cap:
                         tqdm.write(f"📈 No preemption on {uri_i}. Probing higher {desc} capacity: {old_cap} -> {new_cap}")
                         capacity_dict[uri_i] = new_cap

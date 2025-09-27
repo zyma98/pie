@@ -3,9 +3,10 @@ from typing import Any
 from datasets import load_dataset
 from torch.utils.data import Dataset
 from rewards import extract_answer, format_reward, accuracy_reward
+from latex2sympy2_extended import NormalizationConfig
+from math_verify import LatexExtractionConfig, parse, verify
 
-
-INSTRUCTION = "Please reason step by step, and put your final answer within \boxed{}."
+INSTRUCTION = "Please reason step by step, and put your final answer within \boxed{} (in the <answer> tag)."
 
 
 class OpenR1MathDataset(Dataset):
@@ -28,11 +29,11 @@ class OpenR1MathDataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, idx):
-        item = self.data[idx]
+        item = self.data[int(idx)]
         return {
             "problem": item["problem"] + "\n" + INSTRUCTION,
             "answer": item["answer"],
-            "verifier": lambda response: verify_answer(response, item["answer"]),
+            "verifier": lambda response: verify_answer(response, f"${item["answer"]}$"),
         }
 
 
@@ -67,34 +68,12 @@ def verify_answer(response: str, answer: str) -> dict[str, Any]:
 if __name__ == "__main__":
     print("Initializing test dataset (first 5 examples)...")
     # Use a small test_size for a quick demonstration
-    test_dataset = OpenR1MathDataset(split="test", test_size=5)
+    test_dataset = OpenR1MathDataset(split="test", test_size=500)
 
-    # Get the first sample from the test set
-    sample_item = test_dataset[0]
-    problem = sample_item["problem"]
-    verifier = sample_item["verifier"]
+    for i in range(0, 100):
+        item = test_dataset[i]
+        print(f"\nExample {i + 1}:")
+        #print("Problem:", item["problem"])
+        print("Answer:", item["answer"])
 
-    print("\n" + "=" * 50)
-    print(f"Testing with Problem:\n{problem}")
-    print(f"Expected Answer (from dataset): {sample_item['answer']}")
-    print("=" * 50 + "\n")
-
-    # Define a few example model responses to test
-    test_responses = {
-        "Perfect Response": "<think>\nThe user wants the answer. I will calculate it and put it in the answer tag.\n</think>\n<answer>\n\\boxed{20}\n</answer>",
-        "Correct Answer, Bad Format": "Here is the result: \\boxed{20}",
-        "Correct Format, Wrong Answer": "<think>\nI think the answer is 10.\n</think>\n<answer>\n\\boxed{10}\n</answer>",
-        "Malformed (No Answer Tag)": "<think>\nI will solve this now.\n</think>\nI am pretty sure the answer is 20.",
-        "Correct Answer, Unboxed": "<think>\nOkay, the answer is 20.\n</think>\n<answer>20</answer>",
-    }
-
-    # Manually override the gold answer for this specific test case for consistency
-    # (The first item in the shuffled dataset is "What is $10+10$?")
-    sample_item['answer'] = "\\boxed{20}"
-    verifier = lambda response: verify_answer(response, sample_item['answer'])
-
-    for name, response in test_responses.items():
-        print(f"--- Testing: {name} ---")
-        print(f"Response:\n{response}")
-        reward_dict = verifier(response)
-        print(f"Resulting Rewards: {reward_dict}\n")
+        print(parse(f"${item["answer"]}$"))

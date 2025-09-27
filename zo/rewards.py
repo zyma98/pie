@@ -10,9 +10,13 @@ def accuracy_reward(completion: str, solution: str) -> Optional[float]:
     Reward function that checks if the completion is mathematically the same as the ground truth.
     It first attempts a strict parse (requiring a boxed answer) and falls back to a lenient parse.
     """
+
+    if completion.lower().strip() == solution.lower().strip():
+        return 1.0
+
     gold_parsed = parse(
         solution,
-        extraction_mode="first_match",
+        #extraction_mode="first_match",
     )
     if not gold_parsed:
         # If the gold solution is not parseable, skip this example
@@ -25,7 +29,7 @@ def accuracy_reward(completion: str, solution: str) -> Optional[float]:
             nits=False,
             malformed_operators=False,  # e.g., requires \sin(x), not \sin x
             basic_latex=True,
-            equations=True,
+            #equations=True,
             boxed="all",
             units=True,
         ),
@@ -43,7 +47,7 @@ def accuracy_reward(completion: str, solution: str) -> Optional[float]:
                 nits=False,
                 malformed_operators=True,  # e.g., accepts \sin x
                 basic_latex=True,
-                equations=True,
+                #equations=True,
                 boxed="all",
                 units=True,
             ),

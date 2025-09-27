@@ -216,13 +216,10 @@ def start_service(config, model, model_info):
     """
     Initializes and starts the service, including the ZMQ server and registration threads.
     """
-    if config["controller_host"] in ["127.0.0.1", "localhost"]:
-        unique_id = random.randint(1000, 9999)
-        endpoint = f"ipc:///tmp/pie-service-{unique_id}"
-        real_endpoint = endpoint
-    else:
-        endpoint = f"tcp://{config['host']}:{config['port']}"
-        real_endpoint = f"tcp://*:{config['port']}"
+    unique_id = random.randint(1000, 9999)
+    endpoint = f"ipc:///tmp/pie-service-{unique_id}"
+    real_endpoint = endpoint
+
 
     handler = Handler(
         model=model,
@@ -262,7 +259,7 @@ def register(config, endpoint):
     """
     Registers this service with the controller in a separate thread.
     """
-    controller_addr = f"ws://{config['controller_host']}:{config['controller_port']}"
+    controller_addr = f"ws://localhost:{config['controller_port']}"
     try:
         # MODIFICATION 1: Added 'open_timeout=10' to attempt connection for 10 seconds.
         with connect(controller_addr, open_timeout=10) as websocket:
@@ -328,7 +325,7 @@ def run_zmq_server(socket, handler):
     exception occurs.
     """
     # --- MODIFICATION: Set heartbeat timeout and initialize timer ---
-    HEARTBEAT_TIMEOUT = 7  # seconds
+    HEARTBEAT_TIMEOUT = 100  # seconds
     last_heartbeat_time = time.monotonic()
 
     # --- CORRECTION: Keys should be integer values of the enums ---
