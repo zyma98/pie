@@ -1,7 +1,7 @@
 use crate::adapter::SetAdapter;
 use crate::brle::Brle;
 use crate::drafter::Drafter;
-use crate::evolve::SetAdapterSeed;
+use crate::zo::SetAdapterSeed;
 use crate::forward::{Distribution, Forward, KvPage};
 use crate::sampler::Sample;
 use crate::stop_condition::StopCondition;

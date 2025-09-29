@@ -22,7 +22,7 @@ mod image;
 mod pool;
 pub mod sampler;
 pub mod stop_condition;
-mod evolve;
+mod zo;
 
 #[derive(Clone, Debug)]
 pub struct Queue {

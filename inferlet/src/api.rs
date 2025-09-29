@@ -8,7 +8,6 @@ pub use crate::api::inferlet::core::common::{
     import_resources,
     get_all_exported_resources,
     release_exported_resources
-
 };
 pub use crate::api::inferlet::core::forward;
 pub use crate::api::inferlet::core::kvs;
