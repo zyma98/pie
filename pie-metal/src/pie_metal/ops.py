@@ -407,9 +407,11 @@ def append_paged_kv_cache(
 
         compiler = get_mps_compiler()
         if compiler.can_use_mps_kernels() and 'append_kv_cache' in compiler.compiled_libraries:
+            # Extract dimensions
+            num_tokens, num_kv_heads, head_dim = append_key.shape
+
             # Reshape inputs for Metal kernel
             # Metal expects [num_tokens, num_kv_heads * head_dim] for key/value
-            num_tokens, num_kv_heads, head_dim = append_key.shape
             k_flat = append_key.reshape(num_tokens, num_kv_heads * head_dim)
             v_flat = append_value.reshape(num_tokens, num_kv_heads * head_dim)
 
@@ -420,36 +422,21 @@ def append_paged_kv_cache(
 
             compiler.run_append_paged_kv_cache_mps(
                 k_flat, v_flat, paged_k, paged_v,
-                batch_indices, positions, kv_indices, kv_indptr, kv_last_page_len
+                batch_indices, positions, kv_indices, kv_indptr, kv_last_page_len,
+                num_kv_heads=num_kv_heads,
+                head_size=head_dim
             )
             return
-    except Exception:
-        # Fall back to PyTorch implementation
-        pass
+    except Exception as e:
+        # Re-raise to expose the issue - NO FALLBACK for Metal operations
+        raise RuntimeError(f"Metal append_paged_kv_cache failed: {e}") from e
 
-    # PyTorch fallback implementation
-    page_size = paged_kv_cache.shape[2]
-
-    for token_idx in range(append_key.size(0)):
-        batch_idx = int(batch_indices[token_idx].item())
-        seq_pos = int(positions[token_idx].item())
-
-        # Calculate page and offset
-        page_slot = seq_pos // page_size
-        page_start = int(kv_indptr[batch_idx].item())
-        page_end = int(kv_indptr[batch_idx + 1].item())
-        physical_page_idx = page_start + page_slot
-
-        # Handle edge case
-        if physical_page_idx >= page_end:
-            physical_page_idx = page_end - 1
-
-        offset = seq_pos % page_size
-        cache_page = int(kv_indices[physical_page_idx].item())
-
-        # Copy key and value states
-        paged_kv_cache[cache_page, 0, offset].copy_(append_key[token_idx])
-        paged_kv_cache[cache_page, 1, offset].copy_(append_value[token_idx])
+    # NOTE: PyTorch fallback removed - we must use Metal kernels
+    # If you reach here, Metal kernel was not available
+    raise RuntimeError(
+        "Metal append_paged_kv_cache kernel not available. "
+        "pie-metal requires Metal support on Apple Silicon."
+    )
 
 
 def get_seq_lens(
@@ -531,7 +518,10 @@ class sampling:
         sorted_probs[~mask] = 0
 
         # Sample from filtered distribution
-        return torch.multinomial(sorted_probs, num_samples=1).squeeze(-1)
+        sampled_sorted_idx = torch.multinomial(sorted_probs, num_samples=1).squeeze(-1)
+
+        # Map back to original token indices
+        return torch.gather(sorted_indices, -1, sampled_sorted_idx.unsqueeze(-1)).squeeze(-1)
 
 
 # Export all public functions and classes

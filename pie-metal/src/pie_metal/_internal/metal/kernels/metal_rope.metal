@@ -9,14 +9,13 @@ using namespace metal;
 // - Non-interleaved (default): Rotates first half [0, head_size/2) with second half [head_size/2, head_size)
 // - Interleaved: Rotates even indices [0,2,4...] with odd indices [1,3,5...]
 
-struct RoPEParams {
-    uint32_t num_tokens;     // Number of tokens in the sequence
-    uint32_t num_heads;      // Number of attention heads
-    uint32_t head_size;      // Size of each attention head
-    float rope_theta;        // Base for rotary frequency computation (e.g., 10000.0)
-    float rope_factor;       // Scaling factor for RoPE (e.g., 1.0)
-    bool interleaved;        // Layout: true = even/odd indices, false = split halves
-};
+// RoPE parameters are passed as a float array for torch.mps.compile_shader compatibility
+// params_raw[0] = num_tokens
+// params_raw[1] = num_heads
+// params_raw[2] = head_size
+// params_raw[3] = rope_theta
+// params_raw[4] = rope_factor
+// params_raw[5] = interleaved (0 or 1)
 
 // RoPE kernel that processes pairs of elements in each head
 // Each thread processes one pair (x, y) -> (x', y') where:
@@ -26,7 +25,7 @@ struct RoPEParams {
 kernel void metal_rope_bfloat16(
     device bfloat* input_qk           [[buffer(0)]],  // [num_tokens, num_heads, head_size] input/output tensor
     device const int* position_ids    [[buffer(1)]],  // [num_tokens] position indices
-    constant RoPEParams& params       [[buffer(2)]],
+    device const float* params_raw    [[buffer(2)]],
     uint3 gid                         [[thread_position_in_grid]]
 ) {
     const uint32_t token_idx = gid.x;
@@ -34,25 +33,25 @@ kernel void metal_rope_bfloat16(
     const uint32_t pair_idx = gid.z;  // Index of the (x, y) pair within the head
 
     // Bounds check
-    if (token_idx >= params.num_tokens ||
-        head_idx >= params.num_heads ||
-        pair_idx >= params.head_size / 2) {
+    if (token_idx >= ((uint32_t)params_raw[0]) ||
+        head_idx >= ((uint32_t)params_raw[1]) ||
+        pair_idx >= ((uint32_t)params_raw[2]) / 2) {
         return;
     }
 
     // Calculate tensor indices based on layout
-    const uint32_t base_idx = token_idx * params.num_heads * params.head_size +
-                              head_idx * params.head_size;
+    const uint32_t base_idx = token_idx * ((uint32_t)params_raw[1]) * ((uint32_t)params_raw[2]) +
+                              head_idx * ((uint32_t)params_raw[2]);
     
     uint32_t x_idx, y_idx;
-    if (params.interleaved) {
+    if ((((int)params_raw[5]) != 0)) {
         // Interleaved layout: even/odd indices [0,1,2,3...] -> pairs (0,1), (2,3), etc.
         x_idx = base_idx + pair_idx * 2;
         y_idx = base_idx + pair_idx * 2 + 1;
     } else {
         // Non-interleaved layout: split halves [0,1,2,3...] -> pairs (0,2), (1,3), etc.
         x_idx = base_idx + pair_idx;
-        y_idx = base_idx + pair_idx + params.head_size / 2;
+        y_idx = base_idx + pair_idx + ((uint32_t)params_raw[2]) / 2;
     }
 
     // Get position for this token
@@ -60,9 +59,9 @@ kernel void metal_rope_bfloat16(
 
     // Compute rotary frequency for this pair
     // freq = 1.0 / (rope_theta^(2*pair_idx/head_size)) * rope_factor
-    const float exponent = (2.0f * float(pair_idx)) / float(params.head_size);
-    const float freq_base = powr(params.rope_theta, exponent);
-    const float freq = params.rope_factor / freq_base;
+    const float exponent = (2.0f * float(pair_idx)) / float(((uint32_t)params_raw[2]));
+    const float freq_base = powr(params_raw[3], exponent);
+    const float freq = params_raw[4] / freq_base;
 
     // Compute angle
     const float theta = position * freq;
@@ -86,7 +85,7 @@ kernel void metal_rope_bfloat16(
 kernel void metal_rope_float32(
     device float* input_qk            [[buffer(0)]],  // [num_tokens, num_heads, head_size] input/output tensor
     device const int* position_ids    [[buffer(1)]],  // [num_tokens] position indices
-    constant RoPEParams& params       [[buffer(2)]],
+    device const float* params_raw    [[buffer(2)]],
     uint3 gid                         [[thread_position_in_grid]]
 ) {
     const uint32_t token_idx = gid.x;
@@ -94,25 +93,25 @@ kernel void metal_rope_float32(
     const uint32_t pair_idx = gid.z;  // Index of the (x, y) pair within the head
 
     // Bounds check
-    if (token_idx >= params.num_tokens ||
-        head_idx >= params.num_heads ||
-        pair_idx >= params.head_size / 2) {
+    if (token_idx >= ((uint32_t)params_raw[0]) ||
+        head_idx >= ((uint32_t)params_raw[1]) ||
+        pair_idx >= ((uint32_t)params_raw[2]) / 2) {
         return;
     }
     
     // Calculate tensor indices based on layout
-    const uint32_t base_idx = token_idx * params.num_heads * params.head_size +
-                              head_idx * params.head_size;
+    const uint32_t base_idx = token_idx * ((uint32_t)params_raw[1]) * ((uint32_t)params_raw[2]) +
+                              head_idx * ((uint32_t)params_raw[2]);
     
     uint32_t x_idx, y_idx;
-    if (params.interleaved) {
+    if ((((int)params_raw[5]) != 0)) {
         // Interleaved layout: even/odd indices [0,1,2,3...] -> pairs (0,1), (2,3), etc.
         x_idx = base_idx + pair_idx * 2;
         y_idx = base_idx + pair_idx * 2 + 1;
     } else {
         // Non-interleaved layout: split halves [0,1,2,3...] -> pairs (0,2), (1,3), etc.
         x_idx = base_idx + pair_idx;
-        y_idx = base_idx + pair_idx + params.head_size / 2;
+        y_idx = base_idx + pair_idx + ((uint32_t)params_raw[2]) / 2;
     }
     
 
@@ -121,9 +120,9 @@ kernel void metal_rope_float32(
 
     // Compute rotary frequency for this pair
     // freq = 1.0 / (rope_theta^(2*pair_idx/head_size)) * rope_factor
-    const float exponent = (2.0f * float(pair_idx)) / float(params.head_size);
-    const float freq_base = powr(params.rope_theta, exponent);
-    const float freq = params.rope_factor / freq_base;
+    const float exponent = (2.0f * float(pair_idx)) / float(((uint32_t)params_raw[2]));
+    const float freq_base = powr(params_raw[3], exponent);
+    const float freq = params_raw[4] / freq_base;
 
     // Compute angle
     const float theta = position * freq;
@@ -147,28 +146,28 @@ kernel void metal_rope_float32(
 kernel void metal_rope_float16(
     device half* input_qk             [[buffer(0)]],  // [num_tokens, num_heads, head_size] input/output tensor (half)
     device const int* position_ids    [[buffer(1)]],  // [num_tokens] position indices
-    constant RoPEParams& params       [[buffer(2)]],
+    device const float* params_raw    [[buffer(2)]],
     uint3 gid                         [[thread_position_in_grid]]
 ) {
     const uint32_t token_idx = gid.x;
     const uint32_t head_idx = gid.y;
     const uint32_t pair_idx = gid.z;  // Index of the (x, y) pair within the head
 
-    if (token_idx >= params.num_tokens ||
-        head_idx >= params.num_heads ||
-        pair_idx >= params.head_size / 2) {
+    if (token_idx >= ((uint32_t)params_raw[0]) ||
+        head_idx >= ((uint32_t)params_raw[1]) ||
+        pair_idx >= ((uint32_t)params_raw[2]) / 2) {
         return;
     }
 
-    const uint32_t base_idx = token_idx * params.num_heads * params.head_size +
-                              head_idx * params.head_size;
+    const uint32_t base_idx = token_idx * ((uint32_t)params_raw[1]) * ((uint32_t)params_raw[2]) +
+                              head_idx * ((uint32_t)params_raw[2]);
     const uint32_t x_idx = base_idx + pair_idx;
-    const uint32_t y_idx = base_idx + pair_idx + params.head_size / 2;
+    const uint32_t y_idx = base_idx + pair_idx + ((uint32_t)params_raw[2]) / 2;
 
     const float position = float(position_ids[token_idx]);
-    const float exponent = (2.0f * float(pair_idx)) / float(params.head_size);
-    const float freq_base = powr(params.rope_theta, exponent);
-    const float freq = params.rope_factor / freq_base;
+    const float exponent = (2.0f * float(pair_idx)) / float(((uint32_t)params_raw[2]));
+    const float freq_base = powr(params_raw[3], exponent);
+    const float freq = params_raw[4] / freq_base;
     const float theta = position * freq;
     const float cos_theta = cos(theta);
     const float sin_theta = sin(theta);

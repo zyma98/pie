@@ -66,6 +66,27 @@ class MPSShaderCompiler:
         # Process the simdgroup source to resolve includes
         processed_simdgroup = self._resolve_includes(simdgroup_source, processed_common)
 
+        # Transform Params struct to params_raw for torch.mps.compile_shader compatibility
+        processed_simdgroup = processed_simdgroup.replace(
+            'constant Params& params [[buffer(8)]]',
+            'device const float* params_raw [[buffer(8)]]'
+        )
+
+        # Replace parameter access patterns
+        param_replacements = [
+            ('const int num_qo = params.num_qo;', 'const int num_qo = (int)params_raw[0];'),
+            ('const int head_dim = params.head_dim;', 'const int head_dim = (int)params_raw[1];'),
+            ('const int kv_head_dim = params.kv_head_dim;', 'const int kv_head_dim = (int)params_raw[2];'),
+            ('const int head_size = params.head_size;', 'const int head_size = (int)params_raw[3];'),
+            ('const int page_size = params.page_size;', 'const int page_size = (int)params_raw[4];'),
+            ('const int num_query_heads = params.num_query_heads;', 'const int num_query_heads = (int)params_raw[5];'),
+            ('const int num_kv_heads = params.num_kv_heads;', 'const int num_kv_heads = (int)params_raw[6];'),
+            ('const float scale = params.scale;', 'const float scale = params_raw[7];'),
+        ]
+
+        for old, new in param_replacements:
+            processed_simdgroup = processed_simdgroup.replace(old, new)
+
         # Compile the full optimized attention kernels
         full_source = f"""
 #include <metal_stdlib>
@@ -240,10 +261,26 @@ kernel void simple_attention_f16(
         qo_indptr: torch.Tensor,
         custom_mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        """Run attention using compiled MPS kernels."""
+        """Run attention using compiled MPS kernels.
+
+        All dtype conversions happen here before passing to Metal kernels.
+        Metal kernels expect float16 (half) types.
+        """
 
         if not self.can_use_mps_kernels():
             raise RuntimeError("MPS kernels not available")
+
+        if 'attention' not in self.compiled_libraries:
+            raise RuntimeError("Attention kernel not compiled")
+
+        # Store original dtype for conversion back
+        original_dtype = query.dtype
+
+        # Convert bfloat16 to float16 since Metal kernel uses half (float16) types
+        # The kernel name says "bf16" but the actual Metal code uses half types
+        if query.dtype == torch.bfloat16:
+            query = query.to(torch.float16)
+            kv_cache = kv_cache.to(torch.float16)
 
         # Ensure tensors are on MPS device
         query = query.to('mps') if query.device.type != 'mps' else query
@@ -251,24 +288,20 @@ kernel void simple_attention_f16(
 
         # Get dimensions
         num_tokens, num_heads, head_dim = query.shape
-        output_shape = (num_tokens, num_heads * head_dim)
-        output = torch.empty(output_shape, device='mps', dtype=query.dtype)
+        # Kernel expects 1D output buffer, we'll reshape it later
+        output = torch.empty(num_tokens * num_heads * head_dim, device='mps', dtype=query.dtype)
 
-        # Try to use the full attention kernel first
-        if 'attention' in self.compiled_libraries:
-            try:
-                return self._run_full_attention(
-                    query, kv_cache, kv_page_indices, kv_page_indptr,
-                    kv_last_page_lens, qo_indptr, output
-                )
-            except Exception as e:
-                print(f"⚠️  Full attention kernel failed: {e}, trying simple kernel")
+        # Run the attention kernel
+        result = self._run_full_attention(
+            query, kv_cache, kv_page_indices, kv_page_indptr,
+            kv_last_page_lens, qo_indptr, output
+        )
 
-        # Fall back to simple kernel
-        if 'simple' in self.compiled_libraries:
-            return self._run_simple_attention(query, kv_cache, output)
+        # Convert back to original dtype if needed
+        if original_dtype != result.dtype:
+            result = result.to(original_dtype)
 
-        raise RuntimeError("No working MPS kernels available")
+        return result
 
     def _run_full_attention(
         self,
@@ -290,29 +323,30 @@ kernel void simple_attention_f16(
         scale = 1.0 / (head_dim ** 0.5)
 
         # Create the Params struct exactly as expected by the Metal kernel
-        # This matches the Params struct in metal_attention_common.metal
+        # This matches what the test uses: 8 parameters
         params_data = [
-            num_tokens,           # num_qo
-            num_heads * head_dim, # head_dim (total output dimension)
-            num_heads * head_dim, # kv_head_dim (same for standard attention)
-            head_dim,             # head_size (dimension per head)
+            num_tokens,           # num_qo (seq_len in test)
+            num_heads * head_dim, # head_dim (total_head_dim in test)
+            num_heads * head_dim, # kv_head_dim (total_head_dim in test)
+            head_dim,             # head_size
             page_size,            # page_size
             num_heads,            # num_query_heads
-            num_heads,            # num_kv_heads (same for standard attention)
+            num_heads,            # num_kv_heads
             scale,                # scale (1/sqrt(head_dim))
-            0                     # total_kv_len (will be computed by kernel)
         ]
 
         # Convert to Metal-compatible parameter buffer
         params = torch.tensor(params_data, dtype=torch.float32, device='mps')
 
         # Prepare tensors in the exact format expected by the kernel
-        # The kernel expects paged KV cache split into separate K and V buffers
-        paged_k_cache = kv_cache[:, 0, :, :, :]  # [num_pages, page_size, num_kv_heads, head_dim]
-        paged_v_cache = kv_cache[:, 1, :, :, :]  # [num_pages, page_size, num_kv_heads, head_dim]
+        # The kernel expects 1D flat buffers for K and V caches
+        # Input: [num_pages, 2, page_size, num_kv_heads, head_dim]
+        # Output: 1D [num_pages * page_size * num_kv_heads * head_dim]
+        paged_k_cache = kv_cache[:, 0, :, :, :].contiguous().view(-1)
+        paged_v_cache = kv_cache[:, 1, :, :, :].contiguous().view(-1)
 
-        # Reshape query for kernel: [num_tokens, num_heads, head_dim] -> [num_tokens * num_heads, head_dim]
-        q_input = query.contiguous().view(num_tokens * num_heads, head_dim)
+        # Reshape query for kernel: [num_tokens, num_heads, head_dim] -> 1D [num_tokens * num_heads * head_dim]
+        q_input = query.contiguous().view(-1)
 
         # Create debug buffer (optional, can be None)
         debug_out = torch.zeros(20, dtype=torch.float32, device='mps')
@@ -320,42 +354,31 @@ kernel void simple_attention_f16(
         # Launch the actual optimized kernel!
         kernel_name = 'batch_prefill_attention_unified_bf16_simdgroup_kernel'
 
-        try:
-            if hasattr(lib, kernel_name):
-                # Call the optimized simdgroup kernel with exact parameter layout
-                getattr(lib, kernel_name)(
-                    q_input,                             # q_input [buffer(0)]
-                    paged_k_cache,                       # paged_k_cache [buffer(1)]
-                    paged_v_cache,                       # paged_v_cache [buffer(2)]
-                    qo_indptr.to(torch.int32),          # qo_indptr [buffer(3)]
-                    kv_page_indptr.to(torch.int32),     # kv_page_indptr [buffer(4)]
-                    kv_page_indices.to(torch.int32),    # kv_page_indices [buffer(5)]
-                    kv_last_page_lens.to(torch.int32),  # kv_last_page_lens [buffer(6)]
-                    output,                              # output [buffer(7)]
-                    params,                              # params [buffer(8)]
-                    debug_out                            # debug_out [buffer(9)]
-                )
-                print("🚀 Used OPTIMIZED simdgroup Metal kernel!")
-            else:
-                raise RuntimeError(f"Optimized kernel {kernel_name} not found")
+        # Configure dispatch parameters
+        threads_per_threadgroup = 128
+        total_threads = num_tokens * threads_per_threadgroup
 
-        except Exception as e:
-            print(f"⚠️  Optimized kernel failed: {e}")
-            # Try simpler kernel names that might be available
-            fallback_names = ['mps_attention_kernel_f16', 'mps_attention_kernel_f32']
-            kernel_name = fallback_names[0] if query.dtype == torch.float16 else fallback_names[1]
+        if not hasattr(lib, kernel_name):
+            raise RuntimeError(f"Kernel {kernel_name} not found in compiled library")
 
-            if hasattr(lib, kernel_name):
-                print(f"   Using fallback kernel: {kernel_name}")
-                getattr(lib, kernel_name)(
-                    q_input, paged_k_cache, kv_page_indices.to(torch.int32),
-                    kv_page_indptr.to(torch.int32), kv_last_page_lens.to(torch.int32),
-                    qo_indptr.to(torch.int32), output, params
-                )
-            else:
-                raise RuntimeError(f"No working kernels found in library")
+        # Call the optimized simdgroup kernel with exact parameter layout and dispatch config
+        getattr(lib, kernel_name)(
+            q_input,                             # q_input [buffer(0)]
+            paged_k_cache,                       # paged_k_cache [buffer(1)]
+            paged_v_cache,                       # paged_v_cache [buffer(2)]
+            qo_indptr.to(torch.int32),          # qo_indptr [buffer(3)]
+            kv_page_indptr.to(torch.int32),     # kv_page_indptr [buffer(4)]
+            kv_page_indices.to(torch.int32),    # kv_page_indices [buffer(5)]
+            kv_last_page_lens.to(torch.int32),  # kv_last_page_lens [buffer(6)]
+            output,                              # output [buffer(7)]
+            params,                              # params [buffer(8)]
+            debug_out,                           # debug_out [buffer(9)]
+            threads=(total_threads, 1, 1),
+            group_size=(threads_per_threadgroup, 1, 1)
+        )
 
-        return output
+        # Reshape output from 1D [num_tokens * num_heads * head_dim] to expected 2D [num_tokens, num_heads * head_dim]
+        return output.view(num_tokens, num_heads * head_dim)
 
     def _run_simple_attention(
         self,
@@ -457,13 +480,19 @@ kernel void simple_attention_f16(
             kernel_name = 'metal_rope_bfloat16'
 
         if hasattr(lib, kernel_name):
+            # RoPE uses 3D grid: (num_tokens, num_heads, head_size/2)
+            # Each thread handles one rotation pair
+            num_pairs = head_size // 2
+
             # Call Metal RoPE kernel with flattened tensor (modifies in-place)
             # The flattened view shares memory with input_qk, so modifications
             # are automatically reflected in the original 3D tensor
             getattr(lib, kernel_name)(
                 input_qk_flat,      # buffer(0): flattened input/output tensor
                 position_ids.to(torch.int32),  # buffer(1): position IDs
-                params              # buffer(2): RoPEParams
+                params,             # buffer(2): RoPEParams
+                threads=(num_tokens * num_heads * num_pairs, 1, 1),
+                group_size=(256, 1, 1)  # Standard threadgroup size
             )
         else:
             raise RuntimeError(f"RoPE kernel {kernel_name} not found in compiled library")
@@ -478,7 +507,9 @@ kernel void simple_attention_f16(
         kv_positions: torch.Tensor,
         kv_page_indices: torch.Tensor,
         kv_page_indptr: torch.Tensor,
-        kv_last_page_lens: torch.Tensor
+        kv_last_page_lens: torch.Tensor,
+        num_kv_heads: Optional[int] = None,
+        head_size: Optional[int] = None
     ) -> None:
         """
         Run append_paged_kv_cache using compiled MPS kernels.
@@ -507,15 +538,15 @@ kernel void simple_attention_f16(
 
         # Get dimensions
         num_tokens = k_input.shape[0]
-        num_kv_heads_times_head_size = k_input.shape[1]
         page_size = paged_k_cache.shape[1]
         max_num_pages = paged_k_cache.shape[0]
         batch_size = kv_page_indptr.shape[0] - 1
 
-        # Infer num_kv_heads and head_size (assuming square for simplicity, adjust if needed)
-        # This is a simplification - in practice you'd pass these explicitly
-        head_size = 128  # Common default
-        num_kv_heads = num_kv_heads_times_head_size // head_size
+        # Use provided num_kv_heads and head_size (required parameters)
+        if num_kv_heads is None or head_size is None:
+            raise ValueError(
+                "num_kv_heads and head_size must be provided to run_append_paged_kv_cache_mps"
+            )
 
         # Create params tensor matching AppendPagedKVCacheParams struct
         params = torch.tensor([
@@ -534,11 +565,24 @@ kernel void simple_attention_f16(
         lib = self.compiled_libraries['append_kv_cache']
 
         # Select kernel based on dtype
-        kernel_name = 'metal_append_paged_kv_cache_float32'
+        # NOTE: We only have bfloat16 and float32 kernels, no float16 kernel
         if k_input.dtype == torch.bfloat16:
             kernel_name = 'metal_append_paged_kv_cache_bfloat16'
+        elif k_input.dtype == torch.float32:
+            kernel_name = 'metal_append_paged_kv_cache_float32'
+        else:
+            # float16 not supported - dtype conversion breaks view connections
+            # Caller must convert tensors to float32 or bfloat16 before calling
+            raise RuntimeError(
+                f"append_paged_kv_cache only supports bfloat16 and float32, got {k_input.dtype}. "
+                f"Please convert tensors before calling (e.g., tensor.to(torch.float32))."
+            )
 
         if hasattr(lib, kernel_name):
+            # append_kv_cache uses 3D grid: (num_tokens, num_kv_heads, head_size)
+            # Each thread handles one element at position (token_idx, head_idx, head_offset)
+            # The Metal kernel expects thread_position_in_grid with x=token, y=head, z=offset
+
             # Call Metal append_kv_cache kernel (modifies caches in-place)
             getattr(lib, kernel_name)(
                 k_input,                        # buffer(0)
@@ -550,7 +594,9 @@ kernel void simple_attention_f16(
                 kv_page_indices.to(torch.int32),    # buffer(6)
                 kv_page_indptr.to(torch.int32),     # buffer(7)
                 kv_last_page_lens.to(torch.int32),  # buffer(8)
-                params                           # buffer(9)
+                params.float(),                  # buffer(9) - Metal expects float buffer
+                threads=(num_tokens, num_kv_heads, head_size),
+                group_size=(8, 8, 8)  # Use 3D threadgroup to match 3D dispatch
             )
         else:
             raise RuntimeError(f"Append KV cache kernel {kernel_name} not found in compiled library")
