@@ -17,10 +17,8 @@ from config.common import ModelInfo
 CreateModelFn = Callable[[ModelInfo], Tuple[torch.nn.Module, dict]]
 
 
-def load_model(
-    config: dict, create_model_fn: CreateModelFn
-) -> tuple[torch.nn.Module, ModelInfo]:
-    """Load a model using the provided factory function and fusion metadata."""
+def load_model_info(config: dict) -> ModelInfo:
+    """Load the model information from the metadata file."""
 
     # Locate the metadata file from the backend config.
     model_name = config["model"]
@@ -35,6 +33,17 @@ def load_model(
     model_device = config["device"]
     model_dtype = getattr(torch, config["dtype"])
     model_info = ModelInfo.load_from_file(str(metadata_path), model_device, model_dtype)
+
+    return model_info
+
+
+def load_model(
+    config: dict, model_info: ModelInfo, create_model_fn: CreateModelFn
+) -> torch.nn.Module:
+    """Load a model using the provided factory function and fusion metadata."""
+    model_name = config["model"]
+    cache_dir = config["cache_dir"]
+    model_path = Path(cache_dir) / "models"
 
     # Instantiate the model and its fusion map.
     try:
@@ -107,7 +116,7 @@ def load_model(
             print("\nSuccessfully loaded all expected model weights.")
 
         model.eval()
-        return model, model_info
+        return model
 
     except ztensor.ZTensorError as exc:
         print(
@@ -267,4 +276,4 @@ def _dequantize_from_mxfp4(
     return out.reshape(*prefix_shape, g, b * 2).view(*prefix_shape, g * b * 2)
 
 
-__all__ = ["load_model"]
+__all__ = ["load_model", "load_model_info"]
