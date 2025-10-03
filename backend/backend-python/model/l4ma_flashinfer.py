@@ -7,7 +7,9 @@ Supports both FlashInfer and pie-metal backends:
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 import torch
@@ -16,10 +18,8 @@ from common import L4maArch
 from common_model.l4ma_runtime import L4maBackend, L4maForwardContext, RuntimeInputs
 
 # Import unified backend ops with automatic platform selection
-import sys
-from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from backend_ops import ops
+from backend_ops import ops  # pylint: disable=wrong-import-position
 
 FlashInferWrapper = object  # type: ignore[misc]
 
@@ -125,7 +125,7 @@ class _FlashInferForwardContext(L4maForwardContext):
     ) -> torch.Tensor:
         """Run attention computation using FlashInfer."""
         _ = layer_idx  # Parameter not currently used
-        attn_output = self.wrapper.run(query_states, kv_cache_layer)
+        attn_output = self.wrapper.run(query_states, kv_cache_layer)  # type: ignore[attr-defined]
         return attn_output.reshape(attn_output.size(0), -1)
 
 
@@ -189,35 +189,17 @@ class FlashInferL4maBackend(L4maBackend):
 
         page_size = _infer_page_size(inputs.kv_cache_at_layer)
 
-        # DEBUG: Log inputs to position calculation
-        import os
-        if os.environ.get('PIE_METAL_DEBUG_POSITIONS') == '1':
-            print(f"[DEBUG l4ma_flashinfer] BEFORE get_seq_lens:")
-            print(f"  kv_page_indptr: {inputs.kv_page_indptr.cpu().tolist()}")
-            print(f"  kv_last_page_lens: {inputs.kv_last_page_lens.cpu().tolist()}")
-            print(f"  page_size: {page_size}")
-            print(f"  qo_indptr: {inputs.qo_indptr.cpu().tolist()}")
-            print(f"  num_tokens: {inputs.num_tokens}")
-
         seq_lens = ops.get_seq_lens(
             inputs.kv_page_indptr,
             inputs.kv_last_page_lens,
             page_size,
         )
 
-        if os.environ.get('PIE_METAL_DEBUG_POSITIONS') == '1':
-            print(f"[DEBUG l4ma_flashinfer] AFTER get_seq_lens:")
-            print(f"  seq_lens: {seq_lens.cpu().tolist()}")
-
         batch_indices, batch_positions = ops.get_batch_indices_positions(
             append_indptr=inputs.qo_indptr,
             seq_lens=seq_lens,
             nnz=inputs.num_tokens,
         )
-
-        if os.environ.get('PIE_METAL_DEBUG_POSITIONS') == '1':
-            print(f"[DEBUG l4ma_flashinfer] AFTER get_batch_indices_positions:")
-            print(f"  batch_positions: {batch_positions.cpu().tolist()}")
 
         if inputs.single_token_inference_mode:
             wrapper = self._decode_wrapper

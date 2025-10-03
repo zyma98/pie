@@ -97,20 +97,24 @@ class BackendOps:
         kv_indices: torch.Tensor,
         kv_indptr: torch.Tensor,
         kv_last_page_len: torch.Tensor,
-        kv_layout: str = "NHD"
+        kv_layout: str = "NHD",
     ) -> None:
         """Append key-value states to paged KV cache."""
         raise NotImplementedError(
             f"append_paged_kv_cache not implemented for {self.backend_name}"
         )
 
-    def BatchPrefillWithPagedKVCacheWrapper(self, workspace_buffer: torch.Tensor, kv_layout: str = "NHD"):
+    def BatchPrefillWithPagedKVCacheWrapper(  # pylint: disable=invalid-name
+        self, workspace_buffer: torch.Tensor, kv_layout: str = "NHD"
+    ):
         """Create BatchPrefillWithPagedKVCacheWrapper instance."""
         raise NotImplementedError(
             f"BatchPrefillWithPagedKVCacheWrapper not implemented for {self.backend_name}"
         )
 
-    def BatchDecodeWithPagedKVCacheWrapper(self, workspace_buffer: torch.Tensor, kv_layout: str = "NHD"):
+    def BatchDecodeWithPagedKVCacheWrapper(  # pylint: disable=invalid-name
+        self, workspace_buffer: torch.Tensor, kv_layout: str = "NHD"
+    ):
         """Create BatchDecodeWithPagedKVCacheWrapper instance."""
         raise NotImplementedError(
             f"BatchDecodeWithPagedKVCacheWrapper not implemented for {self.backend_name}"
@@ -120,7 +124,7 @@ class BackendOps:
         self,
         kv_page_indptr: torch.Tensor,
         kv_last_page_lens: torch.Tensor,
-        page_size: int
+        page_size: int,
     ) -> torch.Tensor:
         """Calculate sequence lengths from paging metadata."""
         raise NotImplementedError(
@@ -128,10 +132,7 @@ class BackendOps:
         )
 
     def get_batch_indices_positions(
-        self,
-        append_indptr: torch.Tensor,
-        seq_lens: torch.Tensor,
-        nnz: int
+        self, append_indptr: torch.Tensor, seq_lens: torch.Tensor, nnz: int
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Get batch indices and positions for tokens."""
         raise NotImplementedError(
@@ -149,15 +150,17 @@ def get_backend_ops() -> BackendOps:
         RuntimeError: If required backend is not available
     """
     if is_apple_silicon():
-        from metal_ops import MetalOps
+        from metal_ops import MetalOps  # pylint: disable=import-outside-toplevel
+
         return MetalOps()
-    else:
-        from flashinfer_ops import FlashInferOps
-        return FlashInferOps()
+
+    from flashinfer_ops import FlashInferOps  # pylint: disable=import-outside-toplevel
+
+    return FlashInferOps()
 
 
 # Create global ops instance for direct import by models
 # This replaces unified_ops.py
 ops = get_backend_ops()
 
-__all__ = ['BackendOps', 'get_backend_ops', 'ops']
+__all__ = ["BackendOps", "get_backend_ops", "ops"]

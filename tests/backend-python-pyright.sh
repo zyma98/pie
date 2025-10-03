@@ -10,6 +10,7 @@ ROOT="$(dirname "$(dirname "${BASH_SOURCE[0]}")")"
 PYTHONPATH=${ROOT}:${ROOT}/backend/backend-python:${ROOT}/backend/common_python uv run \
     --project ${ROOT}/backend/backend-python \
     --with pyright \
+    --with torch \
     pyright \
     ${ROOT}/backend/backend-python/__init__.py \
     ${ROOT}/backend/backend-python/adapter.py \

@@ -30,22 +30,30 @@ from common_model.l4ma import (
 
 # Conditionally import models that require flashinfer (not available on macOS with pie-metal)
 from platform_detection import is_apple_silicon
+
 IS_APPLE_SILICON = is_apple_silicon()
 
 if IS_APPLE_SILICON:
     from model.l4ma_flashinfer import FlashInferL4maBackend
+
     # On Apple Silicon, these models are not supported yet
-    Qwen3ForCausalLM = None  # type: ignore
-    create_qwen3_fusion_map = None  # type: ignore
-    Qwen2ForCausalLM = None  # type: ignore
-    create_qwen2_fusion_map = None  # type: ignore
-    GptOssForCausalLM = None  # type: ignore
-    create_gptoss_fusion_map = None  # type: ignore
+    Qwen3ForCausalLM = None  # type: ignore  # pylint: disable=invalid-name
+    create_qwen3_fusion_map = None  # type: ignore  # pylint: disable=invalid-name
+    Qwen2ForCausalLM = None  # type: ignore  # pylint: disable=invalid-name
+    create_qwen2_fusion_map = None  # type: ignore  # pylint: disable=invalid-name
+    GptOssForCausalLM = None  # type: ignore  # pylint: disable=invalid-name
+    create_gptoss_fusion_map = None  # type: ignore  # pylint: disable=invalid-name
 else:
     # Import model components from local backend-python model directory
     from model.l4ma_flashinfer import FlashInferL4maBackend
-    from model.qwen2 import Qwen2ForCausalLM, create_fusion_map as create_qwen2_fusion_map
-    from model.qwen3 import Qwen3ForCausalLM, create_fusion_map as create_qwen3_fusion_map
+    from model.qwen2 import (
+        Qwen2ForCausalLM,
+        create_fusion_map as create_qwen2_fusion_map,
+    )
+    from model.qwen3 import (
+        Qwen3ForCausalLM,
+        create_fusion_map as create_qwen3_fusion_map,
+    )
     from model.gptoss import (
         GptOssForCausalLM,
         create_fusion_map as create_gptoss_fusion_map,
@@ -69,6 +77,8 @@ def create_model_and_fusion_map(model_info: ModelInfo):
         return model, fusion_map
 
     if arch_type == "qwen2":
+        if Qwen2ForCausalLM is None or create_qwen2_fusion_map is None:
+            raise RuntimeError("Qwen2 model is not supported on this platform.")
         qwen2_arch = Qwen2Arch(**model_info.architecture.__dict__)
         model = Qwen2ForCausalLM(qwen2_arch)
         fusion_map = create_qwen2_fusion_map(model)

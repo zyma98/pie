@@ -88,12 +88,15 @@ def load_model(
                     fusion_map[param_name],
                     tensor_to_file_map,
                     file_readers,
-                    use_non_blocking
+                    use_non_blocking,
                 )
             else:
                 success = _load_regular_parameter(
-                    param_name, param, tensor_to_file_map, file_readers,
-                    use_non_blocking
+                    param_name,
+                    param,
+                    tensor_to_file_map,
+                    file_readers,
+                    use_non_blocking,
                 )
 
             if success:
@@ -185,7 +188,9 @@ def _load_fused_parameter(
                 slice_size = source_tensor.shape[dim]
                 slice_indices[dim] = slice(current_offset, current_offset + slice_size)
 
-                param[tuple(slice_indices)].copy_(source_tensor, non_blocking=non_blocking)
+                param[tuple(slice_indices)].copy_(
+                    source_tensor, non_blocking=non_blocking
+                )
                 current_offset += slice_size
 
         elif fusion_details["op"] == "dequantize_mxfp4":
@@ -212,7 +217,10 @@ def _load_fused_parameter(
 
 
 def _load_regular_parameter(
-    param_name: str, param: torch.Tensor, tensor_to_file_map: dict, file_readers: dict,
+    param_name: str,
+    param: torch.Tensor,
+    tensor_to_file_map: dict,
+    file_readers: dict,
     non_blocking: bool = True,
 ) -> bool:
     """Load and process a regular (non-fused) parameter.

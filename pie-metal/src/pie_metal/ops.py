@@ -574,12 +574,6 @@ def get_seq_lens(
         if num_pages > 0:
             seq_lens[i] = (num_pages - 1) * page_size + kv_last_page_lens[i]
 
-    # DEBUG
-    if os.environ.get('PIE_METAL_DEBUG_POSITIONS') == '1':
-        print(f"[DEBUG get_seq_lens] page_size={page_size}, "
-              f"kv_last_page_lens={kv_last_page_lens.cpu().tolist()}, "
-              f"seq_lens={seq_lens.cpu().tolist()}")
-
     return seq_lens
 
 
@@ -615,11 +609,6 @@ def get_batch_indices_positions(
         seq_len = int(seq_lens[batch_idx].item())
         pos_start = seq_len - num_new
         pos_end = seq_len
-
-        # DEBUG
-        if os.environ.get('PIE_METAL_DEBUG_POSITIONS') == '1':
-            print(f"[DEBUG] batch={batch_idx}, seq_len={seq_len}, num_new={num_new}, "
-                  f"positions=[{pos_start}, {pos_end})")
 
         positions[start_idx:end_idx] = torch.arange(
             pos_start,

@@ -57,7 +57,7 @@ def main(
     """
     # Auto-detect device if not specified
     if device is None:
-        device = 'mps' if is_apple_silicon() else 'cuda:0'
+        device = "mps" if is_apple_silicon() else "cuda:0"
         print(f"Auto-detected device: {device}")
 
     config = build_config(

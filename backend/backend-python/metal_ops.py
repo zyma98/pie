@@ -103,7 +103,7 @@ class MetalOps(BackendOps):
         kv_indices: torch.Tensor,
         kv_indptr: torch.Tensor,
         kv_last_page_len: torch.Tensor,
-        kv_layout: str = "NHD"
+        kv_layout: str = "NHD",
     ) -> None:
         """Append KV cache using pie-metal."""
         if not self.available or self.ops is None:
@@ -117,16 +117,20 @@ class MetalOps(BackendOps):
             kv_indices=kv_indices,
             kv_indptr=kv_indptr,
             kv_last_page_len=kv_last_page_len,
-            kv_layout=kv_layout
+            kv_layout=kv_layout,
         )
 
-    def BatchPrefillWithPagedKVCacheWrapper(self, workspace_buffer: torch.Tensor, kv_layout: str = "NHD"):
+    def BatchPrefillWithPagedKVCacheWrapper(
+        self, workspace_buffer: torch.Tensor, kv_layout: str = "NHD"
+    ):
         """Create pie-metal prefill wrapper."""
         if not self.available or self.ops is None:
             raise RuntimeError("pie-metal not available for prefill wrapper")
         return self.ops.BatchPrefillWithPagedKVCacheWrapper(workspace_buffer, kv_layout)  # type: ignore
 
-    def BatchDecodeWithPagedKVCacheWrapper(self, workspace_buffer: torch.Tensor, kv_layout: str = "NHD"):
+    def BatchDecodeWithPagedKVCacheWrapper(
+        self, workspace_buffer: torch.Tensor, kv_layout: str = "NHD"
+    ):
         """Create pie-metal decode wrapper."""
         if not self.available or self.ops is None:
             raise RuntimeError("pie-metal not available for decode wrapper")
@@ -136,7 +140,7 @@ class MetalOps(BackendOps):
         self,
         kv_page_indptr: torch.Tensor,
         kv_last_page_lens: torch.Tensor,
-        page_size: int
+        page_size: int,
     ) -> torch.Tensor:
         """Get sequence lengths using pie-metal."""
         if not self.available or self.ops is None:
@@ -144,10 +148,7 @@ class MetalOps(BackendOps):
         return self.ops.get_seq_lens(kv_page_indptr, kv_last_page_lens, page_size)  # type: ignore
 
     def get_batch_indices_positions(
-        self,
-        append_indptr: torch.Tensor,
-        seq_lens: torch.Tensor,
-        nnz: int
+        self, append_indptr: torch.Tensor, seq_lens: torch.Tensor, nnz: int
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Get batch indices and positions using pie-metal."""
         if not self.available or self.ops is None:

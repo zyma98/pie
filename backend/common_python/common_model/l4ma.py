@@ -261,26 +261,6 @@ class L4maModel(nn.Module):
         super().__init__()
         self.config = config
         self.backend = backend
-
-        # Force deterministic behavior to debug MPS non-determinism
-        import os
-        if os.environ.get('PIE_METAL_DEBUG_HIDDEN_STATES') == '1':
-            torch.manual_seed(42)
-            if hasattr(torch, 'use_deterministic_algorithms'):
-                try:
-                    torch.use_deterministic_algorithms(True, warn_only=True)
-                    print("[DEBUG L4maModel] Enabled deterministic algorithms (warn_only=True)")
-                except Exception as e:
-                    print(f"[DEBUG L4maModel] Could not enable deterministic algorithms: {e}")
-            if hasattr(torch.backends, 'mps') and hasattr(torch.backends.mps, 'deterministic'):
-                torch.backends.mps.deterministic = True
-                print("[DEBUG L4maModel] Enabled MPS deterministic mode")
-            device_str = str(config.device)
-            if 'mps' in device_str and hasattr(torch.mps, 'manual_seed'):
-                torch.mps.manual_seed(42)
-                print("[DEBUG L4maModel] Set MPS manual seed to 42")
-            print(f"[DEBUG L4maModel] Random seed set to 42, device={config.device}")
-
         self.embed_tokens = nn.Embedding(
             config.vocab_size,
             config.hidden_size,
