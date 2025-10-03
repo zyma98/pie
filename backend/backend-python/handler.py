@@ -6,9 +6,7 @@ It instantiates the common Handler class with the appropriate operations
 backend (Metal on Apple Silicon, FlashInfer elsewhere).
 """
 
-import torch
-
-from common import Handler, ModelInfo
+from common import Handler
 from backend_ops import get_backend_ops
 
 
@@ -17,17 +15,7 @@ class PythonHandler(Handler):
 
     def __init__(
         self,
-        model,
-        model_info: ModelInfo,
-        kv_page_size: int,
-        max_dist_size: int,
-        max_num_kv_pages: int,
-        max_num_embeds: int,
-        max_batch_tokens: int,
-        max_num_adapters: int,
-        max_adapter_rank: int,
-        dtype: torch.dtype,
-        device: str,
+        config: dict,
     ):
         """Initialize Python handler with appropriate operations backend."""
 
@@ -36,18 +24,8 @@ class PythonHandler(Handler):
 
         # Initialize parent with selected backend
         super().__init__(
-            model=model,
-            model_info=model_info,
+            config=config,
             ops=backend_ops,
-            kv_page_size=kv_page_size,
-            max_dist_size=max_dist_size,
-            max_num_kv_pages=max_num_kv_pages,
-            max_num_embeds=max_num_embeds,
-            max_batch_tokens=max_batch_tokens,
-            max_num_adapters=max_num_adapters,
-            max_adapter_rank=max_adapter_rank,
-            dtype=dtype,
-            device=device,
         )
 
         print(f"✅ PythonHandler initialized with {backend_ops.backend_name} backend")

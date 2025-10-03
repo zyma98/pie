@@ -2,16 +2,14 @@
 # type: ignore
 # Ignoring checks for pylint and pyright since we are actively working on this file
 
+from typing import Optional
 import fire
-
 from common import (
-    load_model as load_model_common,
     build_config,
     print_config,
     start_service,
 )
 from handler import Handler
-from model_factory import create_model_and_fusion_map
 from platform_detection import is_apple_silicon
 
 
@@ -25,11 +23,12 @@ def main(
     cache_dir: str = None,
     kv_page_size: int = 16,
     max_dist_size: int = 64,
-    max_num_kv_pages: int = 1024,
     max_num_embeds: int = 128,
     max_batch_tokens: int = 10240,
     max_num_adapters: int = 48,
     max_adapter_rank: int = 8,
+    max_num_kv_pages: Optional[int] = None,
+    gpu_mem_headroom: Optional[float] = None,
     device: str = None,
     dtype: str = "bfloat16",
 ):
@@ -71,26 +70,21 @@ def main(
         cache_dir=cache_dir,
         kv_page_size=kv_page_size,
         max_dist_size=max_dist_size,
-        max_num_kv_pages=max_num_kv_pages,
         max_num_embeds=max_num_embeds,
         max_batch_tokens=max_batch_tokens,
         max_num_adapters=max_num_adapters,
         max_adapter_rank=max_adapter_rank,
+        max_num_kv_pages=max_num_kv_pages,
+        gpu_mem_headroom=gpu_mem_headroom,
         device=device,
         dtype=dtype,
     )
 
     print_config(config)
 
-    model_instance, model_metadata = load_model_common(
-        config,
-        create_model_and_fusion_map,
-    )
     start_service(
         config=config,
         handler_cls=Handler,
-        model=model_instance,
-        model_info=model_metadata,
     )
 
 
