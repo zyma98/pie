@@ -14,7 +14,6 @@ import message
 from adapter_import_utils import ensure_adapter_available
 
 from config.common import ModelInfo
-from debug_utils import is_tensor_debug_enabled, checkpoint_validation
 
 
 class Handler:
@@ -189,14 +188,6 @@ class Handler:
                 pass
 
     @torch.inference_mode()
-    @checkpoint_validation(
-        checkpoint_name="handler_forward_pass",
-        capture_tensors=True,
-        include_metadata=True,
-        tolerance=1e-5,
-        backend_comparison=None,
-        performance_monitoring=True,
-    )
     def forward_pass(self, reqs: list[message.ForwardPassRequest]):
         """
         Processes a batch of forward pass requests through the language model.
@@ -462,26 +453,6 @@ class ForwardPassBatch:
         )
         input_embeds = self._handler.lm.model.embed_tokens(token_ids_tensor)
 
-        if input_embeds.numel() and is_tensor_debug_enabled():
-            embed_min, embed_max = input_embeds.aminmax()
-            has_nan = torch.isnan(input_embeds).any().item()
-            has_inf = torch.isinf(input_embeds).any().item()
-            print(
-                "[MetalTensorDebug] stage=input_embeds",
-                "dtype=",
-                input_embeds.dtype,
-                "device=",
-                input_embeds.device,
-                "min=",
-                float(embed_min),
-                "max=",
-                float(embed_max),
-                "has_nan=",
-                bool(has_nan),
-                "has_inf=",
-                bool(has_inf),
-            )
-
         return {
             "input_embeds": input_embeds,
             "position_ids": torch.as_tensor(
@@ -529,31 +500,7 @@ class ForwardPassBatch:
         if logits_input.dtype != self.logits_dtype:
             logits_input = logits_input.to(self.logits_dtype)
 
-        # DEBUG: Check logits input
-        import os
-        if os.environ.get('PIE_METAL_DEBUG_HIDDEN_STATES') == '1':
-            print(f"[DEBUG Handler] logits_input shape: {logits_input.shape}")
-            print(f"[DEBUG Handler] logits_input dtype: {logits_input.dtype}, device: {logits_input.device}")
-            print(f"[DEBUG Handler] logits_input norm: {logits_input.norm().item():.4f}")
-            print(f"[DEBUG Handler] logits_input[0,:5]: {logits_input[0,:5].cpu().tolist()}")
-            print(f"[DEBUG Handler] logits_input min: {logits_input.min().item():.4f}, max: {logits_input.max().item():.4f}")
-
-            # Save to file for comparison
-            if os.environ.get('PIE_METAL_SAVE_HIDDEN_STATES') == '1':
-                import torch as torch_save
-                save_path = "/tmp/pie_metal_hidden_states.pt"
-                torch_save.save(logits_input.cpu(), save_path)
-                print(f"[DEBUG Handler] Saved hidden states to {save_path}")
-
         logits = self._handler.lm.lm_head(logits_input)
-
-        # DEBUG: Check logits output
-        if os.environ.get('PIE_METAL_DEBUG_HIDDEN_STATES') == '1':
-            print(f"[DEBUG Handler] logits shape: {logits.shape}")
-            print(f"[DEBUG Handler] logits norm: {logits.norm().item():.4f}")
-            print(f"[DEBUG Handler] logits[0,:10]: {logits[0,:10].cpu().tolist()}")
-            top_values, top_indices = torch.topk(logits[0], 5)
-            print(f"[DEBUG Handler] Top 5 tokens: indices={top_indices.cpu().tolist()}, values={top_values.cpu().tolist()}")
 
         # Promote logits to handler dtype for numerically stable softmax on Metal/MPS
         if logits.dtype != self.logits_dtype:
