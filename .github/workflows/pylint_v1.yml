@@ -43,11 +43,10 @@ jobs:
       - name: Install uv (provides uvx)
         run: pipx install uv
 
-      - name: Install pie-metal locally (for type checking)
+      - name: Sync backend-python dependencies and install pie-metal
         run: |
-          uv venv .venv
-          source .venv/bin/activate
-          uv pip install -e ./pie-metal
+          uv --project backend/backend-python sync
+          uv --project backend/backend-python pip install -e ./pie-metal
 
       - name: Run Black on changed files (no build)
         shell: bash
@@ -66,7 +65,6 @@ jobs:
           PYTHONPATH: backend/backend-python
         run: |
           set -euo pipefail
-          source .venv/bin/activate
           # allow globs that don't match to disappear
           shopt -s nullglob
 
@@ -123,7 +121,6 @@ jobs:
           PYTHONPATH: backend/backend-python
         run: |
           set -euo pipefail
-          source .venv/bin/activate
           shopt -s nullglob
 
           PREDEF=(backend/backend-python/config/*.py backend/backend-python/model/*.py)
