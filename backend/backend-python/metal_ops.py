@@ -27,7 +27,7 @@ class MetalOps(BackendOps):
             raise RuntimeError(
                 f"pie-metal is required on Apple Silicon but not available: {e}\n"
                 "Install with: pip install ./pie-metal"
-            )
+            ) from e
 
     def decode_image(
         self, image_blob: bytes, dtype: torch.dtype, device: str
@@ -126,7 +126,8 @@ class MetalOps(BackendOps):
         """Create pie-metal prefill wrapper."""
         if not self.available or self.ops is None:
             raise RuntimeError("pie-metal not available for prefill wrapper")
-        return self.ops.BatchPrefillWithPagedKVCacheWrapper(workspace_buffer, kv_layout)  # type: ignore
+        # type: ignore
+        return self.ops.BatchPrefillWithPagedKVCacheWrapper(workspace_buffer, kv_layout)
 
     def BatchDecodeWithPagedKVCacheWrapper(
         self, workspace_buffer: torch.Tensor, kv_layout: str = "NHD"
@@ -134,7 +135,8 @@ class MetalOps(BackendOps):
         """Create pie-metal decode wrapper."""
         if not self.available or self.ops is None:
             raise RuntimeError("pie-metal not available for decode wrapper")
-        return self.ops.BatchDecodeWithPagedKVCacheWrapper(workspace_buffer, kv_layout)  # type: ignore
+        # type: ignore
+        return self.ops.BatchDecodeWithPagedKVCacheWrapper(workspace_buffer, kv_layout)
 
     def get_seq_lens(
         self,

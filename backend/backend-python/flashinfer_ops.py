@@ -132,7 +132,8 @@ class FlashInferOps(BackendOps):
         """Create FlashInfer prefill wrapper."""
         if not self.available or self.ops is None:
             raise RuntimeError("FlashInfer not available for prefill wrapper")
-        return self.ops.BatchPrefillWithPagedKVCacheWrapper(workspace_buffer, kv_layout)  # type: ignore
+        # type: ignore
+        return self.ops.BatchPrefillWithPagedKVCacheWrapper(workspace_buffer, kv_layout)
 
     def BatchDecodeWithPagedKVCacheWrapper(
         self, workspace_buffer: torch.Tensor, kv_layout: str = "NHD"
@@ -140,7 +141,8 @@ class FlashInferOps(BackendOps):
         """Create FlashInfer decode wrapper."""
         if not self.available or self.ops is None:
             raise RuntimeError("FlashInfer not available for decode wrapper")
-        return self.ops.BatchDecodeWithPagedKVCacheWrapper(workspace_buffer, kv_layout)  # type: ignore
+        # type: ignore
+        return self.ops.BatchDecodeWithPagedKVCacheWrapper(workspace_buffer, kv_layout)
 
     def get_seq_lens(
         self,
