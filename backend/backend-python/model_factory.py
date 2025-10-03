@@ -17,6 +17,7 @@ repo_utils.setup_pie_imports()
 from common import (
     ModelInfo,
     L4maArch,
+    Qwen2Arch,
     Qwen3Arch,
     GptOssArch,
 )
@@ -36,10 +37,14 @@ if IS_APPLE_SILICON:
     # On Apple Silicon, these models are not supported yet
     Qwen3ForCausalLM = None  # type: ignore
     create_qwen3_fusion_map = None  # type: ignore
+    Qwen2ForCausalLM = None  # type: ignore
+    create_qwen2_fusion_map = None  # type: ignore
     GptOssForCausalLM = None  # type: ignore
     create_gptoss_fusion_map = None  # type: ignore
 else:
+    # Import model components from local backend-python model directory
     from model.l4ma_flashinfer import FlashInferL4maBackend
+    from model.qwen2 import Qwen2ForCausalLM, create_fusion_map as create_qwen2_fusion_map
     from model.qwen3 import Qwen3ForCausalLM, create_fusion_map as create_qwen3_fusion_map
     from model.gptoss import (
         GptOssForCausalLM,
@@ -61,6 +66,12 @@ def create_model_and_fusion_map(model_info: ModelInfo):
         l4ma_arch = L4maArch(**model_info.architecture.__dict__)
         model = L4maForCausalLM(l4ma_arch, backend=backend)
         fusion_map = create_l4ma_fusion_map(model)
+        return model, fusion_map
+
+    if arch_type == "qwen2":
+        qwen2_arch = Qwen2Arch(**model_info.architecture.__dict__)
+        model = Qwen2ForCausalLM(qwen2_arch)
+        fusion_map = create_qwen2_fusion_map(model)
         return model, fusion_map
 
     if arch_type == "qwen3":
