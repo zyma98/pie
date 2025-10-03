@@ -77,7 +77,7 @@ class BackendOps:
         q: torch.Tensor,
         k: torch.Tensor,
         pos_ids: torch.Tensor,
-        rope_scale: float = 32.0,
+        rope_scale: float = 8.0,
         rope_theta: float = 500000.0,
         low_freq_factor: float = 1.0,
         high_freq_factor: float = 4.0,
@@ -104,16 +104,16 @@ class BackendOps:
             f"append_paged_kv_cache not implemented for {self.backend_name}"
         )
 
-    def get_batch_prefill_wrapper(self, workspace_buffer: torch.Tensor, kv_layout: str = "NHD"):
-        """Get BatchPrefillWithPagedKVCacheWrapper."""
+    def BatchPrefillWithPagedKVCacheWrapper(self, workspace_buffer: torch.Tensor, kv_layout: str = "NHD"):
+        """Create BatchPrefillWithPagedKVCacheWrapper instance."""
         raise NotImplementedError(
-            f"get_batch_prefill_wrapper not implemented for {self.backend_name}"
+            f"BatchPrefillWithPagedKVCacheWrapper not implemented for {self.backend_name}"
         )
 
-    def get_batch_decode_wrapper(self, workspace_buffer: torch.Tensor, kv_layout: str = "NHD"):
-        """Get BatchDecodeWithPagedKVCacheWrapper."""
+    def BatchDecodeWithPagedKVCacheWrapper(self, workspace_buffer: torch.Tensor, kv_layout: str = "NHD"):
+        """Create BatchDecodeWithPagedKVCacheWrapper instance."""
         raise NotImplementedError(
-            f"get_batch_decode_wrapper not implemented for {self.backend_name}"
+            f"BatchDecodeWithPagedKVCacheWrapper not implemented for {self.backend_name}"
         )
 
     def get_seq_lens(

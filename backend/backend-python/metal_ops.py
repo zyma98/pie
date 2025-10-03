@@ -75,7 +75,7 @@ class MetalOps(BackendOps):
         q: torch.Tensor,
         k: torch.Tensor,
         pos_ids: torch.Tensor,
-        rope_scale: float = 32.0,
+        rope_scale: float = 8.0,
         rope_theta: float = 500000.0,
         low_freq_factor: float = 1.0,
         high_freq_factor: float = 4.0,
@@ -120,14 +120,14 @@ class MetalOps(BackendOps):
             kv_layout=kv_layout
         )
 
-    def get_batch_prefill_wrapper(self, workspace_buffer: torch.Tensor, kv_layout: str = "NHD"):
-        """Get pie-metal prefill wrapper."""
+    def BatchPrefillWithPagedKVCacheWrapper(self, workspace_buffer: torch.Tensor, kv_layout: str = "NHD"):
+        """Create pie-metal prefill wrapper."""
         if not self.available or self.ops is None:
             raise RuntimeError("pie-metal not available for prefill wrapper")
         return self.ops.BatchPrefillWithPagedKVCacheWrapper(workspace_buffer, kv_layout)  # type: ignore
 
-    def get_batch_decode_wrapper(self, workspace_buffer: torch.Tensor, kv_layout: str = "NHD"):
-        """Get pie-metal decode wrapper."""
+    def BatchDecodeWithPagedKVCacheWrapper(self, workspace_buffer: torch.Tensor, kv_layout: str = "NHD"):
+        """Create pie-metal decode wrapper."""
         if not self.available or self.ops is None:
             raise RuntimeError("pie-metal not available for decode wrapper")
         return self.ops.BatchDecodeWithPagedKVCacheWrapper(workspace_buffer, kv_layout)  # type: ignore

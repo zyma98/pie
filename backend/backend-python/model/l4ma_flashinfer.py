@@ -171,10 +171,10 @@ class FlashInferL4maBackend(L4maBackend):
             dtype=torch.uint8,
             device=tensor_device,
         )
-        self._decode_wrapper = ops.get_batch_decode_wrapper(
+        self._decode_wrapper = ops.BatchDecodeWithPagedKVCacheWrapper(
             self._workspace_buffer, self.kv_layout
         )
-        self._prefill_wrapper = ops.get_batch_prefill_wrapper(
+        self._prefill_wrapper = ops.BatchPrefillWithPagedKVCacheWrapper(
             self._workspace_buffer, self.kv_layout
         )
 
