@@ -71,12 +71,27 @@ class MetalOps(BackendOps):
 
     # Model operations
     def apply_llama31_rope_pos_ids_inplace(
-        self, q: torch.Tensor, k: torch.Tensor, pos_ids: torch.Tensor
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        pos_ids: torch.Tensor,
+        rope_scale: float = 32.0,
+        rope_theta: float = 500000.0,
+        low_freq_factor: float = 1.0,
+        high_freq_factor: float = 4.0,
     ) -> None:
         """Apply RoPE using pie-metal."""
         if not self.available or self.ops is None:
             raise RuntimeError("pie-metal not available for RoPE")
-        self.ops.apply_llama31_rope_pos_ids_inplace(q=q, k=k, pos_ids=pos_ids)  # type: ignore
+        self.ops.apply_llama31_rope_pos_ids_inplace(
+            q=q,
+            k=k,
+            pos_ids=pos_ids,
+            rope_scale=rope_scale,
+            rope_theta=rope_theta,
+            low_freq_factor=low_freq_factor,
+            high_freq_factor=high_freq_factor,
+        )  # type: ignore
 
     def append_paged_kv_cache(
         self,

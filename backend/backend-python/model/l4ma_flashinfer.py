@@ -90,6 +90,10 @@ class _FlashInferForwardContext(L4maForwardContext):
             q=query_states,
             k=key_states,
             pos_ids=position_ids,
+            rope_scale=self._config.rope_factor,
+            rope_theta=self._config.rope_theta,
+            low_freq_factor=self._config.rope_low_frequency_factor,
+            high_freq_factor=self._config.rope_high_frequency_factor,
         )
 
     def append_kv_cache(
@@ -184,16 +188,36 @@ class FlashInferL4maBackend(L4maBackend):
         self._ensure_workspace(config.device)
 
         page_size = _infer_page_size(inputs.kv_cache_at_layer)
+
+        # DEBUG: Log inputs to position calculation
+        import os
+        if os.environ.get('PIE_METAL_DEBUG_POSITIONS') == '1':
+            print(f"[DEBUG l4ma_flashinfer] BEFORE get_seq_lens:")
+            print(f"  kv_page_indptr: {inputs.kv_page_indptr.cpu().tolist()}")
+            print(f"  kv_last_page_lens: {inputs.kv_last_page_lens.cpu().tolist()}")
+            print(f"  page_size: {page_size}")
+            print(f"  qo_indptr: {inputs.qo_indptr.cpu().tolist()}")
+            print(f"  num_tokens: {inputs.num_tokens}")
+
         seq_lens = ops.get_seq_lens(
             inputs.kv_page_indptr,
             inputs.kv_last_page_lens,
             page_size,
         )
+
+        if os.environ.get('PIE_METAL_DEBUG_POSITIONS') == '1':
+            print(f"[DEBUG l4ma_flashinfer] AFTER get_seq_lens:")
+            print(f"  seq_lens: {seq_lens.cpu().tolist()}")
+
         batch_indices, batch_positions = ops.get_batch_indices_positions(
             append_indptr=inputs.qo_indptr,
             seq_lens=seq_lens,
             nnz=inputs.num_tokens,
         )
+
+        if os.environ.get('PIE_METAL_DEBUG_POSITIONS') == '1':
+            print(f"[DEBUG l4ma_flashinfer] AFTER get_batch_indices_positions:")
+            print(f"  batch_positions: {batch_positions.cpu().tolist()}")
 
         if inputs.single_token_inference_mode:
             wrapper = self._decode_wrapper

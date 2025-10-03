@@ -73,7 +73,14 @@ class BackendOps:
 
     # Model operations (RoPE, KV cache, attention wrappers)
     def apply_llama31_rope_pos_ids_inplace(
-        self, q: torch.Tensor, k: torch.Tensor, pos_ids: torch.Tensor
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        pos_ids: torch.Tensor,
+        rope_scale: float = 32.0,
+        rope_theta: float = 500000.0,
+        low_freq_factor: float = 1.0,
+        high_freq_factor: float = 4.0,
     ) -> None:
         """Apply LLaMA-style RoPE encoding in-place."""
         raise NotImplementedError(

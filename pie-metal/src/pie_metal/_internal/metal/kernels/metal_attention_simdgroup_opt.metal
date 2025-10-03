@@ -87,7 +87,10 @@ kernel void batch_prefill_attention_unified_bf16_simdgroup_kernel(
     int seq_start = qo_indptr[seq_id];
     int seq_pos = int(qo_idx) - seq_start;
     seq_pos = max(seq_pos, 0);
-    int effective_kv_len = min(total_kv_len, seq_pos + 1);
+    // Causal masking: query at position seq_pos attends to [0, kv_seq_start + seq_pos]
+    // where kv_seq_start = total_kv_len - num_qo (queries append to end of KV sequence)
+    int kv_seq_start = total_kv_len - num_qo;
+    int effective_kv_len = min(total_kv_len, kv_seq_start + seq_pos + 1);
     if (qo_idx == 0 && tid_in_tgp == 0 && debug_out != nullptr) {
         debug_out[4] = (float)total_kv_len;
         debug_out[6] = (float)last_page_len;
@@ -372,7 +375,10 @@ kernel void batch_prefill_attention_unified_f32_simdgroup_kernel(
     int seq_start = qo_indptr[seq_id];
     int seq_pos = int(qo_idx) - seq_start;
     seq_pos = max(seq_pos, 0);
-    int effective_kv_len = min(total_kv_len, seq_pos + 1);
+    // Causal masking: query at position seq_pos attends to [0, kv_seq_start + seq_pos]
+    // where kv_seq_start = total_kv_len - num_qo (queries append to end of KV sequence)
+    int kv_seq_start = total_kv_len - num_qo;
+    int effective_kv_len = min(total_kv_len, kv_seq_start + seq_pos + 1);
     if (qo_idx == 0 && tid_in_tgp == 0 && debug_out != nullptr) {
         debug_out[4] = (float)total_kv_len;
         debug_out[6] = (float)last_page_len;
@@ -652,7 +658,10 @@ kernel void batch_prefill_attention_unified_bf16_per_head_kernel(
     int seq_start = qo_indptr[seq_id];
     int seq_pos = int(qo_idx) - seq_start;
     seq_pos = max(seq_pos, 0);
-    int effective_kv_len = min(total_kv_len, seq_pos + 1);
+    // Causal masking: query at position seq_pos attends to [0, kv_seq_start + seq_pos]
+    // where kv_seq_start = total_kv_len - num_qo (queries append to end of KV sequence)
+    int kv_seq_start = total_kv_len - num_qo;
+    int effective_kv_len = min(total_kv_len, kv_seq_start + seq_pos + 1);
 
     if (effective_kv_len <= 0) {
         int output_base = int(qo_idx) * head_dim + int(h) * head_size;

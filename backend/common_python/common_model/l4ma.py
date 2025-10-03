@@ -86,9 +86,7 @@ class L4maMlp(nn.Module):
         """Forward pass through the MLP layer."""
         gate_up_proj_out = self._gate_up_projection(x)
         gate_proj, up_proj = gate_up_proj_out.chunk(2, dim=-1)
-
         interim = self._silu_activation(gate_proj, up_proj)
-
         down_proj = self._down_projection(interim)
         return down_proj
 
@@ -215,6 +213,19 @@ class L4maAttention(nn.Module):
             qkv_states, [self.q_size, self.k_size, self.v_size], dim=-1
         )
 
+        # DEBUG: Capture Q, K, V values for layer 0
+        import os
+        if os.environ.get('PIE_METAL_DEBUG_LAYER0') == '1' and self.layer_idx == 0:
+            print(f"\n[DEBUG L0 QKV] query_states[:3, :5]:")
+            print(query_states[:3, :5])
+            print(f"  Shape: {query_states.shape}")
+            print(f"[DEBUG L0 QKV] key_states[:3, :5]:")
+            print(key_states[:3, :5])
+            print(f"  Shape: {key_states.shape}")
+            print(f"[DEBUG L0 QKV] value_states[:3, :5]:")
+            print(value_states[:3, :5])
+            print(f"  Shape: {value_states.shape}")
+
         if query_states.numel() and is_tensor_debug_enabled():
             q_min, q_max = query_states.aminmax()
             q_nan = torch.isnan(query_states).any().item()
@@ -295,6 +306,15 @@ class L4maAttention(nn.Module):
         value_states = value_states.view(
             n, self.config.num_key_value_heads, self.config.head_size
         )
+
+        # DEBUG: Log position_ids for RoPE
+        import os
+        if os.environ.get('PIE_METAL_DEBUG_POSITIONS') == '1':
+            print(f"[DEBUG L4MA RoPE] position_ids (from protobuf): {position_ids.cpu().tolist()}")
+            print(f"[DEBUG L4MA RoPE] batch_positions (computed): {runtime.batch_positions.cpu().tolist()}")
+            if not torch.equal(position_ids, runtime.batch_positions):
+                print(f"[DEBUG L4MA RoPE] ❌ WARNING: position_ids != batch_positions!")
+                print(f"  Difference: {(position_ids - runtime.batch_positions).cpu().tolist()}")
 
         runtime.apply_rope(query_states, key_states, position_ids)
 
@@ -451,6 +471,11 @@ class L4maDecoderLayer(nn.Module):
 
         hidden_states = self._input_normalization(hidden_states)
 
+        # DEBUG: Check norm after input normalization
+        import os
+        if os.environ.get('PIE_METAL_DEBUG_HIDDEN_STATES') == '1':
+            print(f"[DEBUG NORM] Layer {self.self_attn.layer_idx} after input_layernorm: norm={hidden_states.norm().item():.2f}")
+
         if hidden_states.numel() and is_tensor_debug_enabled():
             post_norm_min, post_norm_max = hidden_states.aminmax()
             post_norm_nan = torch.isnan(hidden_states).any().item()
@@ -471,6 +496,13 @@ class L4maDecoderLayer(nn.Module):
                 bool(post_norm_inf),
             )
 
+        # DEBUG: Capture pre-attention values
+        import os
+        if os.environ.get('PIE_METAL_DEBUG_LAYER0') == '1' and self.self_attn.layer_idx == 0:
+            print(f"\n[DEBUG L0] Before attention, hidden_states[:3, :5]:")
+            print(hidden_states[:3, :5])
+            print(f"  Shape: {hidden_states.shape}, norm: {hidden_states.norm().item():.4f}")
+
         hidden_states = self.self_attn(
             runtime=runtime,
             hidden_states=hidden_states,
@@ -479,7 +511,19 @@ class L4maDecoderLayer(nn.Module):
             adapter_subpass=adapter_subpass,
         )
 
+        # DEBUG: Capture post-attention values
+        if os.environ.get('PIE_METAL_DEBUG_LAYER0') == '1' and self.self_attn.layer_idx == 0:
+            print(f"\n[DEBUG L0] After attention (before residual), hidden_states[:3, :5]:")
+            print(hidden_states[:3, :5])
+            print(f"  Shape: {hidden_states.shape}, norm: {hidden_states.norm().item():.4f}")
+
         hidden_states = residual + hidden_states
+
+        # DEBUG: Capture post-residual values
+        if os.environ.get('PIE_METAL_DEBUG_LAYER0') == '1' and self.self_attn.layer_idx == 0:
+            print(f"\n[DEBUG L0] After residual, hidden_states[:3, :5]:")
+            print(hidden_states[:3, :5])
+            print(f"  Shape: {hidden_states.shape}, norm: {hidden_states.norm().item():.4f}")
 
         if hidden_states.numel() and is_tensor_debug_enabled():
             post_attn_min, post_attn_max = hidden_states.aminmax()
@@ -503,6 +547,10 @@ class L4maDecoderLayer(nn.Module):
 
         residual = hidden_states
         hidden_states = self._post_attention_normalization(hidden_states)
+
+        # DEBUG: Check norm after post-attention normalization
+        if os.environ.get('PIE_METAL_DEBUG_HIDDEN_STATES') == '1':
+            print(f"[DEBUG NORM] Layer {self.self_attn.layer_idx} after post_attn_layernorm: norm={hidden_states.norm().item():.2f}")
 
         if hidden_states.numel() and is_tensor_debug_enabled():
             post_attn_norm_min, post_attn_norm_max = hidden_states.aminmax()
@@ -611,6 +659,25 @@ class L4maModel(nn.Module):
         self.config = config
         self.backend = backend
 
+        # Force deterministic behavior to debug MPS non-determinism
+        import os
+        if os.environ.get('PIE_METAL_DEBUG_HIDDEN_STATES') == '1':
+            torch.manual_seed(42)
+            if hasattr(torch, 'use_deterministic_algorithms'):
+                try:
+                    torch.use_deterministic_algorithms(True, warn_only=True)
+                    print("[DEBUG L4maModel] Enabled deterministic algorithms (warn_only=True)")
+                except Exception as e:
+                    print(f"[DEBUG L4maModel] Could not enable deterministic algorithms: {e}")
+            if hasattr(torch.backends, 'mps') and hasattr(torch.backends.mps, 'deterministic'):
+                torch.backends.mps.deterministic = True
+                print("[DEBUG L4maModel] Enabled MPS deterministic mode")
+            device_str = str(config.device)
+            if 'mps' in device_str and hasattr(torch.mps, 'manual_seed'):
+                torch.mps.manual_seed(42)
+                print("[DEBUG L4maModel] Set MPS manual seed to 42")
+            print(f"[DEBUG L4maModel] Random seed set to 42, device={config.device}")
+
         self.embed_tokens = nn.Embedding(
             config.vocab_size,
             config.hidden_size,
@@ -661,6 +728,18 @@ class L4maModel(nn.Module):
         hidden_states = input_embeds
         n, _ = hidden_states.size()
 
+        # DEBUG: Check input embeddings
+        import os
+        if os.environ.get('PIE_METAL_DEBUG_HIDDEN_STATES') == '1':
+            print(f"[DEBUG L4maModel] input_embeds shape: {hidden_states.shape}")
+            print(f"[DEBUG L4maModel] input_embeds dtype: {hidden_states.dtype}, device: {hidden_states.device}")
+            print(f"[DEBUG L4maModel] input_embeds is_contiguous: {hidden_states.is_contiguous()}")
+            print(f"[DEBUG L4maModel] input_embeds norm: {hidden_states.norm().item():.4f}")
+            print(f"[DEBUG L4maModel] input_embeds min: {hidden_states.min().item():.4f}, max: {hidden_states.max().item():.4f}")
+            print(f"[DEBUG L4maModel] input_embeds[0,:5]: {hidden_states[0,:5].cpu().tolist()}")
+            if n > 1:
+                print(f"[DEBUG L4maModel] input_embeds[1,:5]: {hidden_states[1,:5].cpu().tolist()}")
+
         runtime_inputs = RuntimeInputs(
             num_tokens=n,
             kv_cache_at_layer=kv_cache_at_layer,
@@ -677,7 +756,19 @@ class L4maModel(nn.Module):
             inputs=runtime_inputs,
         )
 
-        for decoder_layer in self.layers:
+        # DEBUG: Log number of layers before loop
+        if os.environ.get('PIE_METAL_DEBUG_HIDDEN_STATES') == '1':
+            print(f"[DEBUG L4maModel] Total layers to execute: {len(self.layers)}")
+            print(f"[DEBUG L4maModel] Config num_layers: {self.config.num_layers}")
+
+        for layer_idx, decoder_layer in enumerate(self.layers):
+            # DEBUG: Check hidden states BEFORE layer
+            if os.environ.get('PIE_METAL_DEBUG_HIDDEN_STATES') == '1' and layer_idx in [7, 8]:
+                has_nan_before = torch.isnan(hidden_states).any().item()
+                has_inf_before = torch.isinf(hidden_states).any().item()
+                print(f"[DEBUG L4maModel] BEFORE layer {layer_idx}: norm={hidden_states.norm().item():.4f}, has_nan={has_nan_before}, has_inf={has_inf_before}")
+                print(f"  min={hidden_states.min().item():.4f}, max={hidden_states.max().item():.4f}")
+
             hidden_states = decoder_layer(
                 runtime=runtime,
                 hidden_states=hidden_states,
@@ -686,7 +777,24 @@ class L4maModel(nn.Module):
                 adapter_subpass=adapter_subpass,
             )
 
+            # DEBUG: Check hidden states after each layer
+            if os.environ.get('PIE_METAL_DEBUG_HIDDEN_STATES') == '1':
+                has_nan = torch.isnan(hidden_states).any().item()
+                has_inf = torch.isinf(hidden_states).any().item()
+                print(f"[DEBUG L4maModel] After layer {layer_idx}: norm={hidden_states.norm().item():.4f}, has_nan={has_nan}, has_inf={has_inf}")
+                if has_nan or has_inf:
+                    print(f"  ⚠️  NaN or Inf detected after layer {layer_idx}!")
+                    print(f"  hidden_states min/max: {hidden_states.min().item()}, {hidden_states.max().item()}")
+                    # Break to stop further processing
+                    break
+
         hidden_states = self.norm(hidden_states)
+
+        # DEBUG: Check final hidden states
+        if os.environ.get('PIE_METAL_DEBUG_HIDDEN_STATES') == '1':
+            print(f"[DEBUG L4maModel] After final norm:")
+            print(f"  hidden_states norm: {hidden_states.norm().item():.4f}")
+            print(f"  hidden_states[0,:5]: {hidden_states[0,:5].cpu().tolist()}")
 
         return hidden_states
 

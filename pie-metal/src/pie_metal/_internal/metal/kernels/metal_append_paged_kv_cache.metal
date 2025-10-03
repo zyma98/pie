@@ -152,3 +152,67 @@ kernel void metal_append_paged_kv_cache_float32(
         paged_v_cache[cache_offset] = v_input[input_offset];
     }
 }
+
+/**
+ * Metal kernel for float16 version
+ */
+kernel void metal_append_paged_kv_cache_float16(
+    device const half *k_input [[buffer(0)]],
+    device const half *v_input [[buffer(1)]],
+    device half *paged_k_cache [[buffer(2)]],
+    device half *paged_v_cache [[buffer(3)]],
+    device const uint *kv_batch_indices [[buffer(4)]],
+    device const uint *kv_positions [[buffer(5)]],
+    device const uint *kv_page_indices [[buffer(6)]],
+    device const uint *kv_page_indptr [[buffer(7)]],
+    device const uint *kv_last_page_lens [[buffer(8)]],
+    device const float* params_raw [[buffer(9)]],
+    uint3 thread_position_in_grid [[thread_position_in_grid]]
+) {
+    const uint token_idx = thread_position_in_grid.x;
+    const uint head_idx = thread_position_in_grid.y;
+    const uint head_offset = thread_position_in_grid.z;
+
+    if (token_idx >= ((uint)params_raw[0]) ||
+        head_idx >= ((uint)params_raw[1]) ||
+        head_offset >= ((uint)params_raw[2])) {
+        return;
+    }
+
+    const uint batch_idx = kv_batch_indices[token_idx];
+    const uint token_position = kv_positions[token_idx];
+
+    if (batch_idx >= ((uint)params_raw[5])) {
+        return;
+    }
+
+    const uint page_start = kv_page_indptr[batch_idx];
+    const uint page_end = kv_page_indptr[batch_idx + 1];
+
+    const uint page_offset_in_batch = token_position / ((uint)params_raw[3]);
+    const uint position_in_page = token_position % ((uint)params_raw[3]);
+
+    const uint page_logical = page_start + page_offset_in_batch;
+    if (page_logical >= page_end) {
+        return;
+    }
+
+    const uint physical_page = kv_page_indices[page_logical];
+    if (physical_page >= ((uint)params_raw[4])) {
+        return;
+    }
+
+    const uint input_offset = token_idx * ((uint)params_raw[6]) +
+                             head_idx * ((uint)params_raw[7]) +
+                             head_offset;
+
+    const uint cache_offset = physical_page * (((uint)params_raw[3]) * ((uint)params_raw[1]) * ((uint)params_raw[2])) +
+                             position_in_page * (((uint)params_raw[1]) * ((uint)params_raw[2])) +
+                             head_idx * ((uint)params_raw[2]) +
+                             head_offset;
+
+    if (input_offset < ((uint)params_raw[0]) * ((uint)params_raw[1]) * ((uint)params_raw[2])) {
+        paged_k_cache[cache_offset] = k_input[input_offset];
+        paged_v_cache[cache_offset] = v_input[input_offset];
+    }
+}

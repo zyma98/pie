@@ -21,7 +21,8 @@ using namespace metal;
 // Each thread processes one pair (x, y) -> (x', y') where:
 // x' = x * cos(θ) - y * sin(θ)
 // y' = x * sin(θ) + y * cos(θ)
-// θ = position_id / (rope_theta^(2*i/head_size)) * rope_factor
+// θ = position_id * inv_freq (where inv_freq uses LLaMA 3.1 wavelength-based scaling)
+// UPDATED 2025-10-03: Implemented Llama3 rope_type formula with wavelength-based scaling
 kernel void metal_rope_bfloat16(
     device bfloat* input_qk           [[buffer(0)]],  // [num_tokens, num_heads, head_size] input/output tensor
     device const int* position_ids    [[buffer(1)]],  // [num_tokens] position indices
@@ -57,14 +58,38 @@ kernel void metal_rope_bfloat16(
     // Get position for this token
     const float position = float(position_ids[token_idx]);
 
-    // Compute rotary frequency for this pair
-    // freq = 1.0 / (rope_theta^(2*pair_idx/head_size)) * rope_factor
-    const float exponent = (2.0f * float(pair_idx)) / float(((uint32_t)params_raw[2]));
-    const float freq_base = powr(params_raw[3], exponent);
-    const float freq = params_raw[4] / freq_base;
+    const float head_size = params_raw[2];
+    const float rope_theta = params_raw[3];
+    const float rope_factor = params_raw[4];
+
+    // Compute base inverse frequency
+    const float exponent = (2.0f * float(pair_idx)) / head_size;
+    const float inv_freq_base = 1.0f / powr(rope_theta, exponent);
+
+    // Apply LLaMA 3.1 wavelength-based selective scaling
+    const float PI = 3.14159265359f;
+    const float wavelen = 2.0f * PI / inv_freq_base;
+
+    const float low_freq_factor = 1.0f;
+    const float high_freq_factor = 4.0f;
+    const float old_context_len = 8192.0f;
+
+    const float low_freq_wavelen = old_context_len / low_freq_factor;
+    const float high_freq_wavelen = old_context_len / high_freq_factor;
+
+    float inv_freq;
+    if (wavelen > low_freq_wavelen) {
+        inv_freq = inv_freq_base / rope_factor;
+    } else if (wavelen < high_freq_wavelen) {
+        inv_freq = inv_freq_base;
+    } else {
+        const float smooth_factor = (old_context_len / wavelen - low_freq_factor) / (high_freq_factor - low_freq_factor);
+        const float scaled_inv_freq = inv_freq_base / rope_factor;
+        inv_freq = (1.0f - smooth_factor) * scaled_inv_freq + smooth_factor * inv_freq_base;
+    }
 
     // Compute angle
-    const float theta = position * freq;
+    const float theta = position * inv_freq;
     const float cos_theta = cos(theta);
     const float sin_theta = sin(theta);
 
@@ -113,19 +138,49 @@ kernel void metal_rope_float32(
         x_idx = base_idx + pair_idx;
         y_idx = base_idx + pair_idx + ((uint32_t)params_raw[2]) / 2;
     }
-    
+
 
     // Get position for this token
     const float position = float(position_ids[token_idx]);
 
-    // Compute rotary frequency for this pair
-    // freq = 1.0 / (rope_theta^(2*pair_idx/head_size)) * rope_factor
-    const float exponent = (2.0f * float(pair_idx)) / float(((uint32_t)params_raw[2]));
-    const float freq_base = powr(params_raw[3], exponent);
-    const float freq = params_raw[4] / freq_base;
+    const float head_size = params_raw[2];
+    const float rope_theta = params_raw[3];
+    const float rope_factor = params_raw[4];
+
+    // Compute base inverse frequency: inv_freq_base = 1 / (rope_theta^(2*pair_idx/head_size))
+    const float exponent = (2.0f * float(pair_idx)) / head_size;
+    const float inv_freq_base = 1.0f / powr(rope_theta, exponent);
+
+    // Apply LLaMA 3.1 wavelength-based selective scaling
+    // Following HuggingFace's exact implementation
+    const float PI = 3.14159265359f;
+    const float wavelen = 2.0f * PI / inv_freq_base;
+
+    // Wavelength boundaries (matching HF config)
+    const float low_freq_factor = 1.0f;
+    const float high_freq_factor = 4.0f;
+    const float old_context_len = 8192.0f;
+
+    const float low_freq_wavelen = old_context_len / low_freq_factor;
+    const float high_freq_wavelen = old_context_len / high_freq_factor;
+
+    // Apply selective scaling
+    float inv_freq;
+    if (wavelen > low_freq_wavelen) {
+        // Long wavelengths: divide by rope_factor
+        inv_freq = inv_freq_base / rope_factor;
+    } else if (wavelen < high_freq_wavelen) {
+        // Short wavelengths: no change
+        inv_freq = inv_freq_base;
+    } else {
+        // Medium wavelengths: smooth interpolation
+        const float smooth_factor = (old_context_len / wavelen - low_freq_factor) / (high_freq_factor - low_freq_factor);
+        const float scaled_inv_freq = inv_freq_base / rope_factor;
+        inv_freq = (1.0f - smooth_factor) * scaled_inv_freq + smooth_factor * inv_freq_base;
+    }
 
     // Compute angle
-    const float theta = position * freq;
+    const float theta = position * inv_freq;
     const float cos_theta = cos(theta);
     const float sin_theta = sin(theta);
 
@@ -161,14 +216,49 @@ kernel void metal_rope_float16(
 
     const uint32_t base_idx = token_idx * ((uint32_t)params_raw[1]) * ((uint32_t)params_raw[2]) +
                               head_idx * ((uint32_t)params_raw[2]);
-    const uint32_t x_idx = base_idx + pair_idx;
-    const uint32_t y_idx = base_idx + pair_idx + ((uint32_t)params_raw[2]) / 2;
+
+    uint32_t x_idx, y_idx;
+    if ((((int)params_raw[5]) != 0)) {
+        // Interleaved layout: even/odd indices [0,1,2,3...] -> pairs (0,1), (2,3), etc.
+        x_idx = base_idx + pair_idx * 2;
+        y_idx = base_idx + pair_idx * 2 + 1;
+    } else {
+        // Non-interleaved layout: split halves [0,1,2,3...] -> pairs (0,2), (1,3), etc.
+        x_idx = base_idx + pair_idx;
+        y_idx = base_idx + pair_idx + ((uint32_t)params_raw[2]) / 2;
+    }
 
     const float position = float(position_ids[token_idx]);
-    const float exponent = (2.0f * float(pair_idx)) / float(((uint32_t)params_raw[2]));
-    const float freq_base = powr(params_raw[3], exponent);
-    const float freq = params_raw[4] / freq_base;
-    const float theta = position * freq;
+
+    const float head_size = params_raw[2];
+    const float rope_theta = params_raw[3];
+    const float rope_factor = params_raw[4];
+
+    const float exponent = (2.0f * float(pair_idx)) / head_size;
+    const float inv_freq_base = 1.0f / powr(rope_theta, exponent);
+
+    const float PI = 3.14159265359f;
+    const float wavelen = 2.0f * PI / inv_freq_base;
+
+    const float low_freq_factor = 1.0f;
+    const float high_freq_factor = 4.0f;
+    const float old_context_len = 8192.0f;
+
+    const float low_freq_wavelen = old_context_len / low_freq_factor;
+    const float high_freq_wavelen = old_context_len / high_freq_factor;
+
+    float inv_freq;
+    if (wavelen > low_freq_wavelen) {
+        inv_freq = inv_freq_base / rope_factor;
+    } else if (wavelen < high_freq_wavelen) {
+        inv_freq = inv_freq_base;
+    } else {
+        const float smooth_factor = (old_context_len / wavelen - low_freq_factor) / (high_freq_factor - low_freq_factor);
+        const float scaled_inv_freq = inv_freq_base / rope_factor;
+        inv_freq = (1.0f - smooth_factor) * scaled_inv_freq + smooth_factor * inv_freq_base;
+    }
+
+    const float theta = position * inv_freq;
     const float cos_theta = cos(theta);
     const float sin_theta = sin(theta);
 

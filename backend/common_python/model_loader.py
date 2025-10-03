@@ -102,8 +102,10 @@ def load_model(
                             if needs_conversion:
                                 to_method = getattr(tensor_data, "to")
                                 tensor_data = to_method(**conversion_kwargs)
+                        # Use blocking copy for MPS device to avoid race conditions
+                        use_non_blocking = param.device.type != "mps"
                         with torch.no_grad():
-                            param.copy_(tensor_data, non_blocking=True)
+                            param.copy_(tensor_data, non_blocking=use_non_blocking)
                         loaded_keys.add(name)
 
         for target_name, details in tqdm(
@@ -131,8 +133,11 @@ def load_model(
                         f"    Warning: Shape mismatch for fused tensor '{target_name}'. Skipping."
                     )
                     continue
+                # Use blocking copy for MPS device to avoid race conditions
+                # MPS async operations may not complete before function returns
+                use_non_blocking = param.device.type != "mps"
                 with torch.no_grad():
-                    param.copy_(fused_tensor, non_blocking=True)
+                    param.copy_(fused_tensor, non_blocking=use_non_blocking)
                 loaded_keys.add(target_name)
 
         if "lm_head.weight" in model_state_keys and "lm_head.weight" not in loaded_keys:

@@ -4,16 +4,22 @@ FlashInfer-compatible API for pie-metal.
 This module provides a drop-in replacement for FlashInfer operations using
 Metal acceleration on macOS with Apple Silicon. When Metal is not available,
 it raises informative errors directing users to use PyTorch implementations.
+
+Can be run in PyTorch-only mode via PIE_METAL_PYTORCH_MODE=1 for testing.
 """
 
 import platform
 import sys
 from typing import Tuple, Dict, Any, Optional
 import torch
+import os
 
 # Detect hardware capabilities
 IS_MACOS = platform.system() == "Darwin"
 IS_APPLE_SILICON = IS_MACOS and platform.processor() == "arm"
+
+# Check if PyTorch-only mode is enabled
+PYTORCH_MODE = os.environ.get('PIE_METAL_PYTORCH_MODE', '0') == '1'
 
 # Global MPS shader compiler instance (initialized lazily)
 _mps_compiler = None
@@ -30,6 +36,10 @@ def _validate_mps_device(tensor: torch.Tensor, name: str) -> None:
     Raises:
         RuntimeError: If tensor is not on MPS device
     """
+    # Skip validation in PyTorch mode (allows CPU tensors)
+    if PYTORCH_MODE:
+        return
+
     if tensor.device.type != 'mps':
         raise RuntimeError(
             f"pie-metal requires all tensors to be on MPS device. "
@@ -43,6 +53,14 @@ def _validate_mps_device(tensor: torch.Tensor, name: str) -> None:
 def _initialize_mps_backend() -> bool:
     """Initialize MPS shader backend - returns success status"""
     global _mps_compiler, _mps_available
+
+    # If PyTorch mode is enabled, skip Metal initialization
+    if PYTORCH_MODE:
+        print("⚠️  PIE_METAL_PYTORCH_MODE=1: Using PyTorch reference implementations")
+        print("   Metal kernels disabled - operations will use pure PyTorch")
+        print("   This mode is for testing/debugging only and will be slower")
+        _mps_available = False
+        return True  # Return True to allow initialization to proceed
 
     if not IS_APPLE_SILICON:
         print("❌ pie-metal requires macOS with Apple Silicon (M1/M2/M3)")
@@ -109,7 +127,7 @@ class BatchPrefillWithPagedKVCacheWrapper:
     Drop-in replacement for flashinfer.BatchPrefillWithPagedKVCacheWrapper
 
     Handles prefill attention operations (processing multiple tokens per sequence).
-    Plans operation parameters and executes attention using Metal kernels.
+    Plans operation parameters and executes attention using Metal kernels or PyTorch fallback.
     """
 
     def __init__(self, workspace_buffer: torch.Tensor, kv_layout: str = "NHD"):
@@ -124,6 +142,7 @@ class BatchPrefillWithPagedKVCacheWrapper:
         self.kv_layout = kv_layout
         self._planned_params: Optional[Dict[str, Any]] = None
         self._is_planned = False
+        self._pytorch_mode = PYTORCH_MODE
 
     def plan(self,
              qo_indptr: torch.Tensor,
@@ -198,8 +217,21 @@ class BatchPrefillWithPagedKVCacheWrapper:
         return self._run_metal(query, kv_cache)
 
     def _run_metal(self, query: torch.Tensor, kv_cache: torch.Tensor) -> torch.Tensor:
-        """Execute using MPS shader kernels"""
+        """Execute using MPS shader kernels or PyTorch fallback"""
         assert self._planned_params is not None, "plan() must be called before run()"
+
+        # If PyTorch mode is enabled, use PyTorch reference implementation
+        if self._pytorch_mode:
+            from ._internal.pytorch_reference import attention_reference
+            return attention_reference(
+                query=query,
+                kv_cache=kv_cache,
+                kv_page_indices=self._planned_params['kv_page_indices'],
+                kv_page_indptr=self._planned_params['kv_page_indptr'],
+                kv_last_page_lens=self._planned_params['kv_last_page_lens'],
+                qo_indptr=self._planned_params['qo_indptr'],
+                custom_mask=self._planned_params['custom_mask']
+            )
 
         if not _mps_available or _mps_compiler is None:
             raise RuntimeError("MPS backend not initialized - pie-metal requires MPS support")
@@ -228,6 +260,7 @@ class BatchDecodeWithPagedKVCacheWrapper:
         self.kv_layout = kv_layout
         self._planned_params: Optional[Dict[str, Any]] = None
         self._is_planned = False
+        self._pytorch_mode = PYTORCH_MODE
 
     def plan(self,
              indptr: torch.Tensor,
@@ -269,11 +302,24 @@ class BatchDecodeWithPagedKVCacheWrapper:
         # For decode, we have one token per batch element
         assert self._planned_params is not None, "plan() must be called before run()"
 
-        if not _mps_available or _mps_compiler is None:
-            raise RuntimeError("MPS backend not initialized - pie-metal requires MPS support")
-
         batch_size = self._planned_params['kv_page_indptr'].shape[0] - 1
         qo_indptr = torch.arange(batch_size + 1, dtype=torch.int32, device=query.device)
+
+        # If PyTorch mode is enabled, use PyTorch reference implementation
+        if self._pytorch_mode:
+            from ._internal.pytorch_reference import attention_reference
+            return attention_reference(
+                query=query,
+                kv_cache=kv_cache,
+                kv_page_indices=self._planned_params['kv_page_indices'],
+                kv_page_indptr=self._planned_params['kv_page_indptr'],
+                kv_last_page_lens=self._planned_params['kv_last_page_lens'],
+                qo_indptr=qo_indptr,
+                custom_mask=None
+            )
+
+        if not _mps_available or _mps_compiler is None:
+            raise RuntimeError("MPS backend not initialized - pie-metal requires MPS support")
 
         return _mps_compiler.run_attention_mps(
             query=query,
@@ -292,7 +338,7 @@ def apply_llama31_rope_pos_ids_inplace(
     pos_ids: torch.Tensor,
     rotary_dim: Optional[int] = None,
     interleave: bool = False,
-    rope_scale: float = 8.0,
+    rope_scale: float = 32.0,
     rope_theta: float = 500000.0,
     low_freq_factor: float = 1.0,
     high_freq_factor: float = 4.0,
@@ -341,6 +387,32 @@ def apply_llama31_rope_pos_ids_inplace(
             f"old_context_len parameter is not supported in Metal RoPE implementation. "
             f"Got old_context_len={old_context_len}, expected 8192."
         )
+
+    # If PyTorch mode is enabled, use PyTorch reference implementation
+    if PYTORCH_MODE:
+        from ._internal.pytorch_reference import rope_reference
+        # Apply RoPE in-place with LLaMA 3.1-style wavelength-based scaling
+        rope_reference(
+            q, pos_ids,
+            rope_theta=rope_theta,
+            rope_factor=rope_scale,
+            interleaved=interleave,
+            inplace=True,
+            low_freq_factor=low_freq_factor,
+            high_freq_factor=high_freq_factor,
+            old_context_len=old_context_len
+        )
+        rope_reference(
+            k, pos_ids,
+            rope_theta=rope_theta,
+            rope_factor=rope_scale,
+            interleaved=interleave,
+            inplace=True,
+            low_freq_factor=low_freq_factor,
+            high_freq_factor=high_freq_factor,
+            old_context_len=old_context_len
+        )
+        return
 
     # Verify Metal kernels are available
     if not _mps_available or _mps_compiler is None or 'rope' not in _mps_compiler.compiled_libraries:
@@ -401,6 +473,33 @@ def append_paged_kv_cache(
     _validate_mps_device(kv_indptr, "kv_indptr")
     _validate_mps_device(kv_last_page_len, "kv_last_page_len")
 
+    # If PyTorch mode is enabled, use PyTorch reference implementation
+    if PYTORCH_MODE:
+        from ._internal.pytorch_reference import append_paged_kv_cache_reference
+        # Extract dimensions
+        num_tokens, num_kv_heads, head_dim = append_key.shape
+
+        # Flatten key/value inputs: [num_tokens, num_kv_heads, head_dim] -> [num_tokens, num_kv_heads * head_dim]
+        append_key_flat = append_key.reshape(num_tokens, num_kv_heads * head_dim)
+        append_value_flat = append_value.reshape(num_tokens, num_kv_heads * head_dim)
+
+        # Split and flatten paged_kv_cache for reference function
+        # Input shape: [num_pages, 2, page_size, num_kv_heads, head_dim]
+        # Output shape: [num_pages, page_size, num_kv_heads * head_dim]
+        paged_k = paged_kv_cache[:, 0, :, :, :].reshape(
+            paged_kv_cache.shape[0], paged_kv_cache.shape[2], num_kv_heads * head_dim
+        )
+        paged_v = paged_kv_cache[:, 1, :, :, :].reshape(
+            paged_kv_cache.shape[0], paged_kv_cache.shape[2], num_kv_heads * head_dim
+        )
+
+        append_paged_kv_cache_reference(
+            append_key_flat, append_value_flat, paged_k, paged_v,
+            batch_indices, positions, kv_indices, kv_indptr, kv_last_page_len,
+            num_kv_heads=num_kv_heads, head_size=head_dim
+        )
+        return
+
     try:
         # Try to use Metal append_kv_cache kernel via MPSShaderCompiler
         from ._internal.mps_shader_integration import get_mps_compiler
@@ -412,20 +511,38 @@ def append_paged_kv_cache(
 
             # Reshape inputs for Metal kernel
             # Metal expects [num_tokens, num_kv_heads * head_dim] for key/value
-            k_flat = append_key.reshape(num_tokens, num_kv_heads * head_dim)
-            v_flat = append_value.reshape(num_tokens, num_kv_heads * head_dim)
+            k_flat = append_key.contiguous().reshape(num_tokens, num_kv_heads * head_dim)
+            v_flat = append_value.contiguous().reshape(num_tokens, num_kv_heads * head_dim)
 
             # Split paged_kv_cache into K and V caches
             # Expected shape: [num_pages, 2, page_size, num_kv_heads, head_dim]
-            paged_k = paged_kv_cache[:, 0, :, :, :].reshape(paged_kv_cache.shape[0], paged_kv_cache.shape[2], -1)
-            paged_v = paged_kv_cache[:, 1, :, :, :].reshape(paged_kv_cache.shape[0], paged_kv_cache.shape[2], -1)
+            # Extract K and V slices: [num_pages, page_size, num_kv_heads, head_dim]
+            # IMPORTANT: Clone to avoid memory aliasing issues when writing back
+            paged_k_4d = paged_kv_cache[:, 0, :, :, :].clone()
+            paged_v_4d = paged_kv_cache[:, 1, :, :, :].clone()
+
+            # Flatten to [num_pages, page_size, num_kv_heads * head_dim] for Metal kernel
+            # Make contiguous copies (Metal requires contiguous memory)
+            paged_k_flat = paged_k_4d.reshape(paged_kv_cache.shape[0], paged_kv_cache.shape[2], -1).contiguous()
+            paged_v_flat = paged_v_4d.reshape(paged_kv_cache.shape[0], paged_kv_cache.shape[2], -1).contiguous()
 
             compiler.run_append_paged_kv_cache_mps(
-                k_flat, v_flat, paged_k, paged_v,
+                k_flat, v_flat, paged_k_flat, paged_v_flat,
                 batch_indices, positions, kv_indices, kv_indptr, kv_last_page_len,
                 num_kv_heads=num_kv_heads,
                 head_size=head_dim
             )
+
+            # CRITICAL: Copy results back to original cache
+            # The Metal kernel modified the contiguous copies in-place, so we must write back
+            # Reshape back to 4D: [num_pages, page_size, num_kv_heads, head_dim]
+            paged_k_4d_updated = paged_k_flat.reshape(paged_kv_cache.shape[0], paged_kv_cache.shape[2], num_kv_heads, head_dim)
+            paged_v_4d_updated = paged_v_flat.reshape(paged_kv_cache.shape[0], paged_kv_cache.shape[2], num_kv_heads, head_dim)
+
+            # Write back to original 5D cache
+            # Use copy_() to avoid memory overlap issues
+            paged_kv_cache[:, 0, :, :, :].copy_(paged_k_4d_updated)
+            paged_kv_cache[:, 1, :, :, :].copy_(paged_v_4d_updated)
             return
     except Exception as e:
         # Re-raise to expose the issue - NO FALLBACK for Metal operations
@@ -457,6 +574,12 @@ def get_seq_lens(
         if num_pages > 0:
             seq_lens[i] = (num_pages - 1) * page_size + kv_last_page_lens[i]
 
+    # DEBUG
+    if os.environ.get('PIE_METAL_DEBUG_POSITIONS') == '1':
+        print(f"[DEBUG get_seq_lens] page_size={page_size}, "
+              f"kv_last_page_lens={kv_last_page_lens.cpu().tolist()}, "
+              f"seq_lens={seq_lens.cpu().tolist()}")
+
     return seq_lens
 
 
@@ -480,13 +603,27 @@ def get_batch_indices_positions(
         batch_indices[start_idx:end_idx] = batch_idx
 
     # Compute positions
+    # NOTE: seq_lens represents the KV cache length AFTER appending the new tokens.
+    # The controller updates kv_last_page_lens to include space for new tokens.
+    # Therefore, positions should be: [seq_len - num_new, seq_len)
+    # This gives the range where new tokens will be written.
     positions = torch.empty(nnz, dtype=torch.int32, device=device)
     for batch_idx in range(append_indptr.numel() - 1):
         start_idx = int(append_indptr[batch_idx].item())
         end_idx = int(append_indptr[batch_idx + 1].item())
+        num_new = end_idx - start_idx
+        seq_len = int(seq_lens[batch_idx].item())
+        pos_start = seq_len - num_new
+        pos_end = seq_len
+
+        # DEBUG
+        if os.environ.get('PIE_METAL_DEBUG_POSITIONS') == '1':
+            print(f"[DEBUG] batch={batch_idx}, seq_len={seq_len}, num_new={num_new}, "
+                  f"positions=[{pos_start}, {pos_end})")
+
         positions[start_idx:end_idx] = torch.arange(
-            int(seq_lens[batch_idx].item()) - (end_idx - start_idx),
-            int(seq_lens[batch_idx].item()),
+            pos_start,
+            pos_end,
             dtype=torch.int32,
             device=device
         )
