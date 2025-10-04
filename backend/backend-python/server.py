@@ -11,6 +11,7 @@ from __future__ import annotations
 import enum
 import os
 import random
+import signal
 import struct
 import sys
 import queue
@@ -26,6 +27,9 @@ import torch
 import zmq
 from platformdirs import user_cache_dir
 from websockets.sync.client import connect
+
+# Import profiler for performance analysis
+from profiler import report_profiling_results
 
 from message import (
     DownloadAdapterRequest,
@@ -165,16 +169,29 @@ def start_service(
             daemon=True,
         ).start()
 
+    # Setup shutdown flag and signal handlers
+    shutdown_event = threading.Event()
+
+    def shutdown_handler(signum, frame):
+        print(f"\nReceived signal {signum}, shutting down server...")
+        shutdown_event.set()
+
+    signal.signal(signal.SIGTERM, shutdown_handler)
+    signal.signal(signal.SIGINT, shutdown_handler)
+
     try:
-        # Block forever until receiving keyboard interrupt
-        while True:
-            threading.Event().wait()
-    except KeyboardInterrupt:
-        print("\nShutting down server...")
+        # Block until shutdown signal
+        shutdown_event.wait()
     finally:
         socket.close()
         context.term()
         print("Server shutdown complete.")
+
+        # Print profiling results
+        print("\n" + "=" * 80)
+        print("PROFILING RESULTS")
+        print("=" * 80)
+        report_profiling_results()
 
 
 def register_thread(config: Dict[str, Any], endpoint: str) -> None:
