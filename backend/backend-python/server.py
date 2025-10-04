@@ -172,7 +172,7 @@ def start_service(
     # Setup shutdown flag and signal handlers
     shutdown_event = threading.Event()
 
-    def shutdown_handler(signum, frame):
+    def shutdown_handler(signum, _frame):
         print(f"\nReceived signal {signum}, shutting down server...")
         shutdown_event.set()
 
