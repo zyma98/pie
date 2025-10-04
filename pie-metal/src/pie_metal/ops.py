@@ -500,49 +500,64 @@ def append_paged_kv_cache(
         )
         return
 
+    # Import profiler for detailed timing
+    try:
+        from profiler import start_profile
+    except ImportError:
+        from contextlib import nullcontext
+        def start_profile(name):
+            return nullcontext()
+
     try:
         # Try to use Metal append_kv_cache kernel via MPSShaderCompiler
         from ._internal.mps_shader_integration import get_mps_compiler
 
         compiler = get_mps_compiler()
         if compiler.can_use_mps_kernels() and 'append_kv_cache' in compiler.compiled_libraries:
-            # Extract dimensions
-            num_tokens, num_kv_heads, head_dim = append_key.shape
+            with start_profile("append_kv_input_reshape"):
+                # Extract dimensions
+                num_tokens, num_kv_heads, head_dim = append_key.shape
 
-            # Reshape inputs for Metal kernel
-            # Metal expects [num_tokens, num_kv_heads * head_dim] for key/value
-            k_flat = append_key.contiguous().reshape(num_tokens, num_kv_heads * head_dim)
-            v_flat = append_value.contiguous().reshape(num_tokens, num_kv_heads * head_dim)
+                # Reshape inputs for Metal kernel
+                # Metal expects [num_tokens, num_kv_heads * head_dim] for key/value
+                k_flat = append_key.contiguous().reshape(num_tokens, num_kv_heads * head_dim)
+                v_flat = append_value.contiguous().reshape(num_tokens, num_kv_heads * head_dim)
 
             # Split paged_kv_cache into K and V caches
             # Expected shape: [num_pages, 2, page_size, num_kv_heads, head_dim]
             # Extract K and V slices: [num_pages, page_size, num_kv_heads, head_dim]
             # IMPORTANT: Clone to avoid memory aliasing issues when writing back
-            paged_k_4d = paged_kv_cache[:, 0, :, :, :].clone()
-            paged_v_4d = paged_kv_cache[:, 1, :, :, :].clone()
+            # WARNING: This COPIES the ENTIRE KV cache buffer (~640MB for 10K pages)!
+            with start_profile("append_kv_clone_buffers"):
+                paged_k_4d = paged_kv_cache[:, 0, :, :, :].clone()
+                paged_v_4d = paged_kv_cache[:, 1, :, :, :].clone()
 
             # Flatten to [num_pages, page_size, num_kv_heads * head_dim] for Metal kernel
             # Make contiguous copies (Metal requires contiguous memory)
-            paged_k_flat = paged_k_4d.reshape(paged_kv_cache.shape[0], paged_kv_cache.shape[2], -1).contiguous()
-            paged_v_flat = paged_v_4d.reshape(paged_kv_cache.shape[0], paged_kv_cache.shape[2], -1).contiguous()
+            with start_profile("append_kv_flatten_cache"):
+                paged_k_flat = paged_k_4d.reshape(paged_kv_cache.shape[0], paged_kv_cache.shape[2], -1).contiguous()
+                paged_v_flat = paged_v_4d.reshape(paged_kv_cache.shape[0], paged_kv_cache.shape[2], -1).contiguous()
 
-            compiler.run_append_paged_kv_cache_mps(
-                k_flat, v_flat, paged_k_flat, paged_v_flat,
-                batch_indices, positions, kv_indices, kv_indptr, kv_last_page_len,
-                num_kv_heads=num_kv_heads,
-                head_size=head_dim
-            )
+            with start_profile("append_kv_metal_kernel"):
+                compiler.run_append_paged_kv_cache_mps(
+                    k_flat, v_flat, paged_k_flat, paged_v_flat,
+                    batch_indices, positions, kv_indices, kv_indptr, kv_last_page_len,
+                    num_kv_heads=num_kv_heads,
+                    head_size=head_dim
+                )
 
             # CRITICAL: Copy results back to original cache
             # The Metal kernel modified the contiguous copies in-place, so we must write back
-            # Reshape back to 4D: [num_pages, page_size, num_kv_heads, head_dim]
-            paged_k_4d_updated = paged_k_flat.reshape(paged_kv_cache.shape[0], paged_kv_cache.shape[2], num_kv_heads, head_dim)
-            paged_v_4d_updated = paged_v_flat.reshape(paged_kv_cache.shape[0], paged_kv_cache.shape[2], num_kv_heads, head_dim)
+            # WARNING: Another FULL COPY of the entire KV cache!
+            with start_profile("append_kv_copy_back"):
+                # Reshape back to 4D: [num_pages, page_size, num_kv_heads, head_dim]
+                paged_k_4d_updated = paged_k_flat.reshape(paged_kv_cache.shape[0], paged_kv_cache.shape[2], num_kv_heads, head_dim)
+                paged_v_4d_updated = paged_v_flat.reshape(paged_kv_cache.shape[0], paged_kv_cache.shape[2], num_kv_heads, head_dim)
 
-            # Write back to original 5D cache
-            # Use copy_() to avoid memory overlap issues
-            paged_kv_cache[:, 0, :, :, :].copy_(paged_k_4d_updated)
-            paged_kv_cache[:, 1, :, :, :].copy_(paged_v_4d_updated)
+                # Write back to original 5D cache
+                # Use copy_() to avoid memory overlap issues
+                paged_kv_cache[:, 0, :, :, :].copy_(paged_k_4d_updated)
+                paged_kv_cache[:, 1, :, :, :].copy_(paged_v_4d_updated)
             return
     except Exception as e:
         # Re-raise to expose the issue - NO FALLBACK for Metal operations
