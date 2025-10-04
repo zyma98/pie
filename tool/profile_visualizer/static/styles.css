@@ -289,11 +289,46 @@ body {
     color: #666;
 }
 
-.controls select, .controls input {
+.controls select, .controls input[type="number"] {
     padding: 8px 12px;
     border: 1px solid #ddd;
     border-radius: 4px;
     font-size: 14px;
+}
+
+.checkbox-button {
+    display: inline-flex;
+    align-items: center;
+    padding: 8px 16px;
+    background: white;
+    border: 2px solid #667eea;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.2s;
+    user-select: none;
+}
+
+.checkbox-button:hover {
+    background: #f0f2ff;
+    transform: translateY(-1px);
+}
+
+.checkbox-button input[type="checkbox"] {
+    margin: 0;
+    margin-right: 8px;
+    cursor: pointer;
+    width: 16px;
+    height: 16px;
+}
+
+.checkbox-button input[type="checkbox"]:checked + .checkbox-button-text {
+    font-weight: 600;
+}
+
+.checkbox-button-text {
+    font-size: 14px;
+    color: #667eea;
+    font-weight: 500;
 }
 
 .tree-container {

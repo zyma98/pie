@@ -8,6 +8,9 @@ let selectedFilePath = null;
 window.addEventListener('load', () => {
     setupFileLoader();
 
+    // Ensure expand all checkbox is unchecked by default
+    document.getElementById('expandAll').checked = false;
+
     // Auto-load if data is already available
     fetch('/data.json')
         .then(r => {
@@ -287,8 +290,8 @@ function renderNode(node) {
 
     return `
         <li class="tree-node">
-            <div class="node-content">
-                <span class="toggle ${hasChildren ? '' : 'empty'}" onclick="toggleNode('${nodeId}')">
+            <div class="node-content" onclick="toggleNode('${nodeId}')" style="cursor: ${hasChildren ? 'pointer' : 'default'}">
+                <span class="toggle ${hasChildren ? '' : 'empty'}">
                     ${hasChildren ? (isExpanded ? '▼' : '▶') : ''}
                 </span>
                 <span class="node-name">${node.name}</span>

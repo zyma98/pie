@@ -146,8 +146,12 @@ class _TorchProfiler:
 
         print("-" * 115)
 
-    def to_dict(self) -> dict:
-        """Converts the profiling tree to a dictionary for JSON serialization."""
+    def to_dict(self, include_samples: bool = False) -> dict:
+        """Converts the profiling tree to a dictionary for JSON serialization.
+
+        Args:
+            include_samples: If True, includes individual sample times in the output
+        """
 
         def calculate_total(node: _TorchProfiler.Node) -> float:
             if len(node.times) > 0:
@@ -163,18 +167,19 @@ class _TorchProfiler:
 
         def node_to_dict(node: _TorchProfiler.Node, root_total: float) -> dict:
             """Recursively convert a node to a dictionary."""
-            times_array = [float(t) for t in node.times]
             result = {
                 "name": node.name.split(".")[-1] if "." in node.name else node.name,
                 "full_path": node.name,
                 "samples": len(node.times),
-                "times_ms": times_array,
                 "avg_latency_ms": float(np.mean(node.times)) if node.times else 0.0,
                 "std_dev_ms": float(np.std(node.times)) if len(node.times) > 1 else 0.0,
                 "min_ms": float(np.min(node.times)) if node.times else 0.0,
                 "max_ms": float(np.max(node.times)) if node.times else 0.0,
                 "total_mean_ms": node.total_mean,
             }
+
+            if include_samples:
+                result["times_ms"] = [float(t) for t in node.times]
 
             # Calculate percentage relative to parent
             if node.parent and node.parent.total_mean > 0:
@@ -200,12 +205,13 @@ class _TorchProfiler:
             ],
         }
 
-    def save_to_json(self, output_dir: str = ".") -> str:
+    def save_to_json(self, output_dir: str = ".", include_samples: bool = False) -> str:
         """
         Saves profiling results to a timestamped JSON file.
 
         Args:
             output_dir: Directory to save the JSON file (default: current directory)
+            include_samples: If True, includes individual sample times in the output
 
         Returns:
             Path to the saved JSON file
@@ -218,7 +224,7 @@ class _TorchProfiler:
         Path(output_dir).mkdir(parents=True, exist_ok=True)
 
         # Convert to dict and save
-        data = self.to_dict()
+        data = self.to_dict(include_samples=include_samples)
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
 
@@ -246,7 +252,7 @@ def start_profile(name: str) -> _TorchProfiler.Timer:
 
 
 def report_profiling_results(
-    save_json: bool = True, output_dir: str = "."
+    save_json: bool = True, output_dir: str = ".", include_samples: bool = False
 ) -> str | None:
     """
     Calculates and prints the final hierarchical report.
@@ -254,6 +260,7 @@ def report_profiling_results(
     Args:
         save_json: If True, also saves results to a timestamped JSON file
         output_dir: Directory to save the JSON file (default: current directory)
+        include_samples: If True, includes individual sample times in the JSON output
 
     Returns:
         Path to the saved JSON file if save_json=True, otherwise None
@@ -261,24 +268,25 @@ def report_profiling_results(
     PROFILER.report()
 
     if save_json:
-        json_path = PROFILER.save_to_json(output_dir)
+        json_path = PROFILER.save_to_json(output_dir, include_samples=include_samples)
         print(f"\n📁 Profiling results saved to: {json_path}")
         return json_path
 
     return None
 
 
-def save_profiling_json(output_dir: str = ".") -> str:
+def save_profiling_json(output_dir: str = ".", include_samples: bool = False) -> str:
     """
     Saves profiling results to a timestamped JSON file.
 
     Args:
         output_dir: Directory to save the JSON file (default: current directory)
+        include_samples: If True, includes individual sample times in the output
 
     Returns:
         Path to the saved JSON file
     """
-    return PROFILER.save_to_json(output_dir)
+    return PROFILER.save_to_json(output_dir, include_samples=include_samples)
 
 
 def reset_profiler():
