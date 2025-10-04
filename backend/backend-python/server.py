@@ -184,6 +184,13 @@ def start_service(
         # Block until shutdown signal
         shutdown_event.wait()
     finally:
+        # Save profiling results before shutdown (JSON only, no stdout report)
+        from profiler import save_profiling_json
+        try:
+            json_path = save_profiling_json(output_dir=".")
+            print(f"📁 Profiling results saved to: {json_path}")
+        except Exception as e:
+            print(f"⚠️  Failed to save profiling results: {e}")
         socket.close()
         context.term()
         print("Server shutdown complete.")
