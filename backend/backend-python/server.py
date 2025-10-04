@@ -173,8 +173,9 @@ def start_service(
     shutdown_event = threading.Event()
 
     def shutdown_handler(signum, _frame):
-        print(f"\nReceived signal {signum}, shutting down server...")
-        shutdown_event.set()
+        if not shutdown_event.is_set():
+            print(f"\nReceived signal {signum}, shutting down server...")
+            shutdown_event.set()
 
     signal.signal(signal.SIGTERM, shutdown_handler)
     signal.signal(signal.SIGINT, shutdown_handler)
@@ -186,12 +187,6 @@ def start_service(
         socket.close()
         context.term()
         print("Server shutdown complete.")
-
-        # Print profiling results
-        print("\n" + "=" * 80)
-        print("PROFILING RESULTS")
-        print("=" * 80)
-        report_profiling_results()
 
 
 def register_thread(config: Dict[str, Any], endpoint: str) -> None:
