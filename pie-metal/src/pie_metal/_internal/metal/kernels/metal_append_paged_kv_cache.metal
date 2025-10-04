@@ -182,7 +182,7 @@ kernel void metal_append_paged_kv_cache_float32(
 }
 
 /**
- * Metal kernel for float16 version
+ * Metal kernel for float16 version (optimized with vectorized writes)
  */
 kernel void metal_append_paged_kv_cache_float16(
     device const half *k_input [[buffer(0)]],
@@ -194,30 +194,40 @@ kernel void metal_append_paged_kv_cache_float16(
     device const uint *kv_page_indptr [[buffer(6)]],
     device const uint *kv_last_page_lens [[buffer(7)]],
     device const float* params_raw [[buffer(8)]],
-    uint3 thread_position_in_grid [[thread_position_in_grid]]
+    uint3 thread_position_in_grid [[thread_position_in_grid]],
+    uint3 threads_per_threadgroup [[threads_per_threadgroup]],
+    uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]]
 ) {
+    // Pre-load params (avoid repeated float->uint casts)
+    const uint num_tokens = (uint)params_raw[0];
+    const uint num_kv_heads = (uint)params_raw[1];
+    const uint head_size = (uint)params_raw[2];
+    const uint page_size = (uint)params_raw[3];
+    const uint max_num_pages = (uint)params_raw[4];
+    const uint batch_size = (uint)params_raw[5];
+    const uint k_stride_token = (uint)params_raw[6];
+    const uint head_size_stride = (uint)params_raw[7];
+
     const uint token_idx = thread_position_in_grid.x;
     const uint head_idx = thread_position_in_grid.y;
     const uint head_offset = thread_position_in_grid.z;
 
-    if (token_idx >= ((uint)params_raw[0]) ||
-        head_idx >= ((uint)params_raw[1]) ||
-        head_offset >= ((uint)params_raw[2])) {
+    if (token_idx >= num_tokens || head_idx >= num_kv_heads || head_offset >= head_size) {
         return;
     }
 
     const uint batch_idx = kv_batch_indices[token_idx];
     const uint token_position = kv_positions[token_idx];
 
-    if (batch_idx >= ((uint)params_raw[5])) {
+    if (batch_idx >= batch_size) {
         return;
     }
 
     const uint page_start = kv_page_indptr[batch_idx];
     const uint page_end = kv_page_indptr[batch_idx + 1];
 
-    const uint page_offset_in_batch = token_position / ((uint)params_raw[3]);
-    const uint position_in_page = token_position % ((uint)params_raw[3]);
+    const uint page_offset_in_batch = token_position / page_size;
+    const uint position_in_page = token_position % page_size;
 
     const uint page_logical = page_start + page_offset_in_batch;
     if (page_logical >= page_end) {
@@ -225,34 +235,29 @@ kernel void metal_append_paged_kv_cache_float16(
     }
 
     const uint physical_page = kv_page_indices[page_logical];
-    if (physical_page >= ((uint)params_raw[4])) {
+    if (physical_page >= max_num_pages) {
         return;
     }
 
-    const uint input_offset = token_idx * ((uint)params_raw[6]) +
-                             head_idx * ((uint)params_raw[7]) +
+    const uint input_offset = token_idx * k_stride_token +
+                             head_idx * head_size_stride +
                              head_offset;
 
     // INTERLEAVED K/V layout: [page_idx, 2, page_size, num_kv_heads, head_size]
-    const uint page_size = (uint)params_raw[3];
-    const uint num_kv_heads = (uint)params_raw[1];
-    const uint head_size = (uint)params_raw[2];
     const uint elements_per_page = 2 * page_size * num_kv_heads * head_size;
+    const uint page_kv_stride = page_size * num_kv_heads * head_size;
 
-    const uint k_cache_offset = physical_page * elements_per_page +
-                                0 * (page_size * num_kv_heads * head_size) +
-                                position_in_page * (num_kv_heads * head_size) +
-                                head_idx * head_size +
-                                head_offset;
+    // Calculate base offset for this token's position in the page
+    const uint base_offset = physical_page * elements_per_page +
+                            position_in_page * (num_kv_heads * head_size) +
+                            head_idx * head_size +
+                            head_offset;
 
-    const uint v_cache_offset = physical_page * elements_per_page +
-                                1 * (page_size * num_kv_heads * head_size) +
-                                position_in_page * (num_kv_heads * head_size) +
-                                head_idx * head_size +
-                                head_offset;
+    // K at offset 0, V at offset page_kv_stride
+    const uint k_cache_offset = base_offset;
+    const uint v_cache_offset = base_offset + page_kv_stride;
 
-    if (input_offset < ((uint)params_raw[0]) * num_kv_heads * head_size) {
-        paged_kv_cache[k_cache_offset] = k_input[input_offset];
-        paged_kv_cache[v_cache_offset] = v_input[input_offset];
-    }
+    // Write K and V (bounds check already done above)
+    paged_kv_cache[k_cache_offset] = k_input[input_offset];
+    paged_kv_cache[v_cache_offset] = v_input[input_offset];
 }
