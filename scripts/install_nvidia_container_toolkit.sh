@@ -105,13 +105,20 @@ echo "Verifying Installation"
 echo "=================================================="
 echo ""
 
-if docker run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu24.04 nvidia-smi &> /dev/null; then
+echo "Testing GPU access in Docker..."
+if $SUDO docker run --rm --gpus all nvidia/cuda:12.6.1-base-ubuntu24.04 nvidia-smi > /dev/null 2>&1; then
     echo "✓ SUCCESS! NVIDIA Container Toolkit is working correctly."
     echo ""
     echo "You can now run PIE with GPU support:"
     echo "  docker run --gpus all -it pie:latest"
+    echo ""
+    echo "GPU Info:"
+    $SUDO docker run --rm --gpus all nvidia/cuda:12.6.1-base-ubuntu24.04 nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
 else
-    echo "✗ ERROR: GPU test failed. Please check Docker logs."
+    echo "✗ ERROR: GPU test failed."
+    echo ""
+    echo "Detailed error output:"
+    $SUDO docker run --rm --gpus all nvidia/cuda:12.6.1-base-ubuntu24.04 nvidia-smi 2>&1 || true
     exit 1
 fi
 

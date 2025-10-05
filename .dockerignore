@@ -4,16 +4,18 @@
 .gitattributes
 .github
 
-# Build artifacts
+# Build artifacts (will be rebuilt in Docker)
 **/target/
 **/build/
 **/*.o
 **/*.a
 **/*.so
 **/*.dylib
-**/*.wasm
 Cargo.lock
 !pie-cli/Cargo.lock
+
+# Don't exclude .wasm since they're built during Docker build
+# **/*.wasm
 
 # Python
 __pycache__/
@@ -52,13 +54,29 @@ htmlcov/
 logs/
 pie.log
 pie_cuda.log
+**/pie.log
+**/pie_cuda.log
 
-# Cache
+# Cache and downloads
 .cache/
 *.cache
+**/__pycache__/
+*.pyc
+.uv_cache/
+
+# Downloaded models (users will download their own)
+**/.cache/pie/models/
 
 # Test artifacts
 cuda_artifacts.tar.xz
+*.tar.xz
+*.tar.gz
+
+# Dummy/test data
+**/test_data/
+**/dummy_data/
+**/fixtures/
+tensor_references/
 
 # Documentation (keep README)
 docs/

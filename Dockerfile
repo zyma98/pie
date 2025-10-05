@@ -1,15 +1,23 @@
-# Dockerfile for Pie with CUDA and Python backend support
-# Build: docker build -t pie:latest .
-# Run:   docker run --gpus all -it pie:latest
+# Dockerfile for Pie with CUDA support
+# Supports specific verified CUDA/PyTorch combinations only
+# See scripts/build_docker_images.sh for supported versions
 
-FROM nvidia/cuda:12.8.0-devel-ubuntu24.04
+ARG CUDA_VERSION=12.6
+ARG CUDA_MINOR=1
+ARG PYTORCH_CUDA=cu126
+
+FROM nvidia/cuda:${CUDA_VERSION}.${CUDA_MINOR}-devel-ubuntu24.04
+
+# Re-declare args after FROM
+ARG CUDA_VERSION
+ARG PYTORCH_CUDA
 
 ENV DEBIAN_FRONTEND=noninteractive \
     CARGO_HOME=/usr/local/cargo \
     RUSTUP_HOME=/usr/local/rustup \
-    PATH="/usr/local/cargo/bin:/root/.local/bin:/opt/venv/bin:${PATH}" \
     PYTHONUNBUFFERED=1 \
-    PIE_HOME=/root/.cache/pie
+    PIE_HOME=/root/.cache/pie \
+    PATH="/opt/venv/bin:/usr/local/cargo/bin:/root/.local/bin:${PATH}"
 
 # Install all dependencies
 RUN apt-get update && apt-get install -y \
@@ -37,13 +45,17 @@ RUN cd pie-cli && cargo build --release
 # Build example inferlets
 RUN cd example-apps && cargo build --target wasm32-wasip2 --release
 
-# Setup Python backend with flashinfer
+# Setup Python backend with flashinfer (using verified PyTorch CUDA version)
 RUN cd backend/backend-python \
     && uv venv /opt/venv \
     && . /opt/venv/bin/activate \
     && uv pip install flashinfer-python==0.3.1 \
-    && uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128 --force-reinstall \
+    && uv pip install torch torchvision --index-url https://download.pytorch.org/whl/${PYTORCH_CUDA} --force-reinstall \
     && uv pip install triton \
     && uv pip install -e ".[cuda,debug]"
 
-CMD ["/workspace/pie-cli/target/release/pie", "--help"]
+# Set default working directory for runtime
+WORKDIR /workspace
+
+# Use docker_config.toml with Python backend and absolute paths
+CMD ["/workspace/pie-cli/target/release/pie", "start", "--config", "/workspace/pie-cli/docker_config.toml"]
