@@ -34,12 +34,6 @@ The easiest way to run Pie with CUDA support is using our pre-built Docker image
 ./scripts/install_nvidia_container_toolkit.sh
 ```
 
-This script will:
-- Verify NVIDIA drivers are installed
-- Install NVIDIA Container Toolkit
-- Configure Docker to use NVIDIA runtime
-- Test GPU access
-
 **Step 2: Pull Image and Download Model**
 
 ```bash
@@ -55,20 +49,19 @@ docker run --rm --gpus all -v pie-models:/root/.cache/pie sslee0cs/pie:latest \
 
 ```bash
 # Start PIE with interactive shell (uses Python backend with flashinfer)
-docker run --gpus all -it -v pie-models:/root/.cache/pie sslee0cs/pie:latest
+docker run --gpus all --rm -it -v pie-models:/root/.cache/pie sslee0cs/pie:latest
 ```
-
-This opens the PIE interactive shell with:
-- **Python backend** using flashinfer for GPU acceleration
-- **Model cache** mounted for persistence
 
 **Step 4: Run Inferlets**
 
-From within the PIE shell:
+From within the PIE shell, after you see the model parameters are fully loaded:
 
 ```bash
 pie> run example-apps/target/wasm32-wasip2/release/text_completion.wasm -- --prompt "What is the capital of France?"
 ```
+You can see a message saying that an inferlet has been lauched.
+
+Note the the initial inferlet response may take a few minutes due to the JIT compliation of FlashInfer.
 
 ### Local Installation
 
