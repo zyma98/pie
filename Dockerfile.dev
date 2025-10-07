@@ -1,4 +1,5 @@
-# Dockerfile for Pie with CUDA support
+# Dockerfile.dev for Pie with CUDA support (Development/RunPod)
+# Keeps container running for interactive development
 # Supports specific verified CUDA/PyTorch combinations only
 # See scripts/build_docker_images.sh for supported versions
 
@@ -57,5 +58,5 @@ RUN cd backend/backend-python \
 # Set default working directory for runtime
 WORKDIR /workspace
 
-# Use docker_config.toml with Python backend and absolute paths
-CMD ["pie", "start", "--config", "/workspace/pie-cli/docker_config.toml"]
+# Keep container running for development (RunPod)
+CMD ["tail", "-f", "/dev/null"]

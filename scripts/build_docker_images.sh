@@ -27,7 +27,9 @@ echo ""
 echo "Verified configurations:"
 for config in "${VERIFIED_CONFIGS[@]}"; do
     IFS=':' read -r cuda_ver cuda_minor torch_cuda tag <<< "$config"
-    echo "  - CUDA ${cuda_ver}.${cuda_minor} + PyTorch ${torch_cuda} → pie:${tag}"
+    echo "  - CUDA ${cuda_ver}.${cuda_minor} + PyTorch ${torch_cuda}"
+    echo "    → pie:${tag}-latest"
+    echo "    → pie:${tag}-dev"
 done
 echo ""
 
@@ -37,7 +39,7 @@ cd "$PROJECT_ROOT"
 for config in "${VERIFIED_CONFIGS[@]}"; do
     IFS=':' read -r cuda_ver cuda_minor torch_cuda tag <<< "$config"
 
-    echo "Building pie:${tag}..."
+    echo "Building pie:${tag}-latest..."
     echo "→ CUDA: ${cuda_ver}.${cuda_minor}"
     echo "→ PyTorch: ${torch_cuda}"
 
@@ -49,7 +51,23 @@ for config in "${VERIFIED_CONFIGS[@]}"; do
         -t pie:latest \
         .
 
-    echo "✓ Built pie:${tag}"
+    echo "✓ Built pie:${tag}-latest"
+    echo ""
+
+    echo "Building pie:${tag}-dev..."
+    echo "→ CUDA: ${cuda_ver}.${cuda_minor}"
+    echo "→ PyTorch: ${torch_cuda}"
+
+    $SUDO docker build \
+        --build-arg CUDA_VERSION=${cuda_ver} \
+        --build-arg CUDA_MINOR=${cuda_minor} \
+        --build-arg PYTORCH_CUDA=${torch_cuda} \
+        -f Dockerfile.dev \
+        -t pie:${tag}-dev \
+        -t pie:dev \
+        .
+
+    echo "✓ Built pie:${tag}-dev"
     echo ""
 done
 
@@ -61,6 +79,7 @@ echo "Available images:"
 $SUDO docker images | grep -E "^pie" || echo "No pie images found"
 echo ""
 echo "To run:"
-echo "  $SUDO docker run --gpus all -it pie:latest"
+echo "  Latest: $SUDO docker run --gpus all -it pie:latest"
+echo "  Development: $SUDO docker run --gpus all -it pie:dev"
 echo ""
 echo "Build complete!"
