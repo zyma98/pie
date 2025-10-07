@@ -65,6 +65,7 @@ pie_cuda.log
 **/__pycache__/
 *.pyc
 .uv_cache/
+.flashinfer_cache/
 
 # Downloaded models (users will download their own)
 **/.cache/pie/models/
