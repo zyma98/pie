@@ -54,6 +54,11 @@ case "$OS" in
     ubuntu|debian)
         echo "Installing NVIDIA Container Toolkit for Debian/Ubuntu..."
 
+        # Install required dependencies
+        echo "→ Installing required dependencies..."
+        $SUDO apt-get update
+        $SUDO apt-get install -y curl gnupg
+
         # Configure the repository
         echo "→ Configuring NVIDIA Container Toolkit repository..."
         curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | \
@@ -94,9 +99,14 @@ echo ""
 echo "→ Configuring Docker to use NVIDIA runtime..."
 $SUDO nvidia-ctk runtime configure --runtime=docker
 
-# Restart Docker
-echo "→ Restarting Docker daemon..."
-$SUDO systemctl restart docker
+# Restart Docker (if systemd is available)
+if command -v systemctl &> /dev/null && systemctl is-system-running &> /dev/null; then
+    echo "→ Restarting Docker daemon..."
+    $SUDO systemctl restart docker
+else
+    echo "⚠️  Systemd is not available."
+    echo "Pie doest not support nested containers yet."
+fi
 
 # Verify installation
 echo ""
