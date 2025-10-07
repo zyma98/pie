@@ -57,5 +57,5 @@ RUN cd backend/backend-python \
 # Set default working directory for runtime
 WORKDIR /workspace
 
-# Use docker_config.toml with Python backend and absolute paths
-CMD ["/workspace/pie-cli/target/release/pie", "start", "--config", "/workspace/pie-cli/docker_config.toml"]
+# Default to bash for interactive use
+CMD ["/bin/bash"]
