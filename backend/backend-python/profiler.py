@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import time
-from contextlib import ContextDecorator
+from contextlib import ContextDecorator, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -239,16 +239,30 @@ class _TorchProfiler:
 
 # --- GLOBAL PROFILER API ---
 PROFILER = _TorchProfiler()
+_PROFILING_ENABLED = False
 
 
-def start_profile(name: str) -> _TorchProfiler.Timer:
+def set_profiling_enabled(enabled: bool) -> None:
+    """
+    Enable or disable profiling globally.
+
+    Args:
+        enabled: If True, profiling is enabled. If False, profiling is disabled.
+    """
+    global _PROFILING_ENABLED
+    _PROFILING_ENABLED = enabled
+
+
+def start_profile(name: str) -> _TorchProfiler.Timer | nullcontext:
     """
     Starts a new profiling scope. Use as a context manager.
     Example:
         with start_profile("my_operation"):
             ...
     """
-    return PROFILER.start(name)
+    if _PROFILING_ENABLED:
+        return PROFILER.start(name)
+    return nullcontext()
 
 
 def report_profiling_results(
