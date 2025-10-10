@@ -28,7 +28,7 @@ import zmq
 from platformdirs import user_cache_dir
 from websockets.sync.client import connect
 
-# Note: profiler.save_profiling_json is imported at shutdown time (line 188)
+# Note: profiler.save_profiling_json is imported at shutdown time
 
 from message import (
     DownloadAdapterRequest,
