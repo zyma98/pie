@@ -20,7 +20,27 @@ import torch
 
 
 class _TorchProfiler:
-    """The internal profiler class. Users should interact with the global API."""
+    """The internal profiler class. Users should interact with the global API.
+
+    This is a singleton - only one instance should exist via the PROFILER global.
+    """
+
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __init__(self):
+        # Only initialize once
+        if hasattr(self, "_initialized"):
+            return
+        self._initialized = True
+        self._node_map: dict[str, _TorchProfiler.Node] = {}
+        self.root = self.Node(name="root", parent=None)
+        self.active_node = self.root
+        self.enabled = False  # Profiling disabled by default
 
     @dataclass
     class Node:
@@ -37,11 +57,6 @@ class _TorchProfiler:
         mean: float = 0.0
         std: float = 0.0
         total_mean: float = 0.0  # Includes children's total_mean
-
-    def __init__(self):
-        self._node_map: dict[str, _TorchProfiler.Node] = {}
-        self.root = self.Node(name="root", parent=None)
-        self.active_node = self.root
 
     def _get_full_path(self, name: str) -> str:
         if self.active_node is self.root:
@@ -239,7 +254,6 @@ class _TorchProfiler:
 
 # --- GLOBAL PROFILER API ---
 PROFILER = _TorchProfiler()
-_PROFILING_ENABLED = False
 
 
 def set_profiling_enabled(enabled: bool) -> None:
@@ -249,8 +263,7 @@ def set_profiling_enabled(enabled: bool) -> None:
     Args:
         enabled: If True, profiling is enabled. If False, profiling is disabled.
     """
-    global _PROFILING_ENABLED
-    _PROFILING_ENABLED = enabled
+    PROFILER.enabled = enabled
 
 
 def start_profile(name: str) -> _TorchProfiler.Timer | nullcontext:
@@ -260,7 +273,7 @@ def start_profile(name: str) -> _TorchProfiler.Timer | nullcontext:
         with start_profile("my_operation"):
             ...
     """
-    if _PROFILING_ENABLED:
+    if PROFILER.enabled:
         return PROFILER.start(name)
     return nullcontext()
 
