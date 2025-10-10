@@ -120,9 +120,9 @@ def start_service(
     """Spin up the backend service using the provided handler implementation."""
 
     # Initialize profiler state based on configuration
-    from profiler import (
+    from profiler import (  # pylint: disable=import-outside-toplevel
         set_profiling_enabled,
-    )  # pylint: disable=import-outside-toplevel
+    )
 
     set_profiling_enabled(config.get("enable_profiling", False))
 
