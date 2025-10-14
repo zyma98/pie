@@ -111,6 +111,23 @@ def save_profiling_if_enabled(config: Dict[str, Any]) -> None:
         print(f"⚠️  Failed to save profiling results: {e}")
 
 
+def save_memory_profiling_if_enabled(config: Dict[str, Any]) -> None:
+    """Save memory profiling results if memory profiling is enabled in config."""
+    if not config.get("enable_memory_profiling", False):
+        return
+
+    from memory_profiler import (  # pylint: disable=import-outside-toplevel
+        get_memory_tracker,
+    )
+
+    try:
+        tracker = get_memory_tracker()
+        tracker.stop()  # Stop periodic tracking and save snapshot
+        print("📁 Memory profiling results saved")
+    except (OSError, ValueError, RuntimeError) as e:
+        print(f"⚠️  Failed to save memory profiling results: {e}")
+
+
 def start_service(
     *,
     config: Dict[str, Any],
@@ -125,6 +142,15 @@ def start_service(
     )
 
     set_profiling_enabled(config.get("enable_profiling", False))
+
+    # Initialize memory profiler
+    from memory_profiler import (  # pylint: disable=import-outside-toplevel
+        initialize_memory_tracker,
+    )
+
+    initialize_memory_tracker(
+        output_dir=".", enabled=config.get("enable_memory_profiling", False)
+    )
 
     if config["controller_host"] in ["127.0.0.1", "localhost"]:
         unique_id = random.randint(1000, 9999)
@@ -208,6 +234,7 @@ def start_service(
     finally:
         # Save profiling results before shutdown if enabled
         save_profiling_if_enabled(config)
+        save_memory_profiling_if_enabled(config)
         socket.close()
         context.term()
         print("Server shutdown complete.")
@@ -468,6 +495,7 @@ def main(
     device: str | None = None,
     dtype: str = "bfloat16",
     enable_profiling: bool = False,
+    enable_memory_profiling: bool = False,
 ):
     """
     Runs the application with configuration provided as command-line arguments.
@@ -492,6 +520,7 @@ def main(
                 Auto-detects to 'mps' on Apple Silicon, 'cuda:0' otherwise.
         dtype: The data type for model weights (e.g., 'bfloat16', 'float16').
         enable_profiling: Enable performance profiling (default: False).
+        enable_memory_profiling: Enable memory profiling with operation tracking (default: False).
     """
     # Import here to avoid circular imports
     # pylint: disable=import-outside-toplevel
@@ -522,6 +551,7 @@ def main(
         device=device,
         dtype=dtype,
         enable_profiling=enable_profiling,
+        enable_memory_profiling=enable_memory_profiling,
     )
 
     print_config(config)
