@@ -41,6 +41,8 @@
                 <button class="tab-button active" onclick="switchTab('tree')">Tree View</button>
                 <button class="tab-button" onclick="switchTab('table')">Table View</button>
                 <button class="tab-button" onclick="switchTab('flame')">Flame Graph</button>
+                <button class="tab-button" onclick="switchTab('tensor')">Tensor Flow</button>
+                <button class="tab-button" onclick="switchTab('bottleneck')">Bottleneck Analysis</button>
             </div>
 
             <div class="controls">
@@ -64,6 +66,22 @@
 
             <div id="flame-tab" class="tab-content">
                 <div class="flamegraph" id="flameView"></div>
+            </div>
+
+            <div id="tensor-tab" class="tab-content">
+                <div class="tensor-flow-container">
+                    <div class="tensor-flow-info">
+                        <h3>Tensor Data Flow Analysis</h3>
+                        <p>Visualizes tensor access patterns and data movement across operations.</p>
+                    </div>
+                    <div id="tensorView"></div>
+                </div>
+            </div>
+
+            <div id="bottleneck-tab" class="tab-content">
+                <div class="bottleneck-container">
+                    <div id="bottleneckView"></div>
+                </div>
             </div>
         </div>
     </div>

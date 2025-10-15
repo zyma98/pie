@@ -5,6 +5,40 @@ import os
 import urllib.parse
 from http.server import SimpleHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from typing import Dict, List, Any, Optional
+
+
+def normalize_profiling_data(data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Validate profiling data format.
+
+    Args:
+        data: Raw JSON data
+
+    Returns:
+        Validated unified_profiler data
+
+    Raises:
+        ValueError: If required fields are missing
+    """
+    # Check for required fields
+    if 'profiling_tree' not in data:
+        raise ValueError(
+            "Invalid profile format: missing 'profiling_tree' field. "
+            "Only 'unified_profiler' format is supported. "
+            "Please regenerate your profile data with the latest profiler."
+        )
+
+    if 'metadata' not in data:
+        raise ValueError(
+            "Invalid profile format: missing 'metadata' field. "
+            "Only 'unified_profiler' format is supported. "
+            "Please regenerate your profile data with the latest profiler."
+        )
+
+    # Ensure format marker is present
+    data['format'] = 'unified_profiler'
+    return data
 
 
 class ProfileVisualizerHandler(SimpleHTTPRequestHandler):
@@ -50,6 +84,10 @@ class ProfileVisualizerHandler(SimpleHTTPRequestHandler):
             self._serve_file("app.js", "application/javascript")
         elif self.path == "/data.json":
             self._serve_json(self.profiling_data)
+        elif self.path == "/hardware_specs.json":
+            self._serve_hardware_specs()
+        elif self.path == "/detect_hardware":
+            self._serve_detected_hardware()
         elif self.path.startswith("/list_files"):
             query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             base_path = query.get("path", [""])[0]
@@ -70,7 +108,9 @@ class ProfileVisualizerHandler(SimpleHTTPRequestHandler):
                 try:
                     with open(sanitized_path, "r", encoding="utf-8") as f:
                         data = json.load(f)
-                    self._serve_json(data)
+                    # Normalize the data before serving
+                    normalized_data = normalize_profiling_data(data)
+                    self._serve_json(normalized_data)
                 except (json.JSONDecodeError, ValueError) as e:
                     self.send_error(400, f"Error parsing JSON: {str(e)}")
                 except Exception as e:  # pylint: disable=broad-except
@@ -99,6 +139,46 @@ class ProfileVisualizerHandler(SimpleHTTPRequestHandler):
         self.send_header("Content-type", "application/json")
         self.end_headers()
         self.wfile.write(json.dumps(data).encode())
+
+    def _serve_hardware_specs(self):
+        """Serve hardware specifications JSON."""
+        specs_path = os.path.join(self.static_dir, "..", "hardware_specs.json")
+        try:
+            with open(specs_path, "r", encoding="utf-8") as f:
+                specs = json.load(f)
+            self._serve_json(specs)
+        except FileNotFoundError:
+            self.send_error(404, "hardware_specs.json not found")
+        except json.JSONDecodeError as e:
+            self.send_error(500, f"Error parsing hardware specs: {str(e)}")
+
+    def _serve_detected_hardware(self):
+        """Serve auto-detected hardware information."""
+        try:
+            # Import hardware detection module
+            import sys
+            backend_path = os.path.join(
+                os.path.dirname(self.static_dir), "..", "..", "backend",
+                "backend-python"
+            )
+            if backend_path not in sys.path:
+                sys.path.insert(0, backend_path)
+
+            from profiler.hardware_detection import detect_hardware
+
+            hw_info = detect_hardware()
+            self._serve_json(hw_info)
+        except ImportError as e:
+            # Fallback if detection module not available
+            self._serve_json({
+                "chip": None,
+                "memory_gb": None,
+                "vendor": "unknown",
+                "detected": False,
+                "error": str(e),
+            })
+        except Exception as e:  # pylint: disable=broad-except
+            self.send_error(500, f"Error detecting hardware: {str(e)}")
 
     def _list_json_files(self, base_path=""):
         """List JSON files in the specified directory (non-recursive)."""
@@ -206,6 +286,10 @@ def start_server(
     port=8000, search_dir=None, initial_data=None, static_dir=None
 ):
     """Start the HTTP server."""
+    # Normalize initial data if provided
+    if initial_data:
+        initial_data = normalize_profiling_data(initial_data)
+
     ProfileVisualizerHandler.profiling_data = initial_data
     ProfileVisualizerHandler.search_directory = search_dir or os.getcwd()
     ProfileVisualizerHandler.root_directory = search_dir or os.getcwd()

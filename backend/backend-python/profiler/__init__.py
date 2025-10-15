@@ -46,6 +46,74 @@ def start_profile(name: str):
         yield
 
 
+@contextmanager
+def profile_attention(layer_idx: int, query_states, kv_cache):
+    """
+    Profile attention operation with automatic metrics calculation.
+
+    This is a specialized profiler for attention operations that automatically
+    calculates FLOPs and data volume for bottleneck analysis.
+
+    Usage:
+        from profiler import profile_attention
+
+        with profile_attention(layer_idx, query_states, kv_cache):
+            output = runtime.run_attention(...)
+
+    Args:
+        layer_idx: Layer index for naming
+        query_states: Query tensor [batch, num_heads, head_dim]
+        kv_cache: KV cache tensor [kv_len, 2, num_kv_heads, head_dim]
+    """
+    import time
+    from .tracker import MemoryTracker
+    from .calculate_metrics import calculate_attention_metrics
+
+    tracker = get_memory_tracker()
+
+    # If profiling disabled, just yield without overhead
+    if not tracker or not tracker.enabled:
+        yield
+        return
+
+    # Calculate metrics before timing
+    batch_size, num_heads, head_dim = query_states.shape
+    kv_seq_len = kv_cache.shape[0]
+    metrics = calculate_attention_metrics(
+        batch_size=batch_size,
+        seq_len=1,
+        num_heads=num_heads,
+        head_dim=head_dim,
+        kv_seq_len=kv_seq_len,
+        dtype=str(query_states.dtype).split(".")[-1],
+    )
+
+    # Time the operation with synchronization
+    MemoryTracker._synchronize_device()
+    start_time = time.perf_counter()
+
+    try:
+        yield
+    finally:
+        MemoryTracker._synchronize_device()
+        duration_ms = (time.perf_counter() - start_time) * 1000
+
+        # Add to operation log for bottleneck analysis
+        from .hook_based_tracker import create_hook_tracker
+
+        if not hasattr(tracker, "_hook_tracker"):
+            tracker._hook_tracker = create_hook_tracker(tracker)
+
+        hook_tracker = tracker._hook_tracker
+        hook_tracker.log_custom_operation(
+            name=f"attention_layer_{layer_idx}",
+            module_type="Attention",
+            duration_ms=duration_ms,
+            flops=metrics["flops"],
+            data_bytes=metrics["data_bytes"],
+        )
+
+
 __all__ = [
     # Unified tracker API
     "initialize_memory_tracker",
@@ -55,6 +123,7 @@ __all__ = [
     "get_memory_summary",
     "stop_memory_tracker",
     "start_profile",
+    "profile_attention",
 
     # Legacy profiler API (backward compatibility)
     "set_profiling_enabled",
