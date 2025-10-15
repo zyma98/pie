@@ -494,8 +494,24 @@ class MemoryTracker:
         current_tensor_ids = set()
         previous_tensor_ids = set(self._tensor_registry.keys())
 
+        # Build lightweight tensor name hints from nn.Module parameters/buffers
+        # This is done inline during gc traversal for efficiency
+        tensor_name_hints: dict[int, str] = {}
+
         for obj in gc.get_objects():
             try:
+                # Check for nn.Module to extract parameter/buffer names
+                if isinstance(obj, torch.nn.Module):
+                    try:
+                        for name, param in obj.named_parameters(recurse=False):
+                            if param is not None:
+                                tensor_name_hints[id(param)] = name
+                        for name, buffer in obj.named_buffers(recurse=False):
+                            if buffer is not None:
+                                tensor_name_hints[id(buffer)] = name
+                    except (AttributeError, RuntimeError):
+                        pass
+
                 if torch.is_tensor(obj):
                     tensor_id = id(obj)
                     current_tensor_ids.add(tensor_id)
@@ -505,8 +521,11 @@ class MemoryTracker:
                     device = str(obj.device)
                     shape = tuple(obj.shape)
 
+                    # Get tensor name hint if available
+                    tensor_name = tensor_name_hints.get(tensor_id)
+
                     # Classify tensor purpose
-                    purpose = classify_tensor_purpose(obj, shape)
+                    purpose = classify_tensor_purpose(obj, shape, tensor_name)
                     is_persistent = is_persistent_tensor(
                         tensor_id, size_mb, self._tensor_last_seen
                     )

@@ -8,28 +8,63 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional
 
 
+def add_percentages_to_tree(
+    nodes: List[Dict[str, Any]], root_time: Optional[float] = None
+) -> None:
+    """
+    Add percent_of_total to each node in the profiling tree.
+
+    Percentages are calculated relative to the root node's total time.
+    This allows easy comparison of any nodes in the tree.
+
+    Args:
+        nodes: List of tree nodes (may be nested)
+        root_time: Total time of the root node (calculated on first call)
+    """
+    if not nodes:
+        return
+
+    # First call: calculate root_time from the root nodes
+    if root_time is None:
+        # Use the maximum root node time as the baseline
+        root_time = max((node.get("avg_latency_ms", 0) for node in nodes), default=1.0)
+        if root_time == 0:
+            root_time = 1.0  # Avoid division by zero
+
+    # Add percentages to all nodes (recursively)
+    for node in nodes:
+        node_time = node.get("avg_latency_ms", 0)
+        node["percent_of_total"] = (
+            (node_time / root_time) * 100.0 if root_time > 0 else 0.0
+        )
+
+        # Recursively process children using the same root_time
+        if "children" in node and node["children"]:
+            add_percentages_to_tree(node["children"], root_time)
+
+
 def normalize_profiling_data(data: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Validate profiling data format.
+    Validate profiling data format and enrich with computed fields.
 
     Args:
         data: Raw JSON data
 
     Returns:
-        Validated unified_profiler data
+        Validated unified_profiler data with percent_of_total added to nodes
 
     Raises:
         ValueError: If required fields are missing
     """
     # Check for required fields
-    if 'profiling_tree' not in data:
+    if "profiling_tree" not in data:
         raise ValueError(
             "Invalid profile format: missing 'profiling_tree' field. "
             "Only 'unified_profiler' format is supported. "
             "Please regenerate your profile data with the latest profiler."
         )
 
-    if 'metadata' not in data:
+    if "metadata" not in data:
         raise ValueError(
             "Invalid profile format: missing 'metadata' field. "
             "Only 'unified_profiler' format is supported. "
@@ -37,7 +72,11 @@ def normalize_profiling_data(data: Dict[str, Any]) -> Dict[str, Any]:
         )
 
     # Ensure format marker is present
-    data['format'] = 'unified_profiler'
+    data["format"] = "unified_profiler"
+
+    # Add percent_of_total to all nodes in the tree
+    add_percentages_to_tree(data["profiling_tree"])
+
     return data
 
 
