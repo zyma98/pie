@@ -128,6 +128,8 @@ def _calculate_rmsnorm_metrics(
     bytes_per_element: int,
 ) -> None:
     """Calculate metrics for RMSNorm operation."""
+    _ = input_shapes  # Unused but required for interface consistency
+
     # RMSNorm: output = input * scale / sqrt(mean(input^2) + eps)
     # Operations per element: square, sum, divide, sqrt, multiply
     num_elements = _prod(output_shape)
@@ -157,6 +159,7 @@ def _calculate_silu_metrics(
     bytes_per_element: int,
 ) -> None:
     """Calculate metrics for SiLU (Swish) activation: x * sigmoid(x)."""
+    _ = input_shapes  # Unused but required for interface consistency
     # SiLU: x * sigmoid(x) = x * (1 / (1 + exp(-x)))
     # Operations per element: exp, add, divide, multiply
     num_elements = _prod(output_shape)
@@ -177,6 +180,7 @@ def _calculate_activation_metrics(
     bytes_per_element: int,
 ) -> None:
     """Calculate metrics for generic activation functions."""
+    _ = input_shapes  # Unused but required for interface consistency
     num_elements = _prod(output_shape)
 
     # Approximate FLOPs: ~5 operations per element
@@ -195,6 +199,7 @@ def _calculate_softmax_metrics(
     bytes_per_element: int,
 ) -> None:
     """Calculate metrics for Softmax operation."""
+    _ = input_shapes  # Unused but required for interface consistency
     # Softmax: exp(x_i) / sum(exp(x_j))
     # Operations: exp per element, sum reduction, divide per element
     num_elements = _prod(output_shape)
@@ -215,6 +220,7 @@ def _calculate_layernorm_metrics(
     bytes_per_element: int,
 ) -> None:
     """Calculate metrics for LayerNorm operation."""
+    _ = input_shapes  # Unused but required for interface consistency
     # Similar to RMSNorm but with mean subtraction
     num_elements = _prod(output_shape)
 
@@ -262,7 +268,7 @@ def calculate_attention_metrics(
     seq_len: int,
     num_heads: int,
     head_dim: int,
-    kv_seq_len: int = None,
+    kv_seq_len: int | None = None,
     dtype: str = "float16",
 ) -> Dict[str, Any]:
     """
@@ -361,8 +367,8 @@ def get_hardware_specs(device: str = "mps") -> Dict[str, Any]:
 
     # Calculate ridge point: the arithmetic intensity where performance transitions
     # from bandwidth-bound to compute-bound
-    spec["ridge_point"] = spec["peak_tflops_fp16"] * 1e12 / (
-        spec["peak_bandwidth_gbs"] * 1e9
+    spec["ridge_point"] = (
+        spec["peak_tflops_fp16"] * 1e12 / (spec["peak_bandwidth_gbs"] * 1e9)
     )
 
     return spec

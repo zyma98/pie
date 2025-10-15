@@ -23,28 +23,32 @@ from platform_detection import is_apple_silicon
 # Import profiler for performance analysis
 from profiler import start_profile
 
+# Module-level variables for backend detection
+backend_name: str
+backend_available: bool
+
 # Direct import of backend operations based on platform
 # metal_kernels now provides the same API structure as flashinfer
 if is_apple_silicon():
     try:
         import metal_kernels.ops as ops  # type: ignore[import-not-found]
 
-        BACKEND_NAME = "metal_kernels"
-        BACKEND_AVAILABLE = True
+        backend_name = "metal_kernels"
+        backend_available = True
     except ImportError:
         ops = None  # type: ignore[assignment]
-        BACKEND_NAME = "metal_kernels"
-        BACKEND_AVAILABLE = False
+        backend_name = "metal_kernels"
+        backend_available = False
 else:
     try:
         import flashinfer as ops  # type: ignore[import-not-found]
 
-        BACKEND_NAME = "flashinfer"
-        BACKEND_AVAILABLE = True
+        backend_name = "flashinfer"
+        backend_available = True
     except ImportError:
         ops = None  # type: ignore[assignment]
-        BACKEND_NAME = "flashinfer"
-        BACKEND_AVAILABLE = False
+        backend_name = "flashinfer"
+        backend_available = False
 
 
 class Handler:
@@ -64,8 +68,8 @@ class Handler:
         self.ops = ops  # backend operations module (flashinfer or pie_metal.ops)
         self.config = config  # Store config for later use
 
-        print(f"✅ Handler initialized with {BACKEND_NAME} backend")
-        print(f"   {BACKEND_NAME} available: {BACKEND_AVAILABLE}")
+        print(f"✅ Handler initialized with {backend_name} backend")
+        print(f"   {backend_name} available: {backend_available}")
 
         # Put imports here to avoid circular import
         # pylint: disable=import-outside-toplevel

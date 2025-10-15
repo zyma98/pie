@@ -28,6 +28,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from .tracker import get_memory_tracker
+
 
 class _TorchProfiler:
     """The internal profiler class. Users should interact with the global API.
@@ -59,7 +61,9 @@ class _TorchProfiler:
         name: str
         parent: _TorchProfiler.Node | None
         children: list[_TorchProfiler.Node] = field(default_factory=list)
-        times: list[float] = field(default_factory=list)  # Raw timings for this node (self time)
+        times: list[float] = field(
+            default_factory=list
+        )  # Raw timings for this node (self time)
 
         # Metrics calculated from timings
         count: int = 0
@@ -139,13 +143,19 @@ class _TorchProfiler:
         print(headers)
         print("-" * 115)
 
-        def print_node(node: _TorchProfiler.Node, indent: str = "", is_last: bool = True):
+        def print_node(
+            node: _TorchProfiler.Node, indent: str = "", is_last: bool = True
+        ):
             if not node.name.startswith("root"):
                 name_part = node.name.split(".")[-1]
                 line_char = "└── " if is_last else "├── "
-                parent_total = node.parent.total_mean if node.parent else node.total_mean
+                parent_total = (
+                    node.parent.total_mean if node.parent else node.total_mean
+                )
                 percent_str = (
-                    f"{(node.total_mean / parent_total * 100):.1f}%" if parent_total > 1e-6 else ""
+                    f"{(node.total_mean / parent_total * 100):.1f}%"
+                    if parent_total > 1e-6
+                    else ""
                 )
 
                 print(
@@ -201,20 +211,26 @@ class _TorchProfiler:
 
             # Calculate percentage relative to parent
             if node.parent and node.parent.total_mean > 0:
-                result["percent_of_parent"] = (node.total_mean / node.parent.total_mean) * 100
+                result["percent_of_parent"] = (
+                    node.total_mean / node.parent.total_mean
+                ) * 100
 
             # Calculate percentage relative to absolute root
             if root_total > 0:
                 result["percent_of_total"] = (node.total_mean / root_total) * 100
 
             if node.children:
-                result["children"] = [node_to_dict(child, root_total) for child in node.children]
+                result["children"] = [
+                    node_to_dict(child, root_total) for child in node.children
+                ]
 
             return result
 
         return {
             "timestamp": datetime.now().isoformat(),
-            "profiling_tree": [node_to_dict(child, absolute_total) for child in self.root.children],
+            "profiling_tree": [
+                node_to_dict(child, absolute_total) for child in self.root.children
+            ],
         }
 
     def save_to_json(self, output_dir: str = ".", include_samples: bool = False) -> str:
@@ -282,8 +298,6 @@ def start_profile(name: str):
     """
     # Try to use unified profiler first
     try:
-        from .tracker import get_memory_tracker  # pylint: disable=import-outside-toplevel
-
         tracker = get_memory_tracker()
         # Use unified profiler if timing is enabled
         if tracker.enable_timing:
@@ -322,8 +336,6 @@ def profile_with_tensors(name: str, inputs: tuple = (), outputs_getter=None):
     """
     # Delegate to unified profiler via start_profile
     try:
-        from .tracker import get_memory_tracker  # pylint: disable=import-outside-toplevel
-
         tracker = get_memory_tracker()
         if tracker.enable_timing:
             # Use unified profiler

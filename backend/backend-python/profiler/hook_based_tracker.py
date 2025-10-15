@@ -15,14 +15,7 @@ import time
 import torch
 from torch import nn
 
-# Import for type checking and runtime use
-try:
-    from .tracker import TensorLifecycleEvent
-    from .calculate_metrics import calculate_operation_metrics
-except ImportError:
-    # Fallback for when running as script
-    from tracker import TensorLifecycleEvent
-    from calculate_metrics import calculate_operation_metrics
+from .calculate_metrics import calculate_operation_metrics
 
 
 class HookBasedTracker:
@@ -79,7 +72,7 @@ class HookBasedTracker:
 
         # Capture a snapshot BEFORE forward pass to register existing tensors
         # (weights, kv_cache, etc.) so hooks can update their allocated_by field
-        self.base_tracker._capture_snapshot("pre_forward_hook")
+        self.base_tracker.capture_snapshot("pre_forward_hook")
 
         try:
             yield
@@ -90,7 +83,7 @@ class HookBasedTracker:
             self._hook_handles.clear()
 
             # Capture post-forward snapshot to register NEW tensors created during forward
-            self.base_tracker._capture_snapshot("post_forward_hook")
+            self.base_tracker.capture_snapshot("post_forward_hook")
 
             # Process hook data
             self._process_hook_data()
@@ -99,6 +92,8 @@ class HookBasedTracker:
         """Create a pre-forward hook function for timing."""
 
         def pre_hook(module, input_tensors):
+            _ = module
+            _ = input_tensors
             # Record start time for this module
             self._operation_start_times[module_name] = time.perf_counter()
 
@@ -114,9 +109,9 @@ class HookBasedTracker:
             # Calculate duration
             duration_ms = 0.0
             if module_name in self._operation_start_times:
-                duration_sec = time.perf_counter() - self._operation_start_times[
-                    module_name
-                ]
+                duration_sec = (
+                    time.perf_counter() - self._operation_start_times[module_name]
+                )
                 duration_ms = duration_sec * 1000  # Convert to milliseconds
                 del self._operation_start_times[module_name]  # Clean up
 
@@ -138,15 +133,17 @@ class HookBasedTracker:
                     if isinstance(t, torch.Tensor):
                         output_ids.append(id(t))
 
-            # Get shapes for validation
+            # Get shapes and dtype for validation
             input_shapes = []
             for inp in input_tensors:
                 if isinstance(inp, torch.Tensor):
                     input_shapes.append(tuple(inp.shape))
 
             output_shape = None
+            output_dtype = "float16"  # Default
             if isinstance(output, torch.Tensor):
                 output_shape = tuple(output.shape)
+                output_dtype = str(output.dtype).rsplit(".", maxsplit=1)[-1]
 
             # Store hook data with timestamp and duration
             self._hook_data.append(
@@ -159,6 +156,7 @@ class HookBasedTracker:
                     "output_tensor_ids": output_ids,
                     "input_shapes": input_shapes,
                     "output_shape": output_shape,
+                    "dtype": output_dtype,
                 }
             )
 
@@ -180,7 +178,7 @@ class HookBasedTracker:
                 hook_info["module_type"],
                 hook_info["input_shapes"],
                 hook_info["output_shape"],
-                dtype="float16",  # TODO: detect actual dtype
+                dtype=hook_info.get("dtype", "float16"),
             )
 
             operation_entry = {
@@ -204,18 +202,18 @@ class HookBasedTracker:
             self._operation_log.append(operation_entry)
 
         # Store in base tracker for export
-        if not hasattr(self.base_tracker, '_operation_log'):
-            self.base_tracker._operation_log = []
-        self.base_tracker._operation_log.extend(self._operation_log)
+        for entry in self._operation_log:
+            self.base_tracker.add_operation_log_entry(entry)
 
         # Also update tensor metadata (for backward compatibility)
         for hook_info in self._hook_data:
             op_name = f"{hook_info['module_type']}.{hook_info['module_name']}"
 
             # Update output tensors - mark them as allocated by this operation
-            for tensor_id in hook_info['output_tensor_ids']:
-                if tensor_id in self.base_tracker._tensor_registry:
-                    self.base_tracker._tensor_registry[tensor_id].allocated_by = op_name
+            for tensor_id in hook_info["output_tensor_ids"]:
+                self.base_tracker.update_tensor_metadata(
+                    tensor_id, allocated_by=op_name
+                )
 
     def get_hook_data(self) -> list[dict[str, Any]]:
         """Get the captured hook data."""
@@ -228,8 +226,8 @@ class HookBasedTracker:
         duration_ms: float,
         flops: int,
         data_bytes: int,
-        input_shapes: list = None,
-        output_shape: tuple = None,
+        input_shapes: list | None = None,
+        output_shape: tuple | None = None,
     ):
         """
         Manually log a custom operation (e.g., attention kernel).
@@ -246,13 +244,9 @@ class HookBasedTracker:
         if not self.enabled:
             return
 
-        # Ensure operation log exists
-        if not hasattr(self.base_tracker, "_operation_log"):
-            self.base_tracker._operation_log = []
-
         # Create operation entry similar to hook-based entries
         operation_entry = {
-            "operation_id": len(self.base_tracker._operation_log) + 1,
+            "operation_id": self.base_tracker.get_operation_log_count() + 1,
             "timestamp": datetime.now().isoformat(),
             "duration_ms": duration_ms,
             "name": name,
@@ -269,7 +263,7 @@ class HookBasedTracker:
             "arithmetic_intensity": flops / max(data_bytes, 1),
         }
 
-        self.base_tracker._operation_log.append(operation_entry)
+        self.base_tracker.add_operation_log_entry(operation_entry)
 
 
 def create_hook_tracker(base_tracker):

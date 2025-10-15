@@ -14,7 +14,7 @@ import threading
 import time
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -22,103 +22,24 @@ from typing import Any
 import numpy as np
 import torch
 
-
-@dataclass
-class TensorInfo:
-    """Information about a single tensor allocation."""
-
-    tensor_id: int  # Unique ID for this tensor (id(tensor))
-    size_bytes: int
-    size_mb: float
-    shape: tuple[int, ...]
-    dtype: str
-    device: str
-    requires_grad: bool
-    allocated_by: str | None = None  # Which operation allocated this tensor
-    purpose: str | None = None  # buffer, output, weight, cache, etc.
-    is_persistent: bool = False  # Does it live across operations?
-    is_reusable: bool = False  # Can memory be reused?
-
-
-@dataclass
-class MemorySnapshot:
-    """Snapshot of memory state at a specific point in time."""
-
-    timestamp: str
-    checkpoint_name: str
-    total_bytes: int
-    total_mb: float
-    device_breakdown: dict[str, dict[str, Any]]
-    top_allocations: list[dict[str, Any]]
-    tensor_count: int
-
-
-@dataclass
-class TensorLifecycleEvent:
-    """Records an event in a tensor's lifecycle."""
-
-    tensor_id: int
-    event_type: str  # 'allocated', 'accessed_read', 'accessed_write', 'deallocated'
-    operation: str
-    timestamp: str
-    size_mb: float
-    shape: tuple[int, ...]
-
-
-@dataclass
-class OperationNode:
-    """Represents an operation in the execution graph."""
-
-    name: str
-    invocations: int = 0
-    total_memory_delta_mb: float = 0.0
-    tensors_allocated: list[int] = None  # Tensor IDs
-    tensors_read: list[int] = None  # Tensor IDs
-    tensors_written: list[int] = None  # Tensor IDs
-    child_operations: list[str] = None  # For nested ops
-
-    def __post_init__(self):
-        if self.tensors_allocated is None:
-            self.tensors_allocated = []
-        if self.tensors_read is None:
-            self.tensors_read = []
-        if self.tensors_written is None:
-            self.tensors_written = []
-        if self.child_operations is None:
-            self.child_operations = []
-
-
-@dataclass
-class TreeNode:
-    """Represents a timing node in the hierarchical profiling tree (unified profiler)."""
-
-    name: str  # Short name (e.g., "attn_metal_kernel")
-    full_path: str  # Full hierarchical path (e.g., "forward.layer0.attn_metal_kernel")
-    parent: str | None = None  # Full path of parent node
-    children: list[str] = field(default_factory=list)  # Full paths of child nodes
-    times: list[float] = field(default_factory=list)  # Raw timing samples in ms
-    count: int = 0  # Number of invocations
-
-    # Timing statistics (calculated from times)
-    avg_ms: float = 0.0
-    min_ms: float = 0.0
-    max_ms: float = 0.0
-    std_dev_ms: float = 0.0
-
-    # Data access tracking (total amount of data read/written)
-    input_bytes: list[int] = field(default_factory=list)  # Input data accessed per invocation
-    output_bytes: list[int] = field(default_factory=list)  # Output data written per invocation
-    avg_input_mb: float = 0.0  # Average input data in MB
-    avg_output_mb: float = 0.0  # Average output data in MB
-    avg_total_mb: float = 0.0  # Average total data accessed (input + output)
-
-    # Tensor tracking (optional - populated when memory profiling is enabled)
-    typical_input_tensors: list[dict] = field(default_factory=list)
-    typical_output_tensors: list[dict] = field(default_factory=list)
-
-    # Module information (populated for nn.Module operations)
-    module_type: str | None = None
-    module_name: str | None = None
+from .analysis_utils import (
+    classify_tensor_purpose,
+    is_persistent_tensor,
+    is_reusable_tensor,
+)
+from .export_utils import (
+    export_operation_graph,
+    export_tensor_lifecycle,
+    export_timing_tree,
+    generate_operation_summary,
+)
+from .types import (
+    MemorySnapshot,
+    OperationNode,
+    TensorInfo,
+    TensorLifecycleEvent,
+    TreeNode,
+)
 
 
 class MemoryTracker:
@@ -178,6 +99,10 @@ class MemoryTracker:
         self._timing_tree: dict[str, TreeNode] = {}  # full_path -> TreeNode
         self._timing_stack: list[str] = []  # Current call stack for hierarchical timing
 
+        # Operation log for hook-based tracking (added by hook tracker if enabled)
+        self._operation_log: list[dict[str, Any]] = []
+        self._hook_tracker: Any = None  # Lazy initialized by profile_attention
+
         if self.enabled:
             print("✅ Memory tracking enabled")
             print(f"   Snapshots will be saved to: {self.output_dir.absolute()}")
@@ -208,7 +133,7 @@ class MemoryTracker:
 
         # Capture memory snapshot before
         with self._lock:
-            pre_snapshot = self._capture_snapshot("pytorch_ops_pre")
+            _ = self._capture_snapshot("pytorch_ops_pre")
 
         # Use PyTorch profiler with memory tracking
         activities = [torch.profiler.ProfilerActivity.CPU]
@@ -226,7 +151,7 @@ class MemoryTracker:
 
         # Capture memory snapshot after
         with self._lock:
-            post_snapshot = self._capture_snapshot("pytorch_ops_post")
+            _ = self._capture_snapshot("pytorch_ops_post")
 
         # Extract operation information from profiler
         self._extract_pytorch_ops_from_profiler(prof)
@@ -261,7 +186,7 @@ class MemoryTracker:
                     ),
                 }
                 self._pytorch_ops.append(op_info)
-        except Exception as e:
+        except (AttributeError, RuntimeError) as e:
             print(f"⚠️  Failed to extract PyTorch ops: {e}")
 
     @contextmanager
@@ -405,7 +330,7 @@ class MemoryTracker:
         self._tensor_lifecycle[tensor_id].append(event)
 
     @staticmethod
-    def _synchronize_device():
+    def synchronize_device():
         """
         Synchronize GPU operations to ensure accurate timing measurements.
 
@@ -461,7 +386,7 @@ class MemoryTracker:
         pre_tensors = set(self._tensor_registry.keys()) if self.enabled else set()
 
         # Synchronize GPU before timing to ensure accurate measurements
-        self._synchronize_device()
+        self.synchronize_device()
         start_time = time.perf_counter()
 
         # Push onto timing stack
@@ -471,7 +396,7 @@ class MemoryTracker:
             yield
         finally:
             # Synchronize GPU after operation to capture actual execution time
-            self._synchronize_device()
+            self.synchronize_device()
             end_time = time.perf_counter()
             duration_ms = (end_time - start_time) * 1000
 
@@ -503,7 +428,9 @@ class MemoryTracker:
                             "device": self._tensor_registry[tid].device,
                             "size_mb": round(self._tensor_registry[tid].size_mb, 3),
                         }
-                        for tid in list(accessed_tensors)[:5]  # Limit to 5 typical inputs
+                        for tid in list(accessed_tensors)[
+                            :5
+                        ]  # Limit to 5 typical inputs
                         if tid in self._tensor_registry
                     ]
 
@@ -579,9 +506,11 @@ class MemoryTracker:
                     shape = tuple(obj.shape)
 
                     # Classify tensor purpose
-                    purpose = self._classify_tensor_purpose(obj, shape, device)
-                    is_persistent = self._is_persistent_tensor(tensor_id, size_mb)
-                    is_reusable = self._is_reusable_tensor(obj, purpose)
+                    purpose = classify_tensor_purpose(obj, shape)
+                    is_persistent = is_persistent_tensor(
+                        tensor_id, size_mb, self._tensor_last_seen
+                    )
+                    is_reusable = is_reusable_tensor(obj, purpose)
 
                     # Check if this is a new tensor or update to registry
                     if tensor_id not in self._tensor_registry:
@@ -634,7 +563,7 @@ class MemoryTracker:
                     # Track last seen
                     self._tensor_last_seen[tensor_id] = checkpoint_name
 
-            except Exception:
+            except (AttributeError, RuntimeError, TypeError):
                 # Skip objects that can't be inspected
                 pass
 
@@ -720,32 +649,41 @@ class MemoryTracker:
 
             # Add snapshots if available
             if has_snapshots:
-                export_data["snapshots"] = [asdict(snapshot) for snapshot in self.snapshots]
+                export_data["snapshots"] = [
+                    asdict(snapshot) for snapshot in self.snapshots
+                ]
 
             # Add timing tree if available (unified profiler mode)
             if has_timing:
-                export_data["profiling_tree"] = self._export_timing_tree()
+                export_data["profiling_tree"] = export_timing_tree(self._timing_tree)
 
             # Add operation allocations if any were tracked
             if self._operation_allocations:
                 export_data["operation_allocations"] = dict(self._operation_allocations)
-                export_data["operation_summary"] = self._generate_operation_summary()
+                export_data["operation_summary"] = generate_operation_summary(
+                    self._operation_allocations
+                )
 
             # Add operation graph if tracked
             if self._operation_graph:
-                export_data["operation_graph"] = self._export_operation_graph()
+                export_data["operation_graph"] = export_operation_graph(
+                    self._operation_graph, self._tensor_registry
+                )
 
             # Add tensor lifecycle if tracked
             if self._tensor_lifecycle:
-                export_data["tensor_lifecycle"] = self._export_tensor_lifecycle()
+                export_data["tensor_lifecycle"] = export_tensor_lifecycle(
+                    self._tensor_lifecycle, self._tensor_registry
+                )
 
             # Add PyTorch operations if tracked
             if self._pytorch_ops:
                 export_data["pytorch_operations"] = self._pytorch_ops
 
             # Add operation log if tracked (from hook-based tracker)
-            if hasattr(self, "_operation_log") and self._operation_log:
-                export_data["operation_log"] = self._operation_log
+            operation_log = getattr(self, "_operation_log", None)
+            if operation_log:
+                export_data["operation_log"] = operation_log
                 export_data["metadata"]["operation_log_enabled"] = True
 
             # Write to file
@@ -761,160 +699,15 @@ class MemoryTracker:
             if self._operation_graph:
                 print(f"   • Operation graph with {len(self._operation_graph)} nodes")
             if self._tensor_lifecycle:
-                print(f"   • Lifecycle tracked for {len(self._tensor_lifecycle)} tensors")
+                print(
+                    f"   • Lifecycle tracked for {len(self._tensor_lifecycle)} tensors"
+                )
             if self._pytorch_ops:
                 print(f"   • {len(self._pytorch_ops)} PyTorch operations captured")
-            if hasattr(self, "_operation_log") and self._operation_log:
-                print(f"   • Operation log with {len(self._operation_log)} entries")
+            operation_log = getattr(self, "_operation_log", None)
+            if operation_log:
+                print(f"   • Operation log with {len(operation_log)} entries")
             return str(output_path.absolute())
-
-    def _export_timing_tree(self) -> list[dict[str, Any]]:
-        """
-        Export timing tree as a hierarchical list (unified profiler format).
-
-        Returns a list of root nodes, each containing nested children.
-        """
-        # Find root nodes (nodes with no parent)
-        root_nodes = [
-            node for node in self._timing_tree.values() if node.parent is None
-        ]
-
-        def build_node_dict(node: TreeNode) -> dict[str, Any]:
-            """Recursively build a dictionary representation of a tree node."""
-            # Calculate self-time (exclusive time = total time - children time)
-            children_total_ms = 0.0
-            child_nodes = []
-
-            if node.children:
-                for child_path in node.children:
-                    if child_path in self._timing_tree:
-                        child_node = self._timing_tree[child_path]
-                        children_total_ms += child_node.avg_ms
-                        child_nodes.append(build_node_dict(child_node))
-
-            # Self time is the time spent in this node excluding children
-            self_time_ms = max(0.0, node.avg_ms - children_total_ms)
-
-            node_dict = {
-                "name": node.name,
-                "full_path": node.full_path,
-                "avg_latency_ms": round(node.avg_ms, 3),  # Inclusive time (includes children)
-                "self_time_ms": round(self_time_ms, 3),  # Exclusive time (just this node)
-                "min_ms": round(node.min_ms, 3),
-                "max_ms": round(node.max_ms, 3),
-                "std_dev_ms": round(node.std_dev_ms, 3),
-                "samples": node.count,
-            }
-
-            # Add data access metrics if available
-            if node.avg_total_mb > 0:
-                node_dict["data_access"] = {
-                    "input_mb": round(node.avg_input_mb, 3),
-                    "output_mb": round(node.avg_output_mb, 3),
-                    "total_mb": round(node.avg_total_mb, 3),
-                }
-
-            # Add module information if available
-            if node.module_type:
-                node_dict["module_type"] = node.module_type
-            if node.module_name:
-                node_dict["module_name"] = node.module_name
-
-            # Add tensor information if available
-            if node.typical_input_tensors:
-                node_dict["typical_input_tensors"] = node.typical_input_tensors
-            if node.typical_output_tensors:
-                node_dict["typical_output_tensors"] = node.typical_output_tensors
-
-            # Add children if any, with (self) entry inserted first if there's self-time AND other children
-            if child_nodes:
-                children_with_self = []
-
-                # Only add (self) entry if there are other children AND meaningful self-time
-                # This avoids redundant (self) entries for leaf nodes
-                if child_nodes and self_time_ms > 0.001:  # More than 0.001ms
-                    children_with_self.append(
-                        {
-                            "name": "(self)",
-                            "full_path": f"{node.full_path}.(self)",
-                            "avg_latency_ms": round(self_time_ms, 3),
-                            "self_time_ms": round(self_time_ms, 3),
-                            "min_ms": round(self_time_ms, 3),
-                            "max_ms": round(self_time_ms, 3),
-                            "std_dev_ms": 0.0,
-                            "samples": node.count,
-                            "is_self_time": True,  # Mark this as a synthetic self-time node
-                        }
-                    )
-
-                # Add actual children
-                children_with_self.extend(child_nodes)
-
-                if children_with_self:
-                    node_dict["children"] = children_with_self
-
-            return node_dict
-
-        # Build tree starting from root nodes
-        return [build_node_dict(root) for root in root_nodes]
-
-    def _export_operation_graph(self) -> dict[str, Any]:
-        """Export operation graph as a dictionary."""
-        graph = {}
-        for op_name, node in self._operation_graph.items():
-            graph[op_name] = {
-                "invocations": node.invocations,
-                "total_memory_delta_mb": round(node.total_memory_delta_mb, 2),
-                "tensors_allocated": len(set(node.tensors_allocated)),
-                "tensors_read": len(set(node.tensors_read)),
-                "tensors_written": len(set(node.tensors_written)),
-                "child_operations": node.child_operations,
-                "tensor_details": {
-                    "allocated": [
-                        self._tensor_registry[tid].purpose
-                        for tid in set(node.tensors_allocated)
-                        if tid in self._tensor_registry
-                    ],
-                    "read": [
-                        self._tensor_registry[tid].purpose
-                        for tid in set(node.tensors_read)
-                        if tid in self._tensor_registry
-                    ],
-                },
-            }
-        return graph
-
-    def _export_tensor_lifecycle(self) -> dict[str, Any]:
-        """Export tensor lifecycle events."""
-        lifecycle = {}
-        for tensor_id, events in self._tensor_lifecycle.items():
-            if tensor_id in self._tensor_registry:
-                tensor_info = self._tensor_registry[tensor_id]
-                lifecycle[str(tensor_id)] = {
-                    "purpose": tensor_info.purpose,
-                    "size_mb": tensor_info.size_mb,
-                    "shape": list(tensor_info.shape),
-                    "is_persistent": tensor_info.is_persistent,
-                    "is_reusable": tensor_info.is_reusable,
-                    "events": [asdict(event) for event in events],
-                }
-        return lifecycle
-
-    def _generate_operation_summary(self) -> dict[str, Any]:
-        """Generate a summary of operation-level memory allocations."""
-        summary = {}
-        for op_name, allocations in self._operation_allocations.items():
-            total_delta = sum(a["memory_delta_mb"] for a in allocations)
-            avg_delta = total_delta / len(allocations) if allocations else 0
-            max_delta = max((a["memory_delta_mb"] for a in allocations), default=0)
-
-            summary[op_name] = {
-                "invocation_count": len(allocations),
-                "total_memory_delta_mb": round(total_delta, 2),
-                "avg_memory_delta_mb": round(avg_delta, 2),
-                "max_memory_delta_mb": round(max_delta, 2),
-            }
-        return summary
 
     def get_summary(self) -> dict[str, Any]:
         """
@@ -941,7 +734,9 @@ class MemoryTracker:
 
             # Add operation tracking summary if available
             if self._operation_allocations:
-                summary["operations"] = self._generate_operation_summary()
+                summary["operations"] = generate_operation_summary(
+                    self._operation_allocations
+                )
 
             return summary
 
@@ -972,60 +767,6 @@ class MemoryTracker:
                 snapshot = self._capture_snapshot(snapshot_name)
                 self.snapshots.append(snapshot)
 
-    def _classify_tensor_purpose(
-        self, tensor: torch.Tensor, shape: tuple, device: str
-    ) -> str:
-        """Classify what this tensor is used for."""
-        # KV cache detection: large 5D tensors with specific shape pattern
-        if (
-            len(shape) == 5 and shape[0] > 4096
-        ):  # [max_cache_len, batch, num_kv_heads, num_heads_per_group, head_dim]
-            return "kv_cache"
-
-        # Weight detection: requires_grad or very large
-        if tensor.requires_grad:
-            if tensor.numel() > 1000000:  # > 1M parameters
-                return "weight"
-            return "gradient"
-
-        # Embedding detection: 2D with large vocabulary size
-        if len(shape) == 2 and shape[0] > 10000:
-            return "embedding"
-
-        # Intermediate buffer: modest size, temporary
-        if len(shape) >= 2:
-            return "buffer"
-
-        return "unknown"
-
-    def _is_persistent_tensor(self, tensor_id: int, size_mb: float) -> bool:
-        """Determine if tensor persists across operations."""
-        # If we've seen this tensor before, it's persistent
-        if tensor_id in self._tensor_last_seen:
-            return True
-
-        # Large tensors (>100MB) are likely persistent (weights, cache)
-        if size_mb > 100:
-            return True
-
-        return False
-
-    def _is_reusable_tensor(self, tensor: torch.Tensor, purpose: str) -> bool:
-        """Determine if tensor memory can be reused."""
-        # Weights and cache are not reusable
-        if purpose in ["weight", "kv_cache", "embedding"]:
-            return False
-
-        # Gradients are reusable (overwritten each backward pass)
-        if purpose == "gradient":
-            return True
-
-        # Buffers without grad are reusable
-        if purpose == "buffer" and not tensor.requires_grad:
-            return True
-
-        return False
-
     def stop(self) -> None:
         """Stop periodic tracking and save final snapshot."""
         if not self.enabled:
@@ -1038,9 +779,43 @@ class MemoryTracker:
         # Save final snapshot
         self.save_snapshot()
 
+    # Public API for hook-based tracker integration
+    def capture_snapshot(self, checkpoint_name: str):
+        """Public method to capture a memory snapshot."""
+        return self._capture_snapshot(checkpoint_name)
+
+    def add_operation_log_entry(self, entry: dict):
+        """Public method to add an entry to the operation log."""
+        if not hasattr(self, "_operation_log"):
+            self._operation_log = []
+        self._operation_log.append(entry)
+
+    def get_operation_log_count(self) -> int:
+        """Get the current count of entries in the operation log."""
+        if not hasattr(self, "_operation_log"):
+            self._operation_log = []
+        return len(self._operation_log)
+
+    def update_tensor_metadata(self, tensor_id: int, **kwargs):
+        """Public method to update tensor metadata."""
+        if tensor_id in self._tensor_registry:
+            for key, value in kwargs.items():
+                setattr(self._tensor_registry[tensor_id], key, value)
+
+    def get_hook_tracker(self):
+        """Get or create the hook tracker for custom operation logging."""
+        if self._hook_tracker is None:
+            # Lazy import to avoid circular dependency
+            from .hook_based_tracker import (  # pylint: disable=import-outside-toplevel
+                create_hook_tracker,
+            )
+
+            self._hook_tracker = create_hook_tracker(self)
+        return self._hook_tracker
+
 
 # Global singleton instance
-_TRACKER: MemoryTracker | None = None
+_global_tracker: MemoryTracker | None = None
 
 
 def initialize_memory_tracker(
@@ -1054,17 +829,19 @@ def initialize_memory_tracker(
         enabled: Whether memory tracking is enabled
         enable_timing: Whether timing profiling is enabled (unified profiler mode)
     """
-    global _TRACKER  # pylint: disable=global-statement
-    _TRACKER = MemoryTracker(output_dir=output_dir, enabled=enabled, enable_timing=enable_timing)
+    global _global_tracker  # pylint: disable=global-statement
+    _global_tracker = MemoryTracker(
+        output_dir=output_dir, enabled=enabled, enable_timing=enable_timing
+    )
 
 
 def get_memory_tracker() -> MemoryTracker:
     """Get the global memory tracker instance."""
-    global _TRACKER  # pylint: disable=global-statement
-    if _TRACKER is None:
+    global _global_tracker  # pylint: disable=global-statement
+    if _global_tracker is None:
         # Initialize with disabled tracker if not initialized
-        _TRACKER = MemoryTracker(enabled=False)
-    return _TRACKER
+        _global_tracker = MemoryTracker(enabled=False)
+    return _global_tracker
 
 
 def memory_checkpoint(name: str) -> nullcontext[None]:

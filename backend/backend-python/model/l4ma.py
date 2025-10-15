@@ -181,7 +181,9 @@ class L4maAttention(nn.Module):
             kv_cache_layer=kv_cache_at_layer[self.layer_idx],
         )
 
-        with profile_attention(self.layer_idx, query_states, kv_cache_at_layer[self.layer_idx]):
+        with profile_attention(
+            self.layer_idx, query_states, kv_cache_at_layer[self.layer_idx]
+        ):
             attn_output = runtime.run_attention(
                 layer_idx=self.layer_idx,
                 query_states=query_states,

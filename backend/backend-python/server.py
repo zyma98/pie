@@ -28,6 +28,8 @@ import zmq
 from platformdirs import user_cache_dir
 from websockets.sync.client import connect
 
+from profiler import initialize_memory_tracker
+
 from message import (
     DownloadAdapterRequest,
     EmbedImageRequest,
@@ -126,8 +128,6 @@ def start_service(
     """Spin up the backend service using the provided handler implementation."""
 
     # Initialize profiler
-    from profiler import initialize_memory_tracker  # pylint: disable=import-outside-toplevel
-
     enable_profiling = config.get("enable_profiling", False)
 
     initialize_memory_tracker(

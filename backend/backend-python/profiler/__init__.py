@@ -5,10 +5,12 @@ This package combines timing profiling, memory tracking, and tensor flow analysi
 Exports APIs from both the legacy profiler and the unified tracker.
 """
 
+import time
 from contextlib import contextmanager
 
 # Import from unified tracker (main profiler)
 from .tracker import (
+    MemoryTracker,
     get_memory_summary,
     get_memory_tracker,
     initialize_memory_tracker,
@@ -22,6 +24,8 @@ from .legacy_profiler import (
     set_profiling_enabled,
     profile_with_tensors,
 )
+
+from .calculate_metrics import calculate_attention_metrics
 
 
 @contextmanager
@@ -65,10 +69,6 @@ def profile_attention(layer_idx: int, query_states, kv_cache):
         query_states: Query tensor [batch, num_heads, head_dim]
         kv_cache: KV cache tensor [kv_len, 2, num_kv_heads, head_dim]
     """
-    import time
-    from .tracker import MemoryTracker
-    from .calculate_metrics import calculate_attention_metrics
-
     tracker = get_memory_tracker()
 
     # If profiling disabled, just yield without overhead
@@ -85,26 +85,21 @@ def profile_attention(layer_idx: int, query_states, kv_cache):
         num_heads=num_heads,
         head_dim=head_dim,
         kv_seq_len=kv_seq_len,
-        dtype=str(query_states.dtype).split(".")[-1],
+        dtype=str(query_states.dtype).rsplit(".", maxsplit=1)[-1],
     )
 
     # Time the operation with synchronization
-    MemoryTracker._synchronize_device()
+    MemoryTracker.synchronize_device()
     start_time = time.perf_counter()
 
     try:
         yield
     finally:
-        MemoryTracker._synchronize_device()
+        MemoryTracker.synchronize_device()
         duration_ms = (time.perf_counter() - start_time) * 1000
 
         # Add to operation log for bottleneck analysis
-        from .hook_based_tracker import create_hook_tracker
-
-        if not hasattr(tracker, "_hook_tracker"):
-            tracker._hook_tracker = create_hook_tracker(tracker)
-
-        hook_tracker = tracker._hook_tracker
+        hook_tracker = tracker.get_hook_tracker()
         hook_tracker.log_custom_operation(
             name=f"attention_layer_{layer_idx}",
             module_type="Attention",
@@ -124,7 +119,6 @@ __all__ = [
     "stop_memory_tracker",
     "start_profile",
     "profile_attention",
-
     # Legacy profiler API (backward compatibility)
     "set_profiling_enabled",
     "profile_with_tensors",
