@@ -112,7 +112,7 @@ memory_profile_YYYYMMDD_HHMMSS.json
 ### Basic Usage
 
 ```python
-from memory_profiler import (
+from profiler import (
     initialize_memory_tracker,
     memory_checkpoint,
     stop_memory_tracker,
@@ -133,7 +133,7 @@ stop_memory_tracker()
 Track memory allocations within specific operations:
 
 ```python
-from memory_profiler import get_memory_tracker
+from profiler import get_memory_tracker
 
 tracker = get_memory_tracker()
 
@@ -164,7 +164,7 @@ This will generate an operation tree showing:
 Track low-level PyTorch operations (gemm, matmul, add, etc.) and their memory usage:
 
 ```python
-from memory_profiler import get_memory_tracker
+from profiler import get_memory_tracker
 
 tracker = get_memory_tracker()
 

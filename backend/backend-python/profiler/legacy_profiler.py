@@ -1,16 +1,26 @@
 """
-PyTorch backend-agnostic profiler for hierarchical performance analysis.
+DEPRECATED: Legacy profiler - use the unified profiler instead.
 
-This module provides a profiler that tracks nested operations and reports
-timing statistics in a hierarchical tree structure.
-Supports CUDA, MPS (Metal), and CPU backends.
+This module is kept for backward compatibility only. All functionality has been
+migrated to the unified profiler (profiler/tracker.py) which provides:
+- GPU synchronization for accurate timing (MPS/CUDA)
+- Hierarchical timing tree
+- Memory tracking and tensor I/O analysis
+- Single unified JSON output
+
+MIGRATION:
+- Replace `from profiler import start_profile` with unified profiler (already done)
+- The `profile_with_tensors()` function is now a no-op wrapper
+- New code should use `profiler.start_profile()` which delegates to tracker.py
+
+This file will be removed in a future release.
 """
 
 from __future__ import annotations
 
 import json
 import time
-from contextlib import ContextDecorator, nullcontext
+from contextlib import ContextDecorator, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -49,9 +59,8 @@ class _TorchProfiler:
         name: str
         parent: _TorchProfiler.Node | None
         children: list[_TorchProfiler.Node] = field(default_factory=list)
-        times: list[float] = field(
-            default_factory=list
-        )  # Raw timings for this node (self time)
+        times: list[float] = field(default_factory=list)  # Raw timings for this node (self time)
+
         # Metrics calculated from timings
         count: int = 0
         mean: float = 0.0
@@ -130,19 +139,13 @@ class _TorchProfiler:
         print(headers)
         print("-" * 115)
 
-        def print_node(
-            node: _TorchProfiler.Node, indent: str = "", is_last: bool = True
-        ):
+        def print_node(node: _TorchProfiler.Node, indent: str = "", is_last: bool = True):
             if not node.name.startswith("root"):
                 name_part = node.name.split(".")[-1]
                 line_char = "└── " if is_last else "├── "
-                parent_total = (
-                    node.parent.total_mean if node.parent else node.total_mean
-                )
+                parent_total = node.parent.total_mean if node.parent else node.total_mean
                 percent_str = (
-                    f"{(node.total_mean / parent_total * 100):.1f}%"
-                    if parent_total > 1e-6
-                    else ""
+                    f"{(node.total_mean / parent_total * 100):.1f}%" if parent_total > 1e-6 else ""
                 )
 
                 print(
@@ -198,26 +201,20 @@ class _TorchProfiler:
 
             # Calculate percentage relative to parent
             if node.parent and node.parent.total_mean > 0:
-                result["percent_of_parent"] = (
-                    node.total_mean / node.parent.total_mean
-                ) * 100
+                result["percent_of_parent"] = (node.total_mean / node.parent.total_mean) * 100
 
             # Calculate percentage relative to absolute root
             if root_total > 0:
                 result["percent_of_total"] = (node.total_mean / root_total) * 100
 
             if node.children:
-                result["children"] = [
-                    node_to_dict(child, root_total) for child in node.children
-                ]
+                result["children"] = [node_to_dict(child, root_total) for child in node.children]
 
             return result
 
         return {
             "timestamp": datetime.now().isoformat(),
-            "profiling_tree": [
-                node_to_dict(child, absolute_total) for child in self.root.children
-            ],
+            "profiling_tree": [node_to_dict(child, absolute_total) for child in self.root.children],
         }
 
     def save_to_json(self, output_dir: str = ".", include_samples: bool = False) -> str:
@@ -258,64 +255,101 @@ PROFILER = _TorchProfiler()
 
 def set_profiling_enabled(enabled: bool) -> None:
     """
-    Enable or disable profiling globally.
+    DEPRECATED: Enable or disable profiling globally.
+
+    This function is deprecated and now delegates to the unified profiler.
+    Use `initialize_memory_tracker(enable_timing=True)` instead.
 
     Args:
         enabled: If True, profiling is enabled. If False, profiling is disabled.
     """
     PROFILER.enabled = enabled
+    # Note: Unified profiler is initialized separately in server.py
+    # This function is kept for backward compatibility but does nothing useful
 
 
-def start_profile(name: str) -> _TorchProfiler.Timer | nullcontext[None]:
+def start_profile(name: str):
     """
     Starts a new profiling scope. Use as a context manager.
+
+    This function now delegates to the unified profiler (tracker) when available,
+    which provides both timing and memory tracking in a single hierarchical tree.
+    Falls back to the old profiler if unified profiler is not initialized.
+
     Example:
         with start_profile("my_operation"):
             ...
     """
+    # Try to use unified profiler first
+    try:
+        from .tracker import get_memory_tracker  # pylint: disable=import-outside-toplevel
+
+        tracker = get_memory_tracker()
+        # Use unified profiler if timing is enabled
+        if tracker.enable_timing:
+            return tracker.start_profile(name)
+    except (ImportError, AttributeError):
+        pass  # Fall back to old profiler
+
+    # Fall back to old profiler
     if PROFILER.enabled:
         return PROFILER.start(name)
     return nullcontext()
 
 
-def report_profiling_results(
-    save_json: bool = True, output_dir: str = ".", include_samples: bool = False
-) -> str | None:
+@contextmanager
+def profile_with_tensors(name: str, inputs: tuple = (), outputs_getter=None):
     """
-    Calculates and prints the final hierarchical report.
+    DEPRECATED: Convenience wrapper for profiling with automatic tensor tracking.
+
+    This function is now a NO-OP wrapper that delegates to the unified profiler.
+    The inputs and outputs parameters are ignored.
+
+    MIGRATION: Replace with `from profiler import start_profile`:
+        # Old (deprecated):
+        with profile_with_tensors("operation", inputs=(x, y)) as profile:
+            result = do_work(x, y)
+            profile.set_outputs(result)
+
+        # New (unified profiler):
+        with start_profile("operation"):
+            result = do_work(x, y)
 
     Args:
-        save_json: If True, also saves results to a timestamped JSON file
-        output_dir: Directory to save the JSON file (default: current directory)
-        include_samples: If True, includes individual sample times in the JSON output
-
-    Returns:
-        Path to the saved JSON file if save_json=True, otherwise None
+        name: Name of the operation to profile
+        inputs: IGNORED - kept for backward compatibility
+        outputs_getter: IGNORED - kept for backward compatibility
     """
-    PROFILER.report()
+    # Delegate to unified profiler via start_profile
+    try:
+        from .tracker import get_memory_tracker  # pylint: disable=import-outside-toplevel
 
-    if save_json:
-        json_path = PROFILER.save_to_json(output_dir, include_samples=include_samples)
-        print(f"\n📁 Profiling results saved to: {json_path}")
-        return json_path
+        tracker = get_memory_tracker()
+        if tracker.enable_timing:
+            # Use unified profiler
+            with tracker.start_profile(name):
+                yield None
+            return
+    except (ImportError, AttributeError):
+        pass
 
-    return None
+    # Fallback to legacy profiler if unified not available
+    if not PROFILER.enabled:
+        yield None
+        return
 
+    timer = PROFILER.start(name)
+    _ = inputs  # Ignored
+    _ = outputs_getter  # Ignored
 
-def save_profiling_json(output_dir: str = ".", include_samples: bool = False) -> str:
-    """
-    Saves profiling results to a timestamped JSON file.
+    class OutputSetter:
+        """Helper to allow setting outputs within the context (no-op for compatibility)."""
 
-    Args:
-        output_dir: Directory to save the JSON file (default: current directory)
-        include_samples: If True, includes individual sample times in the output
+        def set_outputs(self, *outputs):
+            """No-op - kept for backward compatibility."""
+            _ = outputs
 
-    Returns:
-        Path to the saved JSON file
-    """
-    return PROFILER.save_to_json(output_dir, include_samples=include_samples)
+    output_setter = OutputSetter()
 
-
-def reset_profiler():
-    """Resets all profiling data."""
-    PROFILER.reset()
+    with timer:
+        yield output_setter

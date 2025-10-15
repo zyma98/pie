@@ -332,10 +332,10 @@ class Handler:
 
             # 3. Run the forward pass through the model.
             with start_profile("model_forward"):
-                # Track PyTorch operations with fine-grained detail if memory profiling is enabled
-                enhanced_tracker_context = self._get_enhanced_tracker()
+                # Track PyTorch operations with fine-grained detail
+                tracker_context = self._get_tracker()
 
-                with enhanced_tracker_context:
+                with tracker_context:
                     with _device_context(self.device):
                         output_embeds = self.lm.model.forward(  # type: ignore[attr-defined]
                             kv_cache_at_layer=self.kv_cache_at_layer, **model_inputs
@@ -347,50 +347,27 @@ class Handler:
 
         return responses
 
-    def _get_pytorch_ops_tracker(self):
-        """Get PyTorch ops tracker context manager if memory profiling is enabled."""
-        if self.config.get("enable_memory_profiling", False):
-            try:
-                # pylint: disable=import-outside-toplevel
-                from memory_profiler import get_memory_tracker
+    def _get_tracker(self):
+        """
+        Get profiling tracker for fine-grained operation tracking.
 
-                tracker = get_memory_tracker()
-                return tracker.track_pytorch_ops()
-            except (ImportError, OSError, RuntimeError):
-                # Memory profiler not available or failed to initialize
-                return nullcontext()
-        return nullcontext()
+        When profiling is enabled, this registers forward hooks on all leaf modules
+        to capture exact tensor IDs and execution order. The hook data is saved in
+        the operation_log section of the unified profile JSON.
+        """
+        if not self.config.get("enable_profiling", False):
+            return nullcontext()
 
-    def _get_operation_tracker(self):
-        """Get operation tracker context manager if memory profiling is enabled."""
-        if self.config.get("enable_memory_profiling", False):
-            try:
-                # pylint: disable=import-outside-toplevel
-                from memory_profiler import get_memory_tracker
+        try:
+            # pylint: disable=import-outside-toplevel
+            from profiler import get_memory_tracker
+            from profiler.hook_based_tracker import create_hook_tracker
 
-                tracker = get_memory_tracker()
-                return tracker.track_operation("model_forward")
-            except (ImportError, OSError, RuntimeError):
-                # Memory profiler not available or failed to initialize
-                return nullcontext()
-        return nullcontext()
-
-    def _get_enhanced_tracker(self):
-        """Get hook-based tracker for fine-grained operation tracking."""
-        if self.config.get("enable_memory_profiling", False):
-            try:
-                # pylint: disable=import-outside-toplevel
-                from memory_profiler import get_memory_tracker
-                from memory_profiler.hook_based_tracker import create_hook_tracker
-
-                base_tracker = get_memory_tracker()
-                hook_tracker = create_hook_tracker(base_tracker)
-                # Pass the model to track
-                return hook_tracker.track_model_with_hooks(self.lm.model)  # type: ignore[arg-type]
-            except (ImportError, OSError, RuntimeError, AttributeError):
-                # Hook tracking not available, fall back to basic
-                return nullcontext()
-        return nullcontext()
+            tracker = get_memory_tracker()
+            hook_tracker = create_hook_tracker(tracker)
+            return hook_tracker.track_model_with_hooks(self.lm.model)  # type: ignore[arg-type]
+        except (ImportError, OSError, RuntimeError, AttributeError):
+            return nullcontext()
 
     def heartbeat(
         self, reqs: list[message.HeartbeatRequest]

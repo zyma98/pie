@@ -55,26 +55,19 @@ class HookBasedTracker:
             yield
             return
 
-        print("🪝 Hook-based tracker: Registering forward hooks on model")
-
         # Clear previous data
         self._hook_data.clear()
         self._hook_handles.clear()
 
         # Register hooks on all leaf modules
-        hook_count = 0
         for name, module in model.named_modules():
             # Only hook leaf modules (those with no children)
             if len(list(module.children())) == 0:
                 handle = module.register_forward_hook(self._create_hook(name))
                 self._hook_handles.append(handle)
-                hook_count += 1
-
-        print(f"🪝 Registered {hook_count} forward hooks")
 
         # Capture a snapshot BEFORE forward pass to register existing tensors
         # (weights, kv_cache, etc.) so hooks can update their allocated_by field
-        print("🪝 Capturing pre-forward snapshot to register existing tensors...")
         self.base_tracker._capture_snapshot("pre_forward_hook")
 
         try:
@@ -85,10 +78,7 @@ class HookBasedTracker:
                 handle.remove()
             self._hook_handles.clear()
 
-            print(f"🪝 Captured {len(self._hook_data)} operation calls")
-
             # Capture post-forward snapshot to register NEW tensors created during forward
-            print("🪝 Capturing post-forward snapshot to register new tensors...")
             self.base_tracker._capture_snapshot("post_forward_hook")
 
             # Process hook data
@@ -147,8 +137,6 @@ class HookBasedTracker:
 
         This creates a timeline of operation executions with input/output tensors.
         """
-        print(f"\n📊 Processing {len(self._hook_data)} hook captures")
-
         # Build operation log (operation-centric view)
         self._operation_log = []
         for idx, hook_info in enumerate(self._hook_data):
@@ -175,7 +163,6 @@ class HookBasedTracker:
         self.base_tracker._operation_log.extend(self._operation_log)
 
         # Also update tensor metadata (for backward compatibility)
-        updated_allocations = 0
         for hook_info in self._hook_data:
             op_name = f"{hook_info['module_type']}.{hook_info['module_name']}"
 
@@ -183,20 +170,6 @@ class HookBasedTracker:
             for tensor_id in hook_info['output_tensor_ids']:
                 if tensor_id in self.base_tracker._tensor_registry:
                     self.base_tracker._tensor_registry[tensor_id].allocated_by = op_name
-                    updated_allocations += 1
-
-        # Generate summary
-        operations = set(f"{h['module_type']}.{h['module_name']}" for h in self._hook_data)
-        print(f"✅ Built operation log with {len(self._operation_log)} entries")
-        print(f"✅ Tracked {len(operations)} unique operations")
-        print(f"✅ Updated {updated_allocations} tensor allocations")
-
-        # Show some examples
-        print("\n📋 Sample operation timeline:")
-        for i, op in enumerate(self._operation_log[:5]):
-            print(f"  {op['operation_id']}. [{op['timestamp']}] {op['name']}")
-            print(f"     Inputs: {op['num_inputs']} tensor(s)")
-            print(f"     Outputs: {op['num_outputs']} tensor(s)")
 
     def get_hook_data(self) -> list[dict[str, Any]]:
         """Get the captured hook data."""

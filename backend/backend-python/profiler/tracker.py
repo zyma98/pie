@@ -11,13 +11,15 @@ from __future__ import annotations
 import gc
 import json
 import threading
+import time
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 
 
@@ -86,6 +88,39 @@ class OperationNode:
             self.child_operations = []
 
 
+@dataclass
+class TreeNode:
+    """Represents a timing node in the hierarchical profiling tree (unified profiler)."""
+
+    name: str  # Short name (e.g., "attn_metal_kernel")
+    full_path: str  # Full hierarchical path (e.g., "forward.layer0.attn_metal_kernel")
+    parent: str | None = None  # Full path of parent node
+    children: list[str] = field(default_factory=list)  # Full paths of child nodes
+    times: list[float] = field(default_factory=list)  # Raw timing samples in ms
+    count: int = 0  # Number of invocations
+
+    # Timing statistics (calculated from times)
+    avg_ms: float = 0.0
+    min_ms: float = 0.0
+    max_ms: float = 0.0
+    std_dev_ms: float = 0.0
+
+    # Data access tracking (total amount of data read/written)
+    input_bytes: list[int] = field(default_factory=list)  # Input data accessed per invocation
+    output_bytes: list[int] = field(default_factory=list)  # Output data written per invocation
+    avg_input_mb: float = 0.0  # Average input data in MB
+    avg_output_mb: float = 0.0  # Average output data in MB
+    avg_total_mb: float = 0.0  # Average total data accessed (input + output)
+
+    # Tensor tracking (optional - populated when memory profiling is enabled)
+    typical_input_tensors: list[dict] = field(default_factory=list)
+    typical_output_tensors: list[dict] = field(default_factory=list)
+
+    # Module information (populated for nn.Module operations)
+    module_type: str | None = None
+    module_name: str | None = None
+
+
 class MemoryTracker:
     """
     Tracks PyTorch tensor memory allocations across all devices.
@@ -95,7 +130,11 @@ class MemoryTracker:
     """
 
     def __init__(
-        self, output_dir: str = ".", enabled: bool = False, interval: float = 5.0
+        self,
+        output_dir: str = ".",
+        enabled: bool = False,
+        interval: float = 5.0,
+        enable_timing: bool = False,
     ):
         """
         Initialize the memory tracker.
@@ -104,8 +143,10 @@ class MemoryTracker:
             output_dir: Directory where memory snapshots will be saved
             enabled: Whether memory tracking is enabled
             interval: Interval in seconds between automatic snapshots (default: 5.0)
+            enable_timing: Whether to enable timing profiling (unified profiler mode)
         """
         self.enabled = enabled
+        self.enable_timing = enable_timing
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.snapshots: list[MemorySnapshot] = []
@@ -133,11 +174,17 @@ class MemoryTracker:
         self._pytorch_ops: list[dict[str, Any]] = []  # List of all PyTorch ops executed
         self._op_hook_handle = None
 
+        # Unified profiler: Timing tree infrastructure (NEW)
+        self._timing_tree: dict[str, TreeNode] = {}  # full_path -> TreeNode
+        self._timing_stack: list[str] = []  # Current call stack for hierarchical timing
+
         if self.enabled:
             print("✅ Memory tracking enabled")
             print(f"   Snapshots will be saved to: {self.output_dir.absolute()}")
             print(f"   Snapshot interval: {interval}s")
             print("   Operation tracking: ON (use track_operation() context manager)")
+            if self.enable_timing:
+                print("   Timing profiling: ON (unified profiler mode)")
             self._start_periodic_tracking()
 
     @contextmanager
@@ -357,6 +404,129 @@ class MemoryTracker:
         )
         self._tensor_lifecycle[tensor_id].append(event)
 
+    @staticmethod
+    def _synchronize_device():
+        """
+        Synchronize GPU operations to ensure accurate timing measurements.
+
+        This is critical for profiling GPU operations because without synchronization,
+        timing only measures how long it takes to queue operations, not execute them.
+        """
+        if torch.cuda.is_available() and torch.cuda.is_initialized():
+            torch.cuda.synchronize()
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            torch.mps.synchronize()
+
+    @contextmanager
+    def start_profile(self, name: str):
+        """
+        Profile an operation with timing and optional tensor tracking (unified profiler).
+
+        This is the main profiling API that combines timing (like the old time profiler)
+        with tensor tracking (from memory profiler). It builds a hierarchical timing tree
+        and optionally captures tensor I/O.
+
+        Usage:
+            with tracker.start_profile("operation_name"):
+                # code to profile
+
+        Args:
+            name: Name of the operation (e.g., "attn_metal_kernel", "forward_pass")
+        """
+        # If profiling is completely disabled, use nullcontext
+        if not self.enabled and not self.enable_timing:
+            yield
+            return
+
+        # Build hierarchical path based on current stack
+        parent_path = self._timing_stack[-1] if self._timing_stack else None
+        full_path = f"{parent_path}.{name}" if parent_path else name
+
+        # Create or get tree node
+        if full_path not in self._timing_tree:
+            self._timing_tree[full_path] = TreeNode(
+                name=name,
+                full_path=full_path,
+                parent=parent_path,
+            )
+
+        # Track parent-child relationship
+        if parent_path and parent_path in self._timing_tree:
+            if full_path not in self._timing_tree[parent_path].children:
+                self._timing_tree[parent_path].children.append(full_path)
+
+        node = self._timing_tree[full_path]
+
+        # Capture pre-state for tensor tracking (if enabled)
+        pre_tensors = set(self._tensor_registry.keys()) if self.enabled else set()
+
+        # Synchronize GPU before timing to ensure accurate measurements
+        self._synchronize_device()
+        start_time = time.perf_counter()
+
+        # Push onto timing stack
+        self._timing_stack.append(full_path)
+
+        try:
+            yield
+        finally:
+            # Synchronize GPU after operation to capture actual execution time
+            self._synchronize_device()
+            end_time = time.perf_counter()
+            duration_ms = (end_time - start_time) * 1000
+
+            # Record timing
+            node.times.append(duration_ms)
+            node.count += 1
+
+            # Update statistics
+            node.avg_ms = float(np.mean(node.times))
+            node.min_ms = float(np.min(node.times))
+            node.max_ms = float(np.max(node.times))
+            node.std_dev_ms = float(np.std(node.times)) if len(node.times) > 1 else 0.0
+
+            # Capture tensor I/O if memory profiling is enabled (for typical tensors display)
+            if self.enabled and node.count == 1:
+                # Only do this expensive operation once per node (first invocation)
+                post_tensors = set(self._tensor_registry.keys())
+                new_tensors = post_tensors - pre_tensors
+                accessed_tensors = pre_tensors & post_tensors
+
+                # Store typical input/output tensor info (only for first invocation)
+                if node.count == 1:
+                    # Record inputs (tensors that existed before)
+                    node.typical_input_tensors = [
+                        {
+                            "id": tid,
+                            "shape": list(self._tensor_registry[tid].shape),
+                            "dtype": self._tensor_registry[tid].dtype,
+                            "device": self._tensor_registry[tid].device,
+                            "size_mb": round(self._tensor_registry[tid].size_mb, 3),
+                        }
+                        for tid in list(accessed_tensors)[:5]  # Limit to 5 typical inputs
+                        if tid in self._tensor_registry
+                    ]
+
+                    # Record outputs (new tensors created)
+                    node.typical_output_tensors = [
+                        {
+                            "id": tid,
+                            "shape": list(self._tensor_registry[tid].shape),
+                            "dtype": self._tensor_registry[tid].dtype,
+                            "device": self._tensor_registry[tid].device,
+                            "size_mb": round(self._tensor_registry[tid].size_mb, 3),
+                        }
+                        for tid in list(new_tensors)[:5]  # Limit to 5 typical outputs
+                        if tid in self._tensor_registry
+                    ]
+
+                # Data access tracking removed - was expensive and premature
+                # Keep the data structure in TreeNode for future use
+
+            # Pop from timing stack
+            if self._timing_stack and self._timing_stack[-1] == full_path:
+                self._timing_stack.pop()
+
     def checkpoint(self, name: str) -> None:
         """
         Record a memory checkpoint with the given name.
@@ -512,32 +682,49 @@ class MemoryTracker:
         Returns:
             Path to the saved file
         """
-        if not self.enabled:
+        if not self.enabled and not self.enable_timing:
             return ""
 
         with self._lock:
-            if not self.snapshots:
-                print("⚠️  No memory snapshots to save")
+            # Check if we have any data to save
+            has_snapshots = bool(self.snapshots)
+            has_timing = bool(self._timing_tree)
+
+            if not has_snapshots and not has_timing:
+                print("⚠️  No profiling data to save")
                 return ""
 
             # Generate filename if not provided
             if filename is None:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                filename = f"memory_profile_{timestamp}.json"
+                filename = f"unified_profile_{timestamp}.json"
 
             output_path = self.output_dir / filename
 
+            # Always use unified_profiler format
+            format_type = "unified_profiler"
+
             # Prepare data for export
             export_data = {
+                "format": format_type,
                 "metadata": {
                     "generated_at": datetime.now().isoformat(),
-                    "num_snapshots": len(self.snapshots),
+                    "num_snapshots": len(self.snapshots) if has_snapshots else 0,
                     "operation_tracking_enabled": bool(self._operation_allocations),
                     "pytorch_ops_tracking_enabled": bool(self._pytorch_ops),
                     "tensor_lifecycle_tracking_enabled": bool(self._tensor_lifecycle),
+                    "timing_profiling_enabled": self.enable_timing,
+                    "num_timing_nodes": len(self._timing_tree) if has_timing else 0,
                 },
-                "snapshots": [asdict(snapshot) for snapshot in self.snapshots],
             }
+
+            # Add snapshots if available
+            if has_snapshots:
+                export_data["snapshots"] = [asdict(snapshot) for snapshot in self.snapshots]
+
+            # Add timing tree if available (unified profiler mode)
+            if has_timing:
+                export_data["profiling_tree"] = self._export_timing_tree()
 
             # Add operation allocations if any were tracked
             if self._operation_allocations:
@@ -557,7 +744,7 @@ class MemoryTracker:
                 export_data["pytorch_operations"] = self._pytorch_ops
 
             # Add operation log if tracked (from hook-based tracker)
-            if hasattr(self, '_operation_log') and self._operation_log:
+            if hasattr(self, "_operation_log") and self._operation_log:
                 export_data["operation_log"] = self._operation_log
                 export_data["metadata"]["operation_log_enabled"] = True
 
@@ -565,20 +752,111 @@ class MemoryTracker:
             with open(output_path, "w", encoding="utf-8") as f:
                 json.dump(export_data, f, indent=2)
 
-            print(f"\n💾 Memory profile saved to: {output_path.absolute()}")
+            # Print summary
+            print(f"\n💾 Profile saved to: {output_path.absolute()}")
+            if has_timing:
+                print(f"   • Timing tree with {len(self._timing_tree)} nodes")
             if self._operation_allocations:
                 print(f"   • {len(self._operation_allocations)} operations tracked")
             if self._operation_graph:
                 print(f"   • Operation graph with {len(self._operation_graph)} nodes")
             if self._tensor_lifecycle:
-                print(
-                    f"   • Lifecycle tracked for {len(self._tensor_lifecycle)} tensors"
-                )
+                print(f"   • Lifecycle tracked for {len(self._tensor_lifecycle)} tensors")
             if self._pytorch_ops:
                 print(f"   • {len(self._pytorch_ops)} PyTorch operations captured")
-            if hasattr(self, '_operation_log') and self._operation_log:
+            if hasattr(self, "_operation_log") and self._operation_log:
                 print(f"   • Operation log with {len(self._operation_log)} entries")
             return str(output_path.absolute())
+
+    def _export_timing_tree(self) -> list[dict[str, Any]]:
+        """
+        Export timing tree as a hierarchical list (unified profiler format).
+
+        Returns a list of root nodes, each containing nested children.
+        """
+        # Find root nodes (nodes with no parent)
+        root_nodes = [
+            node for node in self._timing_tree.values() if node.parent is None
+        ]
+
+        def build_node_dict(node: TreeNode) -> dict[str, Any]:
+            """Recursively build a dictionary representation of a tree node."""
+            # Calculate self-time (exclusive time = total time - children time)
+            children_total_ms = 0.0
+            child_nodes = []
+
+            if node.children:
+                for child_path in node.children:
+                    if child_path in self._timing_tree:
+                        child_node = self._timing_tree[child_path]
+                        children_total_ms += child_node.avg_ms
+                        child_nodes.append(build_node_dict(child_node))
+
+            # Self time is the time spent in this node excluding children
+            self_time_ms = max(0.0, node.avg_ms - children_total_ms)
+
+            node_dict = {
+                "name": node.name,
+                "full_path": node.full_path,
+                "avg_latency_ms": round(node.avg_ms, 3),  # Inclusive time (includes children)
+                "self_time_ms": round(self_time_ms, 3),  # Exclusive time (just this node)
+                "min_ms": round(node.min_ms, 3),
+                "max_ms": round(node.max_ms, 3),
+                "std_dev_ms": round(node.std_dev_ms, 3),
+                "samples": node.count,
+            }
+
+            # Add data access metrics if available
+            if node.avg_total_mb > 0:
+                node_dict["data_access"] = {
+                    "input_mb": round(node.avg_input_mb, 3),
+                    "output_mb": round(node.avg_output_mb, 3),
+                    "total_mb": round(node.avg_total_mb, 3),
+                }
+
+            # Add module information if available
+            if node.module_type:
+                node_dict["module_type"] = node.module_type
+            if node.module_name:
+                node_dict["module_name"] = node.module_name
+
+            # Add tensor information if available
+            if node.typical_input_tensors:
+                node_dict["typical_input_tensors"] = node.typical_input_tensors
+            if node.typical_output_tensors:
+                node_dict["typical_output_tensors"] = node.typical_output_tensors
+
+            # Add children if any, with (self) entry inserted first if there's self-time AND other children
+            if child_nodes:
+                children_with_self = []
+
+                # Only add (self) entry if there are other children AND meaningful self-time
+                # This avoids redundant (self) entries for leaf nodes
+                if child_nodes and self_time_ms > 0.001:  # More than 0.001ms
+                    children_with_self.append(
+                        {
+                            "name": "(self)",
+                            "full_path": f"{node.full_path}.(self)",
+                            "avg_latency_ms": round(self_time_ms, 3),
+                            "self_time_ms": round(self_time_ms, 3),
+                            "min_ms": round(self_time_ms, 3),
+                            "max_ms": round(self_time_ms, 3),
+                            "std_dev_ms": 0.0,
+                            "samples": node.count,
+                            "is_self_time": True,  # Mark this as a synthetic self-time node
+                        }
+                    )
+
+                # Add actual children
+                children_with_self.extend(child_nodes)
+
+                if children_with_self:
+                    node_dict["children"] = children_with_self
+
+            return node_dict
+
+        # Build tree starting from root nodes
+        return [build_node_dict(root) for root in root_nodes]
 
     def _export_operation_graph(self) -> dict[str, Any]:
         """Export operation graph as a dictionary."""
@@ -765,16 +1043,19 @@ class MemoryTracker:
 _TRACKER: MemoryTracker | None = None
 
 
-def initialize_memory_tracker(output_dir: str = ".", enabled: bool = False) -> None:
+def initialize_memory_tracker(
+    output_dir: str = ".", enabled: bool = False, enable_timing: bool = False
+) -> None:
     """
-    Initialize the global memory tracker.
+    Initialize the global memory tracker (unified profiler).
 
     Args:
         output_dir: Directory where memory snapshots will be saved
         enabled: Whether memory tracking is enabled
+        enable_timing: Whether timing profiling is enabled (unified profiler mode)
     """
     global _TRACKER  # pylint: disable=global-statement
-    _TRACKER = MemoryTracker(output_dir=output_dir, enabled=enabled)
+    _TRACKER = MemoryTracker(output_dir=output_dir, enabled=enabled, enable_timing=enable_timing)
 
 
 def get_memory_tracker() -> MemoryTracker:

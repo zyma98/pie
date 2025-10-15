@@ -28,8 +28,6 @@ import zmq
 from platformdirs import user_cache_dir
 from websockets.sync.client import connect
 
-# Note: profiler.save_profiling_json is imported at shutdown time
-
 from message import (
     DownloadAdapterRequest,
     EmbedImageRequest,
@@ -98,34 +96,25 @@ def print_config(config: Dict[str, Any]) -> None:
 
 
 def save_profiling_if_enabled(config: Dict[str, Any]) -> None:
-    """Save profiling results if profiling is enabled in config."""
-    if not config.get("enable_profiling", False):
-        return
-
-    from profiler import save_profiling_json  # pylint: disable=import-outside-toplevel
-
-    try:
-        json_path = save_profiling_json(output_dir=".")
-        print(f"📁 Profiling results saved to: {json_path}")
-    except (OSError, ValueError, RuntimeError) as e:
-        print(f"⚠️  Failed to save profiling results: {e}")
+    """
+    DEPRECATED: Profiling is now handled by save_memory_profiling_if_enabled.
+    This function is kept for backward compatibility but does nothing.
+    """
+    _ = config  # Unused parameter kept for API compatibility
 
 
 def save_memory_profiling_if_enabled(config: Dict[str, Any]) -> None:
-    """Save memory profiling results if memory profiling is enabled in config."""
-    if not config.get("enable_memory_profiling", False):
+    """Save unified profiling results if enabled."""
+    if not config.get("enable_profiling", False):
         return
 
-    from memory_profiler import (  # pylint: disable=import-outside-toplevel
-        get_memory_tracker,
-    )
+    from profiler import get_memory_tracker  # pylint: disable=import-outside-toplevel
 
     try:
         tracker = get_memory_tracker()
-        tracker.stop()  # Stop periodic tracking and save snapshot
-        print("📁 Memory profiling results saved")
+        tracker.stop()
     except (OSError, ValueError, RuntimeError) as e:
-        print(f"⚠️  Failed to save memory profiling results: {e}")
+        print(f"⚠️  Failed to save profiling results: {e}")
 
 
 def start_service(
@@ -136,20 +125,15 @@ def start_service(
 ) -> None:
     """Spin up the backend service using the provided handler implementation."""
 
-    # Initialize profiler state based on configuration
-    from profiler import (  # pylint: disable=import-outside-toplevel
-        set_profiling_enabled,
-    )
+    # Initialize profiler
+    from profiler import initialize_memory_tracker  # pylint: disable=import-outside-toplevel
 
-    set_profiling_enabled(config.get("enable_profiling", False))
-
-    # Initialize memory profiler
-    from memory_profiler import (  # pylint: disable=import-outside-toplevel
-        initialize_memory_tracker,
-    )
+    enable_profiling = config.get("enable_profiling", False)
 
     initialize_memory_tracker(
-        output_dir=".", enabled=config.get("enable_memory_profiling", False)
+        output_dir=".",
+        enabled=enable_profiling,
+        enable_timing=enable_profiling,
     )
 
     if config["controller_host"] in ["127.0.0.1", "localhost"]:
@@ -495,7 +479,6 @@ def main(
     device: str | None = None,
     dtype: str = "bfloat16",
     enable_profiling: bool = False,
-    enable_memory_profiling: bool = False,
 ):
     """
     Runs the application with configuration provided as command-line arguments.
@@ -519,8 +502,7 @@ def main(
         device: The device to run the model on (e.g., 'mps', 'cuda:0', 'cpu').
                 Auto-detects to 'mps' on Apple Silicon, 'cuda:0' otherwise.
         dtype: The data type for model weights (e.g., 'bfloat16', 'float16').
-        enable_profiling: Enable performance profiling (default: False).
-        enable_memory_profiling: Enable memory profiling with operation tracking (default: False).
+        enable_profiling: Enable unified profiler (timing + tensor tracking) (default: False).
     """
     # Import here to avoid circular imports
     # pylint: disable=import-outside-toplevel
@@ -551,7 +533,6 @@ def main(
         device=device,
         dtype=dtype,
         enable_profiling=enable_profiling,
-        enable_memory_profiling=enable_memory_profiling,
     )
 
     print_config(config)
