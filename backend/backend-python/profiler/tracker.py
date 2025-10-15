@@ -12,6 +12,7 @@ import gc
 import json
 import threading
 import time
+import warnings
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
@@ -501,7 +502,13 @@ class MemoryTracker:
         for obj in gc.get_objects():
             try:
                 # Check for nn.Module to extract parameter/buffer names
-                if isinstance(obj, torch.nn.Module):
+                # Suppress PyTorch's internal FutureWarning during isinstance checks
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", category=FutureWarning)
+                    is_module = isinstance(obj, torch.nn.Module)
+                    is_tensor = torch.is_tensor(obj)
+
+                if is_module:
                     try:
                         for name, param in obj.named_parameters(recurse=False):
                             if param is not None:
@@ -512,7 +519,7 @@ class MemoryTracker:
                     except (AttributeError, RuntimeError):
                         pass
 
-                if torch.is_tensor(obj):
+                if is_tensor:
                     tensor_id = id(obj)
                     current_tensor_ids.add(tensor_id)
 
