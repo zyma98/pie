@@ -30,6 +30,54 @@ IS_APPLE_SILICON = IS_MACOS and platform.processor() == "arm"
 PYTORCH_MODE = os.environ.get("PIE_METAL_PYTORCH_MODE", "0") == "1"
 
 
+def _validate_page_size(page_size: int) -> None:
+    """
+    Validate page_size configuration for Metal kernel compilation.
+
+    Args:
+        page_size: The KV cache page size to validate
+
+    Raises:
+        ValueError: If page_size is invalid
+    """
+    # Check if page_size is a power of 2
+    if page_size <= 0 or (page_size & (page_size - 1)) != 0:
+        raise ValueError(
+            f"page_size must be a power of 2. Got: {page_size}. "
+            f"Valid values: 8, 16, 32, 64, etc."
+        )
+
+    # Check dtype-specific memory constraints
+    # Metal threadgroup memory limit: 32KB
+    #
+    # Memory usage (with MAX_HEAD_DIM=256):
+    # - FP16: k_block[BLOCK_SIZE][256] + v_block[BLOCK_SIZE][256]
+    #         = 2 * BLOCK_SIZE * 256 * 2 bytes + scratch arrays
+    #         = BLOCK_SIZE * 1024 bytes + overhead
+    # - F32:  k_block[BLOCK_SIZE][128] + v_block[BLOCK_SIZE][128]
+    #         = 2 * BLOCK_SIZE * 128 * 4 bytes + scratch arrays
+    #         = BLOCK_SIZE * 1024 bytes + overhead
+    #
+    # Safe limits:
+    # - BLOCK_SIZE <= 16 for both FP16 and F32 (16 * 1024 + overhead < 32KB)
+    # - BLOCK_SIZE = 32 exceeds 32KB limit in practice
+    #
+    # Hard limit at 32 (anything beyond this will definitely fail)
+    if page_size > 32:
+        raise ValueError(
+            f"page_size must be <= 32 (32KB threadgroup memory limit). "
+            f"Got: {page_size}. Recommended: page_size <= 16"
+        )
+
+    # Warning for page_size > 16 (may work with small head dims, but risky)
+    # Note: The Metal kernel caps KERNEL_BLOCK_SIZE to 16 for F32 automatically,
+    # but FP16 kernels may fail at runtime if BLOCK_SIZE > 16 with large head dims.
+    if page_size > 16:
+        print(f"⚠️  page_size={page_size} may exceed threadgroup memory limits (32KB)")
+        print("   For MAX_HEAD_DIM=256: recommended page_size <= 16")
+        print("   Kernel may fail at runtime if memory limits are exceeded")
+
+
 def _validate_mps_device(tensor: torch.Tensor, name: str) -> None:
     """Validate that a tensor is on MPS device.
 
@@ -54,8 +102,23 @@ def _validate_mps_device(tensor: torch.Tensor, name: str) -> None:
         )
 
 
-def _initialize_mps_backend() -> bool:
-    """Initialize MPS shader backend - returns success status"""
+def _initialize_mps_backend(page_size: int = 16) -> bool:
+    """
+    Initialize MPS shader backend with dynamic BLOCK_SIZE configuration.
+
+    Args:
+        page_size: KV cache page size for BLOCK_SIZE compilation (default: 16)
+
+    Returns:
+        True if initialization succeeded, False otherwise
+    """
+    # Validate page_size before initialization
+    try:
+        _validate_page_size(page_size)
+    except ValueError as e:
+        print(f"❌ Invalid page_size configuration: {e}")
+        sys.exit(1)
+
     # If PyTorch mode is enabled, skip Metal initialization
     if PYTORCH_MODE:
         print("⚠️  PIE_METAL_PYTORCH_MODE=1: Using PyTorch reference implementations")
@@ -91,8 +154,8 @@ def _initialize_mps_backend() -> bool:
     print("   All tensors will be created on MPS device by default")
 
     try:
-        # Initialize MPS shader compiler (singleton)
-        compiler = get_mps_compiler()
+        # Initialize MPS shader compiler (singleton) with page_size configuration
+        compiler = get_mps_compiler(page_size=page_size)
         if compiler.can_use_mps_kernels():
             print("✅ metal_kernels initialized with PyTorch MPS shader compilation")
             print(
@@ -113,8 +176,11 @@ def _initialize_mps_backend() -> bool:
     sys.exit(1)
 
 
-# Initialize on import
-_initialize_mps_backend()
+# Read page_size from environment variable or use default
+_PAGE_SIZE_FROM_ENV = int(os.environ.get("PIE_METAL_PAGE_SIZE", "16"))
+
+# Initialize on import with page_size from environment
+_initialize_mps_backend(page_size=_PAGE_SIZE_FROM_ENV)
 
 
 class BatchPrefillWithPagedKVCacheWrapper:

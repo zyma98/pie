@@ -16,9 +16,16 @@ from .mps_config import MPS_COMPILE_AVAILABLE, MPS_DEVICE_AVAILABLE
 class BaseShaderCompiler:
     """Base class for Metal shader compilation and management."""
 
-    def __init__(self):
+    def __init__(self, page_size: int = 16):
+        """
+        Initialize the base shader compiler.
+
+        Args:
+            page_size: KV cache page size for BLOCK_SIZE compilation (default: 16)
+        """
         self.compiled_libraries: Dict[str, Any] = {}
         self.kernel_dir = Path(__file__).parent / "metal" / "kernels"
+        self.page_size = page_size
 
     def can_use_mps_kernels(self) -> bool:
         """Check if we can use compiled MPS kernels."""

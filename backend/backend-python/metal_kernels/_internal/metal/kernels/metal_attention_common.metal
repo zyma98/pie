@@ -9,9 +9,14 @@ using namespace metal;
 
 // BLOCK_SIZE: The number of keys processed in parallel by the threadgroup in each step.
 // Should match page_size for optimal memory alignment.
-// TODO: This should be passed as compilation flag: -D BLOCK_SIZE=${page_size}
+// NOTE: BLOCK_SIZE is dynamically injected by Python at compilation time via #define.
+// Configuration flow:
+//   1. TOML config (kv_page_size) -> server.py sets PIE_METAL_PAGE_SIZE env var
+//   2. metal_kernels/ops.py reads PIE_METAL_PAGE_SIZE at import time
+//   3. mps_attention.py injects #define BLOCK_SIZE at shader compilation
+// See: metal_kernels/_internal/mps_attention.py::_compile_attention_kernels()
 #ifndef BLOCK_SIZE
-#define BLOCK_SIZE 16  // Default fallback
+#define BLOCK_SIZE 16  // Fallback for standalone compilation/testing only
 #endif
 
 // Smart kernel block size based on memory constraints (32KB limit)

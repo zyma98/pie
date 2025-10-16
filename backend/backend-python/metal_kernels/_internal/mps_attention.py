@@ -25,8 +25,14 @@ from .mps_shader_compiler import BaseShaderCompiler
 class AttentionCompiler(BaseShaderCompiler):
     """Compiles and runs Metal attention kernels."""
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, page_size: int = 16):
+        """
+        Initialize AttentionCompiler with dynamic BLOCK_SIZE.
+
+        Args:
+            page_size: KV cache page size for BLOCK_SIZE compilation (default: 16)
+        """
+        super().__init__(page_size=page_size)
         self._compile_attention_kernels()
 
     def _compile_attention_kernels(self):
@@ -91,10 +97,17 @@ class AttentionCompiler(BaseShaderCompiler):
         for old, new in param_replacements:
             processed_simdgroup = processed_simdgroup.replace(old, new)
 
-        # Compile the full optimized attention kernels
+        # Inject BLOCK_SIZE define based on page_size configuration
+        # This allows dynamic configuration without modifying Metal source code
+        block_size_define = f"#define BLOCK_SIZE {self.page_size}"
+
+        # Compile the full optimized attention kernels with injected BLOCK_SIZE
         full_source = f"""
 #include <metal_stdlib>
 using namespace metal;
+
+// Dynamically injected BLOCK_SIZE from configuration
+{block_size_define}
 
 {processed_common}
 
@@ -104,7 +117,10 @@ using namespace metal;
         try:
             # Compile the actual optimized shader library
             if self._compile_shader(full_source, "attention"):
-                print("✅ Compiled OPTIMIZED Metal attention kernels for MPS")
+                print(
+                    f"✅ Compiled OPTIMIZED Metal attention kernels for MPS "
+                    f"(BLOCK_SIZE={self.page_size})"
+                )
             else:
                 print("   Falling back to simple implementation")
                 self._compile_simple_kernels()
