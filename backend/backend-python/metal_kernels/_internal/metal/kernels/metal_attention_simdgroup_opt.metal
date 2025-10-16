@@ -10,18 +10,33 @@ using namespace metal;
 // 3. Fused weight computation with V accumulation (eliminates w_block storage and barriers)
 // 4. One TG per (qo, head) mapping (improves GPU occupancy for small batches)
 // 5. Vectorization improvements (better memory bandwidth utilization)
+//
+// --- Unified KV Cache Buffer Design ---
+// This kernel uses a SINGLE unified buffer for both K and V caches (buffer(1)).
+// Buffer layout: [num_pages, 2, page_size, num_kv_heads, head_dim]
+//
+// Within each page (size = 2 * page_size * num_kv_heads * head_dim elements):
+//   - K cache: offset 0 to (page_size * num_kv_heads * head_dim - 1)
+//   - V cache: offset (page_size * num_kv_heads * head_dim) to end
+//
+// The kernel uses calculate_k_offset() and calculate_v_offset() helper functions
+// to compute absolute offsets from the unified buffer start.
+//
+// Example for page_size=16, num_kv_heads=2, head_dim=64:
+//   Page 0: [K_data: 2048 elements][V_data: 2048 elements]
+//   Page 1: [K_data: 2048 elements][V_data: 2048 elements]
+//   ...
 
-kernel void batch_prefill_attention_unified_bf16_simdgroup_kernel(
+kernel void batch_prefill_attention_unified_fp16_simdgroup_kernel(
     device const half* q_input [[buffer(0)]],
-    device const half* paged_k_cache [[buffer(1)]],
-    device const half* paged_v_cache [[buffer(2)]],
-    device const int* qo_indptr [[buffer(3)]],
-    device const int* kv_page_indptr [[buffer(4)]],
-    device const int* kv_page_indices [[buffer(5)]],
-    device const int* kv_last_page_lens [[buffer(6)]],
-    device half* output [[buffer(7)]],
-    constant Params& params [[buffer(8)]],
-    device float* debug_out [[buffer(9)]],
+    device const half* paged_kv_cache [[buffer(1)]],
+    device const int* qo_indptr [[buffer(2)]],
+    device const int* kv_page_indptr [[buffer(3)]],
+    device const int* kv_page_indices [[buffer(4)]],
+    device const int* kv_last_page_lens [[buffer(5)]],
+    device half* output [[buffer(6)]],
+    constant Params& params [[buffer(7)]],
+    device float* debug_out [[buffer(8)]],
     uint3 tgid [[threadgroup_position_in_grid]],
     uint tid_in_tgp [[thread_index_in_threadgroup]],
     uint simd_lane_id [[thread_index_in_simdgroup]],
@@ -136,22 +151,22 @@ kernel void batch_prefill_attention_unified_bf16_simdgroup_kernel(
                     int in_page_offset = global_key_idx % page_size;
                     int page_idx = kv_page_indices[kv_start_page_pos + page_offset];
                     int kv_head = map_query_to_kv_head(h, num_query_heads, num_kv_heads);
-                    uint base_addr = calculate_kv_address(in_page_offset, page_size, kv_head_dim, head_size, page_idx, kv_head);
+                    uint k_offset = calculate_k_offset(in_page_offset, page_size, kv_head_dim, head_size, page_idx, kv_head);
 
                     // Debug: Show address calculation for first few keys
                     if (qo_idx == 0 && tid_in_tgp == 0 && h == 0 && global_key_idx < 3 && debug_out != nullptr) {
                         int debug_idx = 15 + global_key_idx * 3;  // Use debug[15-23] for address info
-                        debug_out[debug_idx] = (float)base_addr;
+                        debug_out[debug_idx] = (float)k_offset;
                         debug_out[debug_idx + 1] = (float)page_idx;
-                        debug_out[debug_idx + 2] = (global_key_idx < total_kv_len) ? paged_k_cache[base_addr] : -999.0f;
+                        debug_out[debug_idx + 2] = (global_key_idx < total_kv_len) ? paged_kv_cache[k_offset] : -999.0f;
                     }
 
-                    // Calculate V address with offset within interleaved page
-                    uint v_addr = calculate_v_address(in_page_offset, page_size, kv_head_dim, head_size, page_idx, kv_head);
+                    // Calculate V offset within unified KV cache
+                    uint v_offset = calculate_v_offset(in_page_offset, page_size, kv_head_dim, head_size, page_idx, kv_head);
 
                     for (int d = 0; d < head_size; ++d) {
-                        k_block[tid_in_tgp][d] = paged_k_cache[base_addr + d];
-                        v_block[tid_in_tgp][d] = paged_v_cache[v_addr + d];
+                        k_block[tid_in_tgp][d] = paged_kv_cache[k_offset + d];
+                        v_block[tid_in_tgp][d] = paged_kv_cache[v_offset + d];
                     }
                 }
             }
@@ -165,7 +180,7 @@ kernel void batch_prefill_attention_unified_bf16_simdgroup_kernel(
             if (tid_in_tgp < KERNEL_BLOCK_SIZE && global_key_idx_score < effective_kv_len) {
                 // --- OPTIMIZATION 2: Vectorized memory access with float4 ---
                 int d = 0;
-                // Process 4 dimensions at a time using vectorized operations for BF16
+                // Process 4 dimensions at a time using vectorized operations for FP16
                 if ((head_size & 3) == 0) {  // Head size is multiple of 4
                     for (; d < head_size; d += 4) {
                         // Load 4 half values and convert to float4
@@ -301,15 +316,14 @@ kernel void batch_prefill_attention_unified_bf16_simdgroup_kernel(
 
 kernel void batch_prefill_attention_unified_f32_simdgroup_kernel(
     device const float* q_input [[buffer(0)]],
-    device const float* paged_k_cache [[buffer(1)]],
-    device const float* paged_v_cache [[buffer(2)]],
-    device const int* qo_indptr [[buffer(3)]],
-    device const int* kv_page_indptr [[buffer(4)]],
-    device const int* kv_page_indices [[buffer(5)]],
-    device const int* kv_last_page_lens [[buffer(6)]],
-    device float* output [[buffer(7)]],
-    constant Params& params [[buffer(8)]],
-    device float* debug_out [[buffer(9)]],
+    device const float* paged_kv_cache [[buffer(1)]],
+    device const int* qo_indptr [[buffer(2)]],
+    device const int* kv_page_indptr [[buffer(3)]],
+    device const int* kv_page_indices [[buffer(4)]],
+    device const int* kv_last_page_lens [[buffer(5)]],
+    device float* output [[buffer(6)]],
+    constant Params& params [[buffer(7)]],
+    device float* debug_out [[buffer(8)]],
     uint3 tgid [[threadgroup_position_in_grid]],
     uint tid_in_tgp [[thread_index_in_threadgroup]],
     uint simd_lane_id [[thread_index_in_simdgroup]],
@@ -329,7 +343,7 @@ kernel void batch_prefill_attention_unified_f32_simdgroup_kernel(
     uint qo_idx = tgid.x;
     if (qo_idx >= uint(num_qo)) return;
 
-    // F32 kernels use 2x memory compared to BF16, so stricter limits apply
+    // F32 kernels use 2x memory compared to FP16, so stricter limits apply
     // Conservative limit for F32 to fit in 32KB threadgroup memory
     const int MAX_F32_HEAD_DIM = 128;
     if (head_size > MAX_F32_HEAD_DIM) return;
@@ -427,23 +441,23 @@ kernel void batch_prefill_attention_unified_f32_simdgroup_kernel(
                     int in_page_offset = global_key_idx % page_size;
                     int page_idx = kv_page_indices[kv_start_page_pos + page_offset];
                     int kv_head = map_query_to_kv_head(h, num_query_heads, num_kv_heads);
-                    uint base_addr = calculate_kv_address(in_page_offset, page_size, kv_head_dim, head_size, page_idx, kv_head);
+                    uint k_offset = calculate_k_offset(in_page_offset, page_size, kv_head_dim, head_size, page_idx, kv_head);
 
                     // DEBUG: Log first key access details (F32 kernel)
                     if (qo_idx == 0 && h == 0 && block_start == 0 && tid_in_tgp == 0 && debug_out != nullptr) {
                         debug_out[19] = (float)page_idx;          // Page ID being accessed
-                        debug_out[20] = (float)base_addr;         // Calculated base address
-                        debug_out[21] = paged_k_cache[base_addr]; // First key value accessed
+                        debug_out[20] = (float)k_offset;          // Calculated K offset
+                        debug_out[21] = paged_kv_cache[k_offset]; // First key value accessed
                         debug_out[22] = (float)in_page_offset;    // Position within page
                         debug_out[23] = (float)page_offset;       // Which page in sequence
                     }
 
-                    // Calculate V address with offset within interleaved page
-                    uint v_addr = calculate_v_address(in_page_offset, page_size, kv_head_dim, head_size, page_idx, kv_head);
+                    // Calculate V offset within unified KV cache
+                    uint v_offset = calculate_v_offset(in_page_offset, page_size, kv_head_dim, head_size, page_idx, kv_head);
 
                     for (int d = 0; d < head_size; ++d) {
-                        k_block[tid_in_tgp][d] = paged_k_cache[base_addr + d];
-                        v_block[tid_in_tgp][d] = paged_v_cache[v_addr + d];
+                        k_block[tid_in_tgp][d] = paged_kv_cache[k_offset + d];
+                        v_block[tid_in_tgp][d] = paged_kv_cache[v_offset + d];
                     }
                 }
             }
@@ -591,17 +605,16 @@ kernel void batch_prefill_attention_unified_f32_simdgroup_kernel(
 // Each threadgroup handles exactly one (query_token, head) pair instead of looping over heads
 // Benefits: Better GPU occupancy for small batches, multiplies TG count by num_query_heads
 
-kernel void batch_prefill_attention_unified_bf16_per_head_kernel(
+kernel void batch_prefill_attention_unified_fp16_per_head_kernel(
     device const half* q_input [[buffer(0)]],
-    device const half* paged_k_cache [[buffer(1)]],
-    device const half* paged_v_cache [[buffer(2)]],
-    device const int* qo_indptr [[buffer(3)]],
-    device const int* kv_page_indptr [[buffer(4)]],
-    device const int* kv_page_indices [[buffer(5)]],
-    device const int* kv_last_page_lens [[buffer(6)]],
-    device half* output [[buffer(7)]],
-    constant Params& params [[buffer(8)]],
-    device float* debug_out [[buffer(9)]],
+    device const half* paged_kv_cache [[buffer(1)]],
+    device const int* qo_indptr [[buffer(2)]],
+    device const int* kv_page_indptr [[buffer(3)]],
+    device const int* kv_page_indices [[buffer(4)]],
+    device const int* kv_last_page_lens [[buffer(5)]],
+    device half* output [[buffer(6)]],
+    constant Params& params [[buffer(7)]],
+    device float* debug_out [[buffer(8)]],
     uint3 tgid [[threadgroup_position_in_grid]],
     uint tid_in_tgp [[thread_index_in_threadgroup]],
     uint simd_lane_id [[thread_index_in_simdgroup]],
@@ -705,14 +718,14 @@ kernel void batch_prefill_attention_unified_bf16_per_head_kernel(
                 int in_page_offset = global_key_idx % page_size;
                 int page_idx = kv_page_indices[kv_start_page_pos + page_offset];
                 int kv_head = map_query_to_kv_head(int(h), num_query_heads, num_kv_heads);
-                uint base_addr = calculate_kv_address(in_page_offset, page_size, kv_head_dim, head_size, page_idx, kv_head);
-                uint v_addr = calculate_v_address(in_page_offset, page_size, kv_head_dim, head_size, page_idx, kv_head);
+                uint k_offset = calculate_k_offset(in_page_offset, page_size, kv_head_dim, head_size, page_idx, kv_head);
+                uint v_offset = calculate_v_offset(in_page_offset, page_size, kv_head_dim, head_size, page_idx, kv_head);
 
                 // VECTORIZATION: Use half4 loads where possible for better bandwidth
                 int d = 0;
                 for (; d + 3 < head_size; d += 4) {
-                    half4 k_vec = *((device half4*)(paged_k_cache + base_addr + d));
-                    half4 v_vec = *((device half4*)(paged_v_cache + v_addr + d));
+                    half4 k_vec = *((device half4*)(paged_kv_cache + k_offset + d));
+                    half4 v_vec = *((device half4*)(paged_kv_cache + v_offset + d));
 
                     k_block[tid_in_tgp][d] = k_vec.x;
                     k_block[tid_in_tgp][d+1] = k_vec.y;
@@ -726,8 +739,8 @@ kernel void batch_prefill_attention_unified_bf16_per_head_kernel(
                 }
                 // Handle remaining elements
                 for (; d < head_size; ++d) {
-                    k_block[tid_in_tgp][d] = paged_k_cache[base_addr + d];
-                    v_block[tid_in_tgp][d] = paged_v_cache[v_addr + d];
+                    k_block[tid_in_tgp][d] = paged_kv_cache[k_offset + d];
+                    v_block[tid_in_tgp][d] = paged_kv_cache[v_offset + d];
                 }
             }
         }
