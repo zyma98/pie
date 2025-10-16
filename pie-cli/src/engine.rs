@@ -30,6 +30,27 @@ pub struct ClientConfig {
     pub auth_secret: String,
 }
 
+/// Helper function to add a TOML value as a command-line argument.
+///
+/// For boolean values: only adds the flag (--key) if the value is true.
+/// For other values: adds both the flag (--key) and the value.
+fn add_toml_value_as_arg(cmd: &mut TokioCommand, key: &str, value: &toml::Value) {
+    match value {
+        toml::Value::Boolean(true) => {
+            // For boolean flags that are true, only add the flag without a value
+            cmd.arg(format!("--{}", key));
+        }
+        toml::Value::Boolean(false) => {
+            // For boolean flags that are false, don't add anything
+        }
+        _ => {
+            // For all other types, add both the flag and the value
+            cmd.arg(format!("--{}", key))
+                .arg(value.to_string().trim_matches('"').to_string());
+        }
+    }
+}
+
 /// Parses the engine and backend configuration from files and command line arguments.
 pub fn parse_engine_and_backend_config(
     config_path: Option<PathBuf>,
@@ -161,8 +182,7 @@ pub async fn start_engine_and_backend(
                 if key == "backend_type" || key == "exec_path" {
                     continue;
                 }
-                cmd.arg(format!("--{}", key))
-                    .arg(value.to_string().trim_matches('"').to_string());
+                add_toml_value_as_arg(&mut cmd, key, value);
             }
 
             // On Linux, ask the kernel to send SIGKILL to this process when
