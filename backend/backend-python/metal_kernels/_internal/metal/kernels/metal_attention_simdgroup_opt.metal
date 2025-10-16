@@ -135,9 +135,32 @@ kernel void batch_prefill_attention_unified_fp16_simdgroup_kernel(
         }
 
         int q_base = int(qo_idx) * head_dim + h * head_size;
-        for (int d = tid_in_tgp; d < head_size; d += TGP_SIZE) {
-            acc_i[d] = 0.0f;
-            q_s[d] = q_input[q_base + d];  // Load query data simultaneously
+
+        // Vectorized query loading: groups of 4 threads cooperate to load one vector
+        if ((head_size & 3) == 0 && TGP_SIZE >= 4) {
+            int vectors_per_iter = TGP_SIZE / 4;
+            int vector_id = tid_in_tgp / 4;
+            int lane_in_vector = tid_in_tgp % 4;
+
+            for (int vec_base = 0; vec_base < head_size / 4; vec_base += vectors_per_iter) {
+                int vec_idx = vec_base + vector_id;
+                if (vec_idx < head_size / 4) {
+                    int d = vec_idx * 4;
+                    half4 q_vec = *((device const half4*)(q_input + q_base + d));
+                    q_s[d + lane_in_vector] = q_vec[lane_in_vector];
+                    acc_i[d + lane_in_vector] = 0.0f;
+                }
+            }
+            // Handle remaining elements
+            for (int d = (head_size / 4) * 4 + tid_in_tgp; d < head_size; d += TGP_SIZE) {
+                q_s[d] = q_input[q_base + d];
+                acc_i[d] = 0.0f;
+            }
+        } else {
+            for (int d = tid_in_tgp; d < head_size; d += TGP_SIZE) {
+                acc_i[d] = 0.0f;
+                q_s[d] = q_input[q_base + d];
+            }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -147,8 +170,9 @@ kernel void batch_prefill_attention_unified_fp16_simdgroup_kernel(
             if (tid_in_tgp < KERNEL_BLOCK_SIZE) {
                 int global_key_idx = block_start + tid_in_tgp;
                 if (global_key_idx < effective_kv_len) {
-                    int page_offset = global_key_idx / page_size;
-                    int in_page_offset = global_key_idx % page_size;
+                    // Optimized division/modulo for power-of-2 page_size
+                    int page_offset = global_key_idx >> (__builtin_ctz(page_size));  // Faster than division
+                    int in_page_offset = global_key_idx & (page_size - 1);  // Faster than modulo
                     int page_idx = kv_page_indices[kv_start_page_pos + page_offset];
                     int kv_head = map_query_to_kv_head(h, num_query_heads, num_kv_heads);
                     uint k_offset = calculate_k_offset(in_page_offset, page_size, kv_head_dim, head_size, page_idx, kv_head);
@@ -331,11 +355,38 @@ kernel void batch_prefill_attention_unified_fp16_simdgroup_kernel(
 
         // --- Finalization for this head ---
         int out_base = int(qo_idx) * head_dim + h * head_size;
-        for (int d = tid_in_tgp; d < head_size; d += TGP_SIZE) {
-            if (l_i > 1e-9f) {
-                output[out_base + d] = half(acc_i[d] / l_i);
-            } else {
-                output[out_base + d] = 0.0h;
+
+        // Hoist division outside loop - compute once, use many times
+        float inv_l_i = (l_i > 1e-9f) ? (1.0f / l_i) : 0.0f;
+
+        // Vectorized output writing with half4
+        if ((head_size & 3) == 0 && TGP_SIZE >= 4) {
+            int vectors_per_iter = TGP_SIZE / 4;
+            int vector_id = tid_in_tgp / 4;
+            int lane_in_vector = tid_in_tgp % 4;
+
+            for (int vec_base = 0; vec_base < head_size / 4; vec_base += vectors_per_iter) {
+                int vec_idx = vec_base + vector_id;
+                if (vec_idx < head_size / 4) {
+                    int d = vec_idx * 4;
+                    // Compute 4 outputs
+                    half4 out_vec = half4(
+                        half(acc_i[d + 0] * inv_l_i),
+                        half(acc_i[d + 1] * inv_l_i),
+                        half(acc_i[d + 2] * inv_l_i),
+                        half(acc_i[d + 3] * inv_l_i)
+                    );
+                    // Each thread writes one element
+                    output[out_base + d + lane_in_vector] = out_vec[lane_in_vector];
+                }
+            }
+            // Handle remaining elements
+            for (int d = (head_size / 4) * 4 + tid_in_tgp; d < head_size; d += TGP_SIZE) {
+                output[out_base + d] = half(acc_i[d] * inv_l_i);
+            }
+        } else {
+            for (int d = tid_in_tgp; d < head_size; d += TGP_SIZE) {
+                output[out_base + d] = half(acc_i[d] * inv_l_i);
             }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -453,9 +504,32 @@ kernel void batch_prefill_attention_unified_f32_simdgroup_kernel(
         }
 
         int q_base = int(qo_idx) * head_dim + h * head_size;
-        for (int d = tid_in_tgp; d < head_size; d += TGP_SIZE) {
-            acc_i[d] = 0.0f;
-            q_s[d] = q_input[q_base + d];  // Load query data simultaneously
+
+        // Vectorized query loading: groups of 4 threads cooperate to load one vector
+        if ((head_size & 3) == 0 && TGP_SIZE >= 4) {
+            int vectors_per_iter = TGP_SIZE / 4;
+            int vector_id = tid_in_tgp / 4;
+            int lane_in_vector = tid_in_tgp % 4;
+
+            for (int vec_base = 0; vec_base < head_size / 4; vec_base += vectors_per_iter) {
+                int vec_idx = vec_base + vector_id;
+                if (vec_idx < head_size / 4) {
+                    int d = vec_idx * 4;
+                    float4 q_vec = *((device const float4*)(q_input + q_base + d));
+                    q_s[d + lane_in_vector] = q_vec[lane_in_vector];
+                    acc_i[d + lane_in_vector] = 0.0f;
+                }
+            }
+            // Handle remaining elements
+            for (int d = (head_size / 4) * 4 + tid_in_tgp; d < head_size; d += TGP_SIZE) {
+                q_s[d] = q_input[q_base + d];
+                acc_i[d] = 0.0f;
+            }
+        } else {
+            for (int d = tid_in_tgp; d < head_size; d += TGP_SIZE) {
+                acc_i[d] = 0.0f;
+                q_s[d] = q_input[q_base + d];
+            }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -465,8 +539,9 @@ kernel void batch_prefill_attention_unified_f32_simdgroup_kernel(
             if (tid_in_tgp < KERNEL_BLOCK_SIZE) {
                 int global_key_idx = block_start + tid_in_tgp;
                 if (global_key_idx < effective_kv_len) {
-                    int page_offset = global_key_idx / page_size;
-                    int in_page_offset = global_key_idx % page_size;
+                    // Optimized division/modulo for power-of-2 page_size
+                    int page_offset = global_key_idx >> (__builtin_ctz(page_size));  // Faster than division
+                    int in_page_offset = global_key_idx & (page_size - 1);  // Faster than modulo
                     int page_idx = kv_page_indices[kv_start_page_pos + page_offset];
                     int kv_head = map_query_to_kv_head(h, num_query_heads, num_kv_heads);
                     uint k_offset = calculate_k_offset(in_page_offset, page_size, kv_head_dim, head_size, page_idx, kv_head);
@@ -645,11 +720,38 @@ kernel void batch_prefill_attention_unified_f32_simdgroup_kernel(
 
         // --- Finalization for this head ---
         int out_base = int(qo_idx) * head_dim + h * head_size;
-        for (int d = tid_in_tgp; d < head_size; d += TGP_SIZE) {
-            if (l_i > 1e-9f) {
-                output[out_base + d] = acc_i[d] / l_i;
-            } else {
-                output[out_base + d] = 0.0f;
+
+        // Hoist division outside loop - compute once, use many times
+        float inv_l_i = (l_i > 1e-9f) ? (1.0f / l_i) : 0.0f;
+
+        // Vectorized output writing with float4
+        if ((head_size & 3) == 0 && TGP_SIZE >= 4) {
+            int vectors_per_iter = TGP_SIZE / 4;
+            int vector_id = tid_in_tgp / 4;
+            int lane_in_vector = tid_in_tgp % 4;
+
+            for (int vec_base = 0; vec_base < head_size / 4; vec_base += vectors_per_iter) {
+                int vec_idx = vec_base + vector_id;
+                if (vec_idx < head_size / 4) {
+                    int d = vec_idx * 4;
+                    // Compute 4 outputs
+                    float4 out_vec = float4(
+                        acc_i[d + 0] * inv_l_i,
+                        acc_i[d + 1] * inv_l_i,
+                        acc_i[d + 2] * inv_l_i,
+                        acc_i[d + 3] * inv_l_i
+                    );
+                    // Each thread writes one element
+                    output[out_base + d + lane_in_vector] = out_vec[lane_in_vector];
+                }
+            }
+            // Handle remaining elements
+            for (int d = (head_size / 4) * 4 + tid_in_tgp; d < head_size; d += TGP_SIZE) {
+                output[out_base + d] = acc_i[d] * inv_l_i;
+            }
+        } else {
+            for (int d = tid_in_tgp; d < head_size; d += TGP_SIZE) {
+                output[out_base + d] = acc_i[d] * inv_l_i;
             }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
