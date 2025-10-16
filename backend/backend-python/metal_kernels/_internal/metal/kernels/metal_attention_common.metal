@@ -56,7 +56,7 @@ struct Params {
 // --- Common Utility Functions ---
 
 // Efficient sequence ID lookup (can be optimized to binary search later)
-inline int find_sequence_id(device const int* qo_indptr, int qo_idx) {
+inline int find_sequence_id(constant int* qo_indptr, int qo_idx) {
     // Walk qo_indptr until we find the sequence whose end exceeds qo_idx.
     // Assumes qo_indptr is length (num_sequences + 1) with qo_indptr[last] == total_tokens.
     // This guarantees termination without needing an arbitrary cap.

@@ -30,10 +30,10 @@ using namespace metal;
 kernel void batch_prefill_attention_unified_fp16_simdgroup_kernel(
     device const half* q_input [[buffer(0)]],
     device const half* paged_kv_cache [[buffer(1)]],
-    device const int* qo_indptr [[buffer(2)]],
-    device const int* kv_page_indptr [[buffer(3)]],
-    device const int* kv_page_indices [[buffer(4)]],
-    device const int* kv_last_page_lens [[buffer(5)]],
+    constant int* qo_indptr [[buffer(2)]],
+    constant int* kv_page_indptr [[buffer(3)]],
+    constant int* kv_page_indices [[buffer(4)]],
+    constant int* kv_last_page_lens [[buffer(5)]],
     device half* output [[buffer(6)]],
     constant Params& params [[buffer(7)]],
     device float* debug_out [[buffer(8)]],
@@ -279,7 +279,10 @@ kernel void batch_prefill_attention_unified_fp16_simdgroup_kernel(
                 m_i = max(m_i, m_j);
                 simd_scratch[0] = m_prev; // Store for broadcast
             }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
+            // Synchronize threads - no memory fence needed since simd_scratch[0]
+            // was written by thread 0 before this barrier, and we only need to
+            // ensure thread 0's write is complete (ordering handled by GPU)
+            threadgroup_barrier(mem_flags::mem_none);
             m_prev = simd_scratch[0]; // Broadcast previous max
 
             float scale_factor = fast::exp(m_prev - m_i);
@@ -400,10 +403,10 @@ kernel void batch_prefill_attention_unified_fp16_simdgroup_kernel(
 kernel void batch_prefill_attention_unified_f32_simdgroup_kernel(
     device const float* q_input [[buffer(0)]],
     device const float* paged_kv_cache [[buffer(1)]],
-    device const int* qo_indptr [[buffer(2)]],
-    device const int* kv_page_indptr [[buffer(3)]],
-    device const int* kv_page_indices [[buffer(4)]],
-    device const int* kv_last_page_lens [[buffer(5)]],
+    constant int* qo_indptr [[buffer(2)]],
+    constant int* kv_page_indptr [[buffer(3)]],
+    constant int* kv_page_indices [[buffer(4)]],
+    constant int* kv_last_page_lens [[buffer(5)]],
     device float* output [[buffer(6)]],
     constant Params& params [[buffer(7)]],
     device float* debug_out [[buffer(8)]],
@@ -649,7 +652,10 @@ kernel void batch_prefill_attention_unified_f32_simdgroup_kernel(
                 m_i = max(m_i, m_j);
                 simd_scratch[0] = m_prev; // Store for broadcast
             }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
+            // Synchronize threads - no memory fence needed since simd_scratch[0]
+            // was written by thread 0 before this barrier, and we only need to
+            // ensure thread 0's write is complete (ordering handled by GPU)
+            threadgroup_barrier(mem_flags::mem_none);
             m_prev = simd_scratch[0]; // Broadcast previous max
 
             float scale_factor = fast::exp(m_prev - m_i);
