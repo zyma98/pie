@@ -235,7 +235,9 @@ class MemoryTracker:
                     ),
                     "timing_profiling_enabled": self.enable_timing,
                     "num_timing_nodes": (
-                        len(self._timing_profiler.get_timing_tree()) if has_timing else 0
+                        len(self._timing_profiler.get_timing_tree())
+                        if has_timing
+                        else 0
                     ),
                 },
             }

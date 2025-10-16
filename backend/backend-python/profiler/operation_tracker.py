@@ -33,9 +33,7 @@ class OperationTracker:
 
         # Operation tracking
         self._operation_graph: dict[str, OperationNode] = {}
-        self._operation_allocations: dict[str, list[dict[str, Any]]] = defaultdict(
-            list
-        )
+        self._operation_allocations: dict[str, list[dict[str, Any]]] = defaultdict(list)
         self._operation_stack: list[str] = []
 
     @contextmanager

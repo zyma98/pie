@@ -10,7 +10,7 @@ import gc
 from collections import defaultdict
 from dataclasses import asdict
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
 import torch
 
@@ -49,7 +49,7 @@ class TensorScanner:
         self,
         checkpoint_name: str,
         current_operation: str | None,
-        lifecycle_recorder: callable,
+        lifecycle_recorder: Callable,
     ) -> MemorySnapshot:
         """
         Capture current memory state across all devices.
@@ -152,7 +152,7 @@ class TensorScanner:
         current_operation: str | None,
         tensors: list[TensorInfo],
         device_stats: dict[str, dict[str, Any]],
-        lifecycle_recorder: callable,
+        lifecycle_recorder: Callable,
     ) -> int:
         """
         Process a single tensor: classify, register/update, record lifecycle events.
@@ -181,9 +181,7 @@ class TensorScanner:
 
         # Classify tensor purpose
         purpose = classify_tensor_purpose(tensor, shape, tensor_name)
-        is_persistent = is_persistent_tensor(
-            tensor_id, size_mb, self._tensor_last_seen
-        )
+        is_persistent = is_persistent_tensor(tensor_id, size_mb, self._tensor_last_seen)
         is_reusable = is_reusable_tensor(tensor, purpose)
 
         # Check if this is a new tensor or update to registry
@@ -244,7 +242,7 @@ class TensorScanner:
         previous_tensor_ids: set[int],
         current_tensor_ids: set[int],
         current_operation: str | None,
-        lifecycle_recorder: callable,
+        lifecycle_recorder: Callable,
     ) -> None:
         """
         Detect and record deallocation events for tensors that are no longer alive.
