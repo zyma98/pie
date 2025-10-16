@@ -303,44 +303,41 @@ kernel void batch_prefill_attention_unified_fp16_simdgroup_kernel(
                 l_i += l_j;
             }
 
-            // Store weights for this block (needed for correct V accumulation)
+            // Store weights for this block (needed for dimension-parallel V accumulation)
             threadgroup float w_block[KERNEL_BLOCK_SIZE];
             if (tid_in_tgp < KERNEL_BLOCK_SIZE) {
                 w_block[tid_in_tgp] = w;
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
 
-            // --- Vectorized V accumulation with loop unrolling ---
+            // --- Vectorized V accumulation with explicit register hoisting ---
             int num_keys_in_block = min((int)KERNEL_BLOCK_SIZE, effective_kv_len - block_start);
 
             // Process dimensions in batches for better cache utilization
             for (int d = tid_in_tgp; d < head_size; d += TGP_SIZE) {
                 float sum_wv_d = 0.0f;
 
-                // --- Vectorized weight-value multiplication ---
+                // --- Optimized weight-value multiplication with explicit scalar loads ---
                 int j = 0;
-                // Process 4 weights and values at once using vector operations
-                if ((num_keys_in_block & 3) == 0 && KERNEL_BLOCK_SIZE >= 4) {
-                    for (; j < num_keys_in_block; j += 4) {
-                        // Load 4 weights as vector
-                        float4 w_vec = *reinterpret_cast<threadgroup const float4*>(&w_block[j]);
+                // Process 4 weights and values at once - load to registers explicitly
+                for (; j + 3 < num_keys_in_block; j += 4) {
+                    // Load 4 weights explicitly to registers (sequential access, likely cached)
+                    float w0 = w_block[j];
+                    float w1 = w_block[j+1];
+                    float w2 = w_block[j+2];
+                    float w3 = w_block[j+3];
 
-                        // Load 4 V values for current dimension
-                        half4 v_vec = half4(v_block[j][d], v_block[j+1][d], v_block[j+2][d], v_block[j+3][d]);
-                        float4 v_f = float4(v_vec);
+                    // Load 4 V values for current dimension (strided access)
+                    float v0 = float(v_block[j][d]);
+                    float v1 = float(v_block[j+1][d]);
+                    float v2 = float(v_block[j+2][d]);
+                    float v3 = float(v_block[j+3][d]);
 
-                        // Vector multiply and sum
-                        float4 prod = w_vec * v_f;
-                        sum_wv_d += prod.x + prod.y + prod.z + prod.w;
-                    }
-                } else {
-                    // Fallback to manual unrolling for non-multiple-of-4 cases
-                    for (; j < (num_keys_in_block & ~3); j += 4) {
-                        sum_wv_d += w_block[j] * float(v_block[j][d]);
-                        sum_wv_d += w_block[j+1] * float(v_block[j+1][d]);
-                        sum_wv_d += w_block[j+2] * float(v_block[j+2][d]);
-                        sum_wv_d += w_block[j+3] * float(v_block[j+3][d]);
-                    }
+                    // FMA operations - compiler can optimize these
+                    sum_wv_d += w0 * v0;
+                    sum_wv_d += w1 * v1;
+                    sum_wv_d += w2 * v2;
+                    sum_wv_d += w3 * v3;
                 }
 
                 // Handle remaining keys
@@ -350,7 +347,7 @@ kernel void batch_prefill_attention_unified_fp16_simdgroup_kernel(
 
                 acc_i[d] += sum_wv_d;
             }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
+            // No barrier needed here - next block iteration loads new k/v data
         }
 
         // --- Finalization for this head ---
@@ -389,8 +386,15 @@ kernel void batch_prefill_attention_unified_fp16_simdgroup_kernel(
                 output[out_base + d] = half(acc_i[d] * inv_l_i);
             }
         }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+        // Barrier only needed before next head iteration to ensure output writes complete
+        // if this is not the last head
+        if (h < num_heads - 1) {
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
     }
+
+    // Final barrier to ensure all device memory writes are visible before kernel exit
+    threadgroup_barrier(mem_flags::mem_device);
 }
 
 kernel void batch_prefill_attention_unified_f32_simdgroup_kernel(
@@ -676,36 +680,34 @@ kernel void batch_prefill_attention_unified_f32_simdgroup_kernel(
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
 
-            // --- Vectorized V accumulation with loop unrolling for F32 ---
+            // --- Vectorized V accumulation with explicit register hoisting (F32) ---
             int num_keys_in_block = min((int)KERNEL_BLOCK_SIZE, effective_kv_len - block_start);
 
             // Process dimensions in batches for better cache utilization
             for (int d = tid_in_tgp; d < head_size; d += TGP_SIZE) {
                 float sum_wv_d = 0.0f;
 
-                // --- Vectorized weight-value multiplication (F32) ---
+                // --- Optimized weight-value multiplication with explicit scalar loads ---
                 int j = 0;
-                // Process 4 weights and values at once using vector operations
-                if ((num_keys_in_block & 3) == 0 && KERNEL_BLOCK_SIZE >= 4) {
-                    for (; j < num_keys_in_block; j += 4) {
-                        // Load 4 weights as vector
-                        float4 w_vec = *reinterpret_cast<threadgroup const float4*>(&w_block[j]);
+                // Process 4 weights and values at once - load to registers explicitly
+                for (; j + 3 < num_keys_in_block; j += 4) {
+                    // Load 4 weights explicitly to registers (sequential access, likely cached)
+                    float w0 = w_block[j];
+                    float w1 = w_block[j+1];
+                    float w2 = w_block[j+2];
+                    float w3 = w_block[j+3];
 
-                        // Load 4 V values for current dimension
-                        float4 v_vec = float4(v_block[j][d], v_block[j+1][d], v_block[j+2][d], v_block[j+3][d]);
+                    // Load 4 V values for current dimension (strided access)
+                    float v0 = v_block[j][d];
+                    float v1 = v_block[j+1][d];
+                    float v2 = v_block[j+2][d];
+                    float v3 = v_block[j+3][d];
 
-                        // Vector multiply and sum
-                        float4 prod = w_vec * v_vec;
-                        sum_wv_d += prod.x + prod.y + prod.z + prod.w;
-                    }
-                } else {
-                    // Fallback to manual unrolling for non-multiple-of-4 cases
-                    for (; j < (num_keys_in_block & ~3); j += 4) {
-                        sum_wv_d += w_block[j] * v_block[j][d];
-                        sum_wv_d += w_block[j+1] * v_block[j+1][d];
-                        sum_wv_d += w_block[j+2] * v_block[j+2][d];
-                        sum_wv_d += w_block[j+3] * v_block[j+3][d];
-                    }
+                    // FMA operations - compiler can optimize these
+                    sum_wv_d += w0 * v0;
+                    sum_wv_d += w1 * v1;
+                    sum_wv_d += w2 * v2;
+                    sum_wv_d += w3 * v3;
                 }
 
                 // Handle remaining keys
@@ -715,7 +717,7 @@ kernel void batch_prefill_attention_unified_f32_simdgroup_kernel(
 
                 acc_i[d] += sum_wv_d;
             }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
+            // No barrier needed here - next block iteration loads new k/v data
         }
 
         // --- Finalization for this head ---
@@ -754,8 +756,15 @@ kernel void batch_prefill_attention_unified_f32_simdgroup_kernel(
                 output[out_base + d] = acc_i[d] * inv_l_i;
             }
         }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+        // Barrier only needed before next head iteration to ensure output writes complete
+        // if this is not the last head
+        if (h < num_heads - 1) {
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
     }
+
+    // Final barrier to ensure all device memory writes are visible before kernel exit
+    threadgroup_barrier(mem_flags::mem_device);
 }
 
 // --- One TG per (qo, head) Mapping ---
