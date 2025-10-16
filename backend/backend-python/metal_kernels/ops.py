@@ -48,34 +48,35 @@ def _validate_page_size(page_size: int) -> None:
         )
 
     # Check dtype-specific memory constraints
-    # Metal threadgroup memory limit: 32KB
+    # Metal threadgroup memory limit: 32KB on Apple Silicon
     #
-    # Memory usage (with MAX_HEAD_DIM=256):
-    # - FP16: k_block[BLOCK_SIZE][256] + v_block[BLOCK_SIZE][256]
-    #         = 2 * BLOCK_SIZE * 256 * 2 bytes + scratch arrays
-    #         = BLOCK_SIZE * 1024 bytes + overhead
-    # - F32:  k_block[BLOCK_SIZE][128] + v_block[BLOCK_SIZE][128]
-    #         = 2 * BLOCK_SIZE * 128 * 4 bytes + scratch arrays
-    #         = BLOCK_SIZE * 1024 bytes + overhead
+    # Accurate memory usage calculation for MAX_HEAD_DIM=256:
+    # FP16 kernel threadgroup memory:
+    #   - q_s[256]: 512 bytes
+    #   - k_block[BLOCK_SIZE][256]: BLOCK_SIZE * 512 bytes
+    #   - v_block[BLOCK_SIZE][256]: BLOCK_SIZE * 512 bytes
+    #   - acc_i[256]: 1024 bytes
+    #   - w_block[BLOCK_SIZE]: BLOCK_SIZE * 4 bytes
+    #   - simd_scratch[4]: 16 bytes
+    #   - m_i, l_i: 8 bytes
+    # Total: 1560 + BLOCK_SIZE * 1028 bytes
     #
-    # Safe limits:
-    # - BLOCK_SIZE <= 16 for both FP16 and F32 (16 * 1024 + overhead < 32KB)
-    # - BLOCK_SIZE = 32 exceeds 32KB limit in practice
+    # For power-of-2 page sizes:
+    #   - page_size=16: 1560 + 16*1028 = 17,008 bytes ✓
+    #   - page_size=32: 1560 + 32*1028 = 34,456 bytes ✗ (exceeds 32KB limit)
     #
-    # Hard limit at 32 (anything beyond this will definitely fail)
-    if page_size > 32:
-        raise ValueError(
-            f"page_size must be <= 32 (32KB threadgroup memory limit). "
-            f"Got: {page_size}. Recommended: page_size <= 16"
-        )
-
-    # Warning for page_size > 16 (may work with small head dims, but risky)
-    # Note: The Metal kernel caps KERNEL_BLOCK_SIZE to 16 for F32 automatically,
-    # but FP16 kernels may fail at runtime if BLOCK_SIZE > 16 with large head dims.
+    # F32 kernel uses MAX_F32_HEAD_DIM=128 and capped KERNEL_BLOCK_SIZE=16,
+    # so it stays under 32KB automatically.
+    #
+    # Hard limit: page_size must be <= 16 (power of 2 constraint)
     if page_size > 16:
-        print(f"⚠️  page_size={page_size} may exceed threadgroup memory limits (32KB)")
-        print("   For MAX_HEAD_DIM=256: recommended page_size <= 16")
-        print("   Kernel may fail at runtime if memory limits are exceeded")
+        estimated_memory = 1560 + page_size * 1028
+        raise ValueError(
+            f"page_size={page_size} exceeds Metal threadgroup memory limit (32KB). "
+            f"Maximum supported: 16 (power of 2). "
+            f"Your configuration would require ~{estimated_memory} bytes. "
+            f"Valid values: 1, 2, 4, 8, 16"
+        )
 
 
 def _validate_mps_device(tensor: torch.Tensor, name: str) -> None:

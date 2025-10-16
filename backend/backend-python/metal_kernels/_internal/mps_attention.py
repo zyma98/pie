@@ -121,6 +121,13 @@ using namespace metal;
                     f"✅ Compiled OPTIMIZED Metal attention kernels for MPS "
                     f"(BLOCK_SIZE={self.page_size})"
                 )
+                # Warm up: trigger PSO creation to catch threadgroup memory errors early
+                self._warmup_kernel(
+                    "attention", "batch_prefill_attention_unified_fp16_simdgroup_kernel"
+                )
+                self._warmup_kernel(
+                    "attention", "batch_prefill_attention_unified_f32_simdgroup_kernel"
+                )
             else:
                 print("   Falling back to simple implementation")
                 self._compile_simple_kernels()
