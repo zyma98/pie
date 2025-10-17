@@ -214,3 +214,50 @@ inline float split_d_dot_product_f32(
 
     return simd_sum(partial_score);
 }
+
+// --- Cache-Aware Layout and Prefetch Optimization (mistral.rs-style) ---
+
+// Vector width for interleaved access patterns
+#define VECTOR_WIDTH 4
+
+// Calculate cache-aware vector group assignments
+// This distributes threads to maximize memory coalescing and cache line utilization
+struct VectorGroupInfo {
+    int simd_vector_id;      // Which vector within simdgroup (0-7 for SIMD_SIZE=32)
+    int lane_in_vector;      // Lane within vector (0-3 for VECTOR_WIDTH=4)
+    int global_vector_id;    // Global vector ID across all simdgroups
+    int vectors_per_simdgroup; // Number of vectors per simdgroup
+};
+
+inline VectorGroupInfo compute_vector_group_info(
+    uint tid_in_tgp,
+    uint simd_lane_id,
+    uint simd_group_id
+) {
+    VectorGroupInfo info;
+    info.vectors_per_simdgroup = SIMD_SIZE / VECTOR_WIDTH;  // 8 vectors per simdgroup
+    info.simd_vector_id = simd_lane_id / VECTOR_WIDTH;      // 0-7 for SIMD_SIZE=32
+    info.lane_in_vector = simd_lane_id % VECTOR_WIDTH;      // 0-3
+    info.global_vector_id = simd_group_id * info.vectors_per_simdgroup + info.simd_vector_id;
+    return info;
+}
+
+// Compute cache-aligned interleaved offset for gather operations
+// This pattern maximizes cache line utilization by spreading accesses across vectors
+// Pattern: vec0[lane0], vec1[lane0], vec2[lane0], ... instead of vec0[lane0-3], vec1[lane0-3], ...
+inline uint compute_interleaved_offset(
+    uint base_offset,
+    uint vector_id,
+    uint lane_id,
+    uint vector_width,
+    uint stride
+) {
+    return base_offset + (vector_id * vector_width + lane_id) * stride;
+}
+
+// Helper to determine optimal number of vectors to process per iteration
+inline int get_vectors_per_iteration(int head_size, int threadgroup_size) {
+    int total_vectors = head_size / VECTOR_WIDTH;
+    int max_vectors_per_iter = threadgroup_size / VECTOR_WIDTH;
+    return min(total_vectors, max_vectors_per_iter);
+}
