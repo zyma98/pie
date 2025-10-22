@@ -9,9 +9,9 @@ pub fn get_pie_home() -> Result<PathBuf> {
     if let Ok(path) = env::var("PIE_HOME") {
         Ok(PathBuf::from(path))
     } else {
-        dirs::cache_dir()
-            .map(|p| p.join("pie"))
-            .ok_or_else(|| anyhow!("Failed to find home dir"))
+        let home = dirs::home_dir()
+            .ok_or_else(|| anyhow!("Failed to find home directory"))?;
+        Ok(home.join(".cache").join("pie"))
     }
 }
 
