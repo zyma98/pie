@@ -12,7 +12,7 @@ log = "pie_metal.log"
 [[backend]]
 backend_type = "python"
 exec_path = "../backend/backend-python/server.py"
-model = "llama-3.2-1b-instruct"   # LLaMA 3.2 1B model
+model = "qwen-3-0.6b"   # LLaMA 3.2 1B model
 device = "mps"                    # Use MPS device for Metal acceleration
 dtype = "float16"                 # Use float16 for Metal (native support in custom kernels)
 kv_page_size = 16
