@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 import flashinfer as ops
-from adapter import AdapterSubpass
+from adapter_utils import AdapterSubpass
 from model.config import CommonArch, ModelConfig
 from model.gptoss_utils import (
     FP4_VALUES,
