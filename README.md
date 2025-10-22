@@ -32,29 +32,24 @@ The easiest way to run Pie with CUDA support is using our pre-built Docker image
 
 ```bash
 docker pull sslee0cs/pie:latest
-docker run --rm --gpus all -v pie-models:/root/.cache/pie sslee0cs/pie:latest \
-  /workspace/pie-cli/target/release/pie model add "llama-3.2-1b-instruct"
+mkdir -p ~/.cache
+docker run --rm --gpus all -it -v ~/.cache:/root/.cache sslee0cs/pie:latest \
+  pie model add "llama-3.2-1b-instruct"
 ```
 
-**Step 2: Start PIE Engine**
+- Models are downloaded into `~/.cache/pie/models/` and persist across container runs.
 
-To start PIE with interactive shell (uses Python backend):
+- FlashInfer's JIT-compiled kernels are cached in `~/.cache/flashinfer/` to avoid recompilation.
+
+
+**Step 2: Run an Inferlet**
 ```bash
-docker run --gpus all --rm -it -v pie-models:/root/.cache/pie sslee0cs/pie:latest
+docker run --gpus all --rm -it -v ~/.cache:/root/.cache sslee0cs/pie:latest \
+  pie run --config /workspace/pie/docker_config.toml \
+  /workspace/example-apps/text_completion.wasm -- --prompt "What is the capital of France?"
 ```
 
-**Step 3: Run Inferlets**
-
-From within the PIE shell, after you see the model parameters are fully loaded:
-
-```bash
-pie> run example-apps/target/wasm32-wasip2/release/text_completion.wasm -- --prompt "What is the capital of France?"
-```
-You can see a message saying that an inferlet has been lauched.
-```
-✅ Inferlet launched with ID: ...
-```
-Note the the very first inferlet response may take a few minutes due to the JIT compliation of FlashInfer.
+Note that the very first inferlet response may take a few minutes due to the JIT compilation of FlashInfer.
 
 ### Manual Installation
 

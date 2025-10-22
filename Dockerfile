@@ -60,9 +60,21 @@ RUN cd backend/backend-python \
     && uv pip install ninja
 
 # ============================================================================
-# Stage 2: Runtime - Minimal production image with only runtime dependencies
+# Stage 2: Development - Keep full builder stage for development
 # ============================================================================
-FROM nvidia/cuda:${CUDA_VERSION}.${CUDA_MINOR}-runtime-ubuntu24.04
+FROM builder AS development
+
+# Keep container running for development
+CMD ["tail", "-f", "/dev/null"]
+
+# ============================================================================
+# Stage 3: Runtime - Use devel image for FlashInfer JIT compilation support
+# ============================================================================
+# Note: FlashInfer requires CUDA development tools (nvcc, headers) for runtime
+# JIT compilation. Using devel base is simpler, reliable, and easy to maintain,
+# comapred with manually installing specific -dev packages which have complex
+# version dependencies.
+FROM nvidia/cuda:${CUDA_VERSION}.${CUDA_MINOR}-devel-ubuntu24.04
 
 # Re-declare args after FROM
 ARG CUDA_VERSION
@@ -74,7 +86,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     TORCH_EXTENSIONS_DIR=/root/.cache/torch_extensions \
     PATH="/workspace/backend/backend-python/.venv/bin:/usr/local/bin:${PATH}"
 
-# Install ONLY runtime dependencies (no -dev packages, no build tools)
+# Install only runtime dependencies (CUDA dev tools already in devel base)
 RUN apt-get update && apt-get install -y \
     python3.12 python3-pip python3.12-venv \
     libzmq5 libcbor0.10 libzstd1 libssl3 \
@@ -83,8 +95,9 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /workspace
 
-# Copy PIE CLI binary from builder
+# Copy PIE CLI binary and uv from builder
 COPY --from=builder /usr/local/cargo/bin/pie /usr/local/bin/pie
+COPY --from=builder /root/.local/bin/uv /usr/local/bin/uv
 
 # Copy CUDA backend binary
 COPY --from=builder /workspace/backend/backend-cuda/build/bin/pie_cuda_be /workspace/backend/backend-cuda/build/bin/pie_cuda_be
@@ -92,10 +105,11 @@ COPY --from=builder /workspace/backend/backend-cuda/build/bin/pie_cuda_be /works
 # Copy Python virtual environment
 COPY --from=builder /workspace/backend/backend-python/.venv /workspace/backend/backend-python/.venv
 
-# Copy Python backend source code
-COPY --from=builder /workspace/backend/backend-python/*.py /workspace/backend/backend-python/
-COPY --from=builder /workspace/backend/backend-python/model /workspace/backend/backend-python/model
-COPY --from=builder /workspace/backend/backend-python/metal_kernels /workspace/backend/backend-python/metal_kernels
+# Copy Python backend source code (exclude cache, build, and temp files)
+COPY --from=builder /workspace/backend/backend-python/ /workspace/backend/backend-python/
+RUN find /workspace/backend/backend-python -name "__pycache__" -type d -exec rm -rf {} + || true && \
+    find /workspace/backend/backend-python -name "*.pyc" -delete || true && \
+    rm -rf /workspace/backend/backend-python/build || true
 
 # Copy example inferlets
 COPY --from=builder /workspace/example-apps/target/wasm32-wasip2/release/*.wasm /workspace/example-apps/
