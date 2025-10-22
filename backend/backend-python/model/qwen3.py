@@ -8,7 +8,19 @@ from torch import nn
 
 from adapter_utils import AdapterSubpass
 from config.qwen3 import Qwen3Arch
-import flashinfer as ops
+from platform_detection import is_apple_silicon
+
+# Direct import of backend operations based on platform
+if is_apple_silicon():
+    try:
+        import metal_kernels.ops as ops  # type: ignore[import-not-found]
+    except ImportError as e:
+        raise RuntimeError(f"metal_kernels backend is not available: {e}") from e
+else:
+    try:
+        import flashinfer as ops  # type: ignore[import-not-found,no-redef]
+    except ImportError as e:
+        raise RuntimeError(f"flashinfer backend is not available: {e}") from e
 
 VERSION = "0.1.0"
 
