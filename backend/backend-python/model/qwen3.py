@@ -10,17 +10,17 @@ from adapter_utils import AdapterSubpass
 from config.qwen3 import Qwen3Arch
 from platform_detection import is_apple_silicon
 
-# Conditional import: use metal_kernels on Apple Silicon, flashinfer on CUDA
+# Direct import of backend operations based on platform
 if is_apple_silicon():
     try:
         import metal_kernels.ops as ops  # type: ignore[import-not-found]
-    except ImportError:
-        ops = None  # type: ignore[assignment]
+    except ImportError as e:
+        raise RuntimeError(f"metal_kernels backend is not available: {e}") from e
 else:
     try:
         import flashinfer as ops  # type: ignore[import-not-found,no-redef]
-    except ImportError:
-        ops = None  # type: ignore[assignment]
+    except ImportError as e:
+        raise RuntimeError(f"flashinfer backend is not available: {e}") from e
 
 VERSION = "0.1.0"
 
