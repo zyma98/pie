@@ -28,3 +28,10 @@ jobs:
       - name: Build Client CLI
         working-directory: ./client/cli
         run: cargo build --release
+
+      - name: Upload pie-cli binary
+        uses: actions/upload-artifact@v3
+        with:
+          name: pie-cli-binary
+          path: client/cli/target/release/pie-cli
+          retention-days: 1

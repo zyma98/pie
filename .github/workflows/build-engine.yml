@@ -28,3 +28,10 @@ jobs:
       - name: Build Engine
         working-directory: ./pie
         run: cargo build --release
+
+      - name: Upload pie binary
+        uses: actions/upload-artifact@v3
+        with:
+          name: pie-binary
+          path: pie/target/release/pie
+          retention-days: 1
