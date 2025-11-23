@@ -30,6 +30,19 @@ set -e  # Exit on any error
 echo "=== PIE Docker Image Test Suite ==="
 echo ""
 
+# Cleanup function
+cleanup() {
+    echo ""
+    echo "=== Cleanup ==="
+    docker stop pie-test-server 2>/dev/null || true
+    docker rm pie-test-server 2>/dev/null || true
+    rm -f ./echo.wasm ./text_completion.wasm 2>/dev/null || true
+    echo "✅ Cleanup complete"
+}
+
+# Set trap to cleanup on exit
+trap cleanup EXIT
+
 # Check prerequisites
 check_prerequisites() {
     local missing=0
@@ -68,4 +81,276 @@ check_prerequisites() {
     echo ""
 }
 
+# Build Docker images
+build_images() {
+    echo "=== Building Docker Images ==="
+    echo ""
+
+    if ! ./scripts/build_docker_images.sh; then
+        echo "❌ Docker image build failed"
+        exit 1
+    fi
+
+    echo ""
+    echo "✅ Docker images built successfully"
+    echo ""
+}
+
+# Verify images were created
+verify_images() {
+    echo "=== Verifying Docker Images ==="
+    echo ""
+
+    local images=$(docker images | grep -E "^pie" | wc -l)
+
+    if [ "$images" -eq 0 ]; then
+        echo "❌ No pie images found"
+        exit 1
+    fi
+
+    echo "Found $images pie image(s):"
+    docker images | grep -E "^(REPOSITORY|pie)"
+    echo ""
+    echo "✅ Images verified"
+    echo ""
+}
+
+# Start PIE server with authentication
+start_server() {
+    echo "=== Starting PIE Server ==="
+    echo ""
+
+    local username=$(whoami)
+    local ssh_key=$(cat ~/.ssh/id_ed25519.pub)
+
+    echo "Username: $username"
+    echo "Container: pie-test-server"
+    echo "Port: 8080"
+    echo ""
+
+    docker run -d --gpus all -p 8080:8080 \
+        --name pie-test-server \
+        -e PIE_AUTH_USER="$username" \
+        -e "PIE_AUTH_KEY=$ssh_key" \
+        -v ~/.cache:/root/.cache \
+        pie:latest
+
+    echo "Waiting for server startup..."
+    sleep 10
+
+    echo ""
+    echo "✅ Server started"
+    echo ""
+}
+
+# Verify server is running and authentication configured
+verify_server() {
+    echo "=== Verifying Server Status ==="
+    echo ""
+
+    # Check container is running
+    if ! docker ps | grep -q pie-test-server; then
+        echo "❌ Server container not running"
+        docker logs pie-test-server 2>&1 | tail -20
+        exit 1
+    fi
+
+    # Check logs for auth setup
+    local logs=$(docker logs pie-test-server 2>&1)
+
+    if echo "$logs" | grep -q "🔐 Setting up authentication"; then
+        echo "✅ Authentication setup initiated"
+    else
+        echo "⚠️  No authentication setup message found"
+    fi
+
+    if echo "$logs" | grep -q "✅ Authentication configured successfully"; then
+        echo "✅ Authentication configured"
+    else
+        echo "❌ Authentication configuration failed"
+        echo "$logs" | grep -E "(Authentication|Error)" | tail -10
+        exit 1
+    fi
+
+    if echo "$logs" | grep -q "PIE runtime started successfully"; then
+        echo "✅ PIE runtime started"
+    else
+        echo "❌ PIE runtime failed to start"
+        echo "$logs" | tail -20
+        exit 1
+    fi
+
+    if echo "$logs" | grep -q "Handler initialized with flashinfer backend"; then
+        echo "✅ FlashInfer backend initialized"
+    else
+        echo "⚠️  Backend initialization not confirmed"
+    fi
+
+    echo ""
+    echo "✅ Server verification complete"
+    echo ""
+}
+
+# Configure pie-cli to connect to Docker server
+configure_client() {
+    echo "=== Configuring pie-cli ==="
+    echo ""
+
+    local username=$(whoami)
+
+    # Initialize config (will prompt if exists, so check first)
+    if [ ! -f ~/.pie_cli/config.toml ]; then
+        echo "Creating new pie-cli config..."
+        pie-cli config init --enable-auth true
+    else
+        echo "Using existing pie-cli config"
+    fi
+
+    # Update config with test server settings
+    pie-cli config update \
+        --username "$username" \
+        --host localhost \
+        --port 8080 \
+        --private-key-path ~/.ssh/id_ed25519
+
+    echo ""
+    echo "Current config:"
+    pie-cli config show
+
+    echo ""
+    echo "✅ pie-cli configured"
+    echo ""
+}
+
+# Test connection to server
+test_connection() {
+    echo "=== Testing Connection ==="
+    echo ""
+
+    if pie-cli ping; then
+        echo ""
+        echo "✅ Connection successful"
+    else
+        echo ""
+        echo "❌ Connection failed"
+        echo "Server logs:"
+        docker logs pie-test-server 2>&1 | tail -20
+        exit 1
+    fi
+
+    echo ""
+}
+
+# Copy inferlets from Docker to host
+copy_inferlets() {
+    echo "=== Copying Inferlets from Container ==="
+    echo ""
+
+    docker cp pie-test-server:/workspace/example-apps/echo.wasm ./echo.wasm
+    docker cp pie-test-server:/workspace/example-apps/text_completion.wasm ./text_completion.wasm
+
+    if [ -f ./echo.wasm ] && [ -f ./text_completion.wasm ]; then
+        echo "✅ Inferlets copied:"
+        ls -lh ./echo.wasm ./text_completion.wasm
+    else
+        echo "❌ Failed to copy inferlets"
+        exit 1
+    fi
+
+    echo ""
+}
+
+# Test echo inferlet (simple, no model needed)
+test_echo() {
+    echo "=== Testing Echo Inferlet ==="
+    echo ""
+
+    local output=$(pie-cli submit ./echo.wasm -- --text "Docker test successful!" 2>&1)
+
+    echo "$output"
+
+    if echo "$output" | grep -q "Docker test successful!"; then
+        echo ""
+        echo "✅ Echo inferlet test passed"
+    else
+        echo ""
+        echo "❌ Echo inferlet test failed"
+        exit 1
+    fi
+
+    echo ""
+}
+
+# Test text completion inferlet (uses LLM)
+test_text_completion() {
+    echo "=== Testing Text Completion Inferlet ==="
+    echo ""
+
+    local output=$(pie-cli submit ./text_completion.wasm -- --prompt "hello" 2>&1)
+
+    echo "$output"
+
+    # Verify output contains expected elements
+    local checks_passed=0
+
+    if echo "$output" | grep -q "Inferlet hash:"; then
+        echo "✅ Inferlet uploaded"
+        ((checks_passed++))
+    fi
+
+    if echo "$output" | grep -q "Inferlet launched with ID:"; then
+        echo "✅ Inferlet launched"
+        ((checks_passed++))
+    fi
+
+    if echo "$output" | grep -q "Output:"; then
+        echo "✅ Got output from LLM"
+        ((checks_passed++))
+    fi
+
+    if echo "$output" | grep -q "Per token latency:"; then
+        echo "✅ Performance metrics reported"
+        ((checks_passed++))
+    fi
+
+    if echo "$output" | grep -q "Completed:"; then
+        echo "✅ Inferlet completed"
+        ((checks_passed++))
+    fi
+
+    if [ $checks_passed -eq 5 ]; then
+        echo ""
+        echo "✅ Text completion inferlet test passed (5/5 checks)"
+    else
+        echo ""
+        echo "⚠️  Text completion test incomplete ($checks_passed/5 checks passed)"
+        exit 1
+    fi
+
+    echo ""
+}
+
+# Main execution
 check_prerequisites
+build_images
+verify_images
+start_server
+verify_server
+configure_client
+test_connection
+copy_inferlets
+test_echo
+test_text_completion
+
+# Print final success message
+echo "=========================================="
+echo "✅ All Docker tests passed!"
+echo "=========================================="
+echo ""
+echo "Summary:"
+echo "  ✅ Docker images built"
+echo "  ✅ Server started with authentication"
+echo "  ✅ pie-cli connected successfully"
+echo "  ✅ Echo inferlet executed"
+echo "  ✅ Text completion inferlet executed"
+echo ""
