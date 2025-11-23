@@ -4,13 +4,16 @@
 #
 # This script performs a complete end-to-end test of the PIE Docker setup:
 # 1. Checks prerequisites (docker, pie-cli, SSH keys)
-# 2. Builds Docker images using build_docker_images.sh
+# 2. Verifies Docker images exist (does NOT build them)
 # 3. Starts PIE server in Docker with authentication
 # 4. Configures pie-cli to connect to the server
 # 5. Tests connection with ping
 # 6. Submits echo inferlet (simple test)
 # 7. Submits text completion inferlet (full LLM test)
 # 8. Cleans up containers and temporary files
+#
+# Note: This script assumes Docker images are already built.
+# To build images first, run: ./scripts/build_docker_images.sh
 #
 # Prerequisites:
 #   - Docker installed and running
@@ -34,8 +37,8 @@ echo ""
 cleanup() {
     echo ""
     echo "=== Cleanup ==="
-    docker stop pie-test-server 2>/dev/null || true
-    docker rm pie-test-server 2>/dev/null || true
+    sudo docker stop pie-test-server 2>/dev/null || true
+    sudo docker rm pie-test-server 2>/dev/null || true
     rm -f ./echo.wasm ./text_completion.wasm 2>/dev/null || true
     echo "✅ Cleanup complete"
 }
@@ -81,35 +84,25 @@ check_prerequisites() {
     echo ""
 }
 
-# Build Docker images
-build_images() {
-    echo "=== Building Docker Images ==="
-    echo ""
-
-    if ! ./scripts/build_docker_images.sh; then
-        echo "❌ Docker image build failed"
-        exit 1
-    fi
-
-    echo ""
-    echo "✅ Docker images built successfully"
-    echo ""
-}
-
-# Verify images were created
+# Verify Docker images exist
 verify_images() {
-    echo "=== Verifying Docker Images ==="
+    echo "=== Verifying Docker Images Exist ==="
     echo ""
 
-    local images=$(docker images | grep -E "^pie" | wc -l)
-
-    if [ "$images" -eq 0 ]; then
-        echo "❌ No pie images found"
+    # Check if pie:latest image exists
+    if ! sudo docker images | grep -q "^pie.*latest"; then
+        echo "❌ Docker image 'pie:latest' not found"
+        echo ""
+        echo "Please build Docker images first:"
+        echo "  ./scripts/build_docker_images.sh"
+        echo ""
         exit 1
     fi
+
+    local images=$(sudo docker images | grep -E "^pie" | wc -l)
 
     echo "Found $images pie image(s):"
-    docker images | grep -E "^(REPOSITORY|pie)"
+    sudo docker images | grep -E "^(REPOSITORY|pie)"
     echo ""
     echo "✅ Images verified"
     echo ""
@@ -128,7 +121,7 @@ start_server() {
     echo "Port: 8080"
     echo ""
 
-    docker run -d --gpus all -p 8080:8080 \
+    sudo docker run -d --gpus all -p 8080:8080 \
         --name pie-test-server \
         -e PIE_AUTH_USER="$username" \
         -e "PIE_AUTH_KEY=$ssh_key" \
@@ -149,14 +142,14 @@ verify_server() {
     echo ""
 
     # Check container is running
-    if ! docker ps | grep -q pie-test-server; then
+    if ! sudo docker ps | grep -q pie-test-server; then
         echo "❌ Server container not running"
-        docker logs pie-test-server 2>&1 | tail -20
+        sudo docker logs pie-test-server 2>&1 | tail -20
         exit 1
     fi
 
     # Check logs for auth setup
-    local logs=$(docker logs pie-test-server 2>&1)
+    local logs=$(sudo docker logs pie-test-server 2>&1)
 
     if echo "$logs" | grep -q "🔐 Setting up authentication"; then
         echo "✅ Authentication setup initiated"
@@ -234,7 +227,7 @@ test_connection() {
         echo ""
         echo "❌ Connection failed"
         echo "Server logs:"
-        docker logs pie-test-server 2>&1 | tail -20
+        sudo docker logs pie-test-server 2>&1 | tail -20
         exit 1
     fi
 
@@ -246,8 +239,8 @@ copy_inferlets() {
     echo "=== Copying Inferlets from Container ==="
     echo ""
 
-    docker cp pie-test-server:/workspace/example-apps/echo.wasm ./echo.wasm
-    docker cp pie-test-server:/workspace/example-apps/text_completion.wasm ./text_completion.wasm
+    sudo docker cp pie-test-server:/workspace/example-apps/echo.wasm ./echo.wasm
+    sudo docker cp pie-test-server:/workspace/example-apps/text_completion.wasm ./text_completion.wasm
 
     if [ -f ./echo.wasm ] && [ -f ./text_completion.wasm ]; then
         echo "✅ Inferlets copied:"
@@ -332,7 +325,6 @@ test_text_completion() {
 
 # Main execution
 check_prerequisites
-build_images
 verify_images
 start_server
 verify_server
@@ -348,7 +340,7 @@ echo "✅ All Docker tests passed!"
 echo "=========================================="
 echo ""
 echo "Summary:"
-echo "  ✅ Docker images built"
+echo "  ✅ Docker images verified"
 echo "  ✅ Server started with authentication"
 echo "  ✅ pie-cli connected successfully"
 echo "  ✅ Echo inferlet executed"
