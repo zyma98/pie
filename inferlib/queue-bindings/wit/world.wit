@@ -1,0 +1,5 @@
+package inferlib:queue-bindings;
+
+world importer {
+    import inferlib:queue/queues;
+}

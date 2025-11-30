@@ -1,0 +1,56 @@
+// WARNING: This file is the source of truth for the chat formatter interface.
+// It is accessed from multiple locations:
+//   - inferlib/chat/wit/formatter.wit (this file, source)
+//   - inferlib/chat-bindings/wit/deps/chat/formatter.wit (symlink)
+// Any changes made here will be reflected in all locations that symlink to this file.
+
+package inferlib:chat;
+
+/// Interface for chat template formatting
+interface formatter {
+    /// Represents a single tool call in a chat message.
+    record tool-call {
+        /// The name of the tool being called
+        name: string,
+        /// JSON-encoded arguments for the tool
+        arguments: string,
+    }
+
+    /// A chat formatter resource that maintains conversation state
+    resource chat-formatter {
+        /// Create a new chat formatter instance with the given template
+        /// Returns an error string if the template has syntax errors
+        constructor(template: string) -> result<chat-formatter, string>;
+        
+        /// Add a system message to the conversation
+        add-system: func(content: string);
+        
+        /// Add a user message to the conversation
+        add-user: func(content: string);
+        
+        /// Add a simple assistant message with only text content
+        add-assistant: func(content: string);
+        
+        /// Add a comprehensive assistant response with optional reasoning and tool calls
+        add-assistant-response: func(
+            content: string,
+            reasoning: option<string>,
+            tool-calls: option<list<tool-call>>
+        );
+        
+        /// Add a tool response message
+        add-tool: func(content: string);
+        
+        /// Check if the formatter has any messages
+        has-messages: func() -> bool;
+        
+        /// Clear all messages from the formatter
+        clear: func();
+        
+        /// Render the conversation into a formatted string
+        render: func(
+            add-generation-prompt: bool,
+            begin-of-sequence: bool
+        ) -> string;
+    }
+}
