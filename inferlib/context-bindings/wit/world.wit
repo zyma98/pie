@@ -1,0 +1,5 @@
+package inferlib:context-bindings;
+
+world importer {
+    import inferlib:context/inference;
+}

@@ -1,0 +1,65 @@
+// WARNING: This file is the source of truth for the context interface.
+// It is accessed from multiple locations:
+//   - inferlib/context/wit/context.wit (this file, source)
+//   - inferlib/context-bindings/wit/deps/context/context.wit (symlink)
+// Any changes made here will be reflected in all locations that symlink to this file.
+
+package inferlib:context;
+
+/// Interface for inference context management
+interface inference {
+    /// Sampler configuration for token generation
+    variant sampler-config {
+        /// Greedy sampling (temperature = 0)
+        greedy,
+        /// Multinomial sampling with temperature
+        multinomial(f32),
+        /// Top-p (nucleus) sampling: (temperature, top_p)
+        top-p(tuple<f32, f32>),
+        /// Top-k sampling: (temperature, top_k)
+        top-k(tuple<f32, u32>),
+        /// Min-p sampling: (temperature, min_p)
+        min-p(tuple<f32, f32>),
+        /// Combined top-k and top-p: (temperature, top_k, top_p)
+        top-k-top-p(tuple<f32, u32, f32>),
+    }
+
+    /// Stop condition configuration
+    record stop-config {
+        /// Maximum number of tokens to generate
+        max-tokens: u32,
+        /// List of EOS token sequences that will stop generation
+        eos-sequences: list<list<u32>>,
+    }
+
+    /// An inference context resource that maintains conversation state and KV cache
+    resource context {
+        /// Create a new context for the auto-selected model
+        constructor();
+
+        /// Fill the context with raw text (tokenizes and adds to pending)
+        fill: func(text: string);
+
+        /// Fill the context with a system message (uses chat template)
+        fill-system: func(text: string);
+
+        /// Fill the context with a user message (uses chat template, adds generation prompt)
+        fill-user: func(text: string);
+
+        /// Fill the context with an assistant message (uses chat template)
+        fill-assistant: func(text: string);
+
+        /// Generate text using the specified sampler and stop condition
+        /// This is an async operation
+        generate: func(sampler: sampler-config, stop-config: stop-config) -> string;
+
+        /// Flush pending tokens (process them through the model)
+        flush: func();
+
+        /// Get the current text content of the context
+        get-text: func() -> string;
+
+        /// Get the current token IDs in the context
+        get-token-ids: func() -> list<u32>;
+    }
+}

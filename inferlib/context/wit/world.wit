@@ -1,0 +1,5 @@
+package inferlib:context;
+
+world context-provider {
+    export inference;
+}
