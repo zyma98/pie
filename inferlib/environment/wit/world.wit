@@ -1,0 +1,9 @@
+package inferlib:environment;
+
+world environment-provider {
+    // Import from the host runtime
+    import inferlet:core/runtime;
+    
+    // Export our clean environment interface
+    export runtime;
+}

@@ -1,0 +1,6 @@
+package inferlib:environment-bindings;
+
+world importer {
+    import inferlib:environment/runtime;
+}
+
