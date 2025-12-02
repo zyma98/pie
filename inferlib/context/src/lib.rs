@@ -2,15 +2,19 @@
 wit_bindgen::generate!({
     path: "wit",
     world: "context-provider",
+    generate_all,
 });
 
 use exports::inferlib::context::inference::{Guest, GuestContext, SamplerConfig, StopConfig};
+
+// Import the WIT model type for the constructor
+use inferlib::model::models::Model as WitModel;
 
 // Import types from the legacy library that Context depends on
 use inferlet::brle::Brle;
 use inferlet::forward::{Forward, KvPage};
 use inferlet::stop_condition::{ends_with_any, max_len, StopCondition};
-use inferlet::{ChatFormatter, Model, Queue, Sampler, Tokenizer};
+use inferlet::{api, ChatFormatter, Queue, Sampler, Tokenizer};
 
 use std::cell::RefCell;
 use std::cmp::Ordering;
@@ -21,6 +25,54 @@ struct InferenceImpl;
 
 impl Guest for InferenceImpl {
     type Context = ContextImpl;
+}
+
+/// Internal Model struct that wraps the host API Model
+struct Model {
+    inner: Rc<api::Model>,
+}
+
+impl Model {
+    /// Create from the host API model
+    fn from_api(inner: api::Model) -> Self {
+        Model {
+            inner: Rc::new(inner),
+        }
+    }
+
+    /// Get the prompt template
+    pub fn get_prompt_template(&self) -> String {
+        self.inner.get_prompt_template()
+    }
+
+    /// Get the KV page size
+    pub fn get_kv_page_size(&self) -> u32 {
+        self.inner.get_kv_page_size()
+    }
+
+    /// Create a queue for this model using the legacy Queue
+    pub fn create_queue(&self) -> Queue {
+        // Use the legacy library's Model to create the queue
+        // This requires getting a legacy Model first
+        let model_name = self.inner.get_name();
+        let legacy_model = inferlet::get_model(&model_name).expect("Failed to get legacy model");
+        legacy_model.create_queue()
+    }
+
+    /// Get a tokenizer for this model using the legacy Tokenizer
+    pub fn get_tokenizer(&self) -> Tokenizer {
+        let model_name = self.inner.get_name();
+        let legacy_model = inferlet::get_model(&model_name).expect("Failed to get legacy model");
+        Tokenizer::new(&legacy_model)
+    }
+}
+
+impl Clone for Model {
+    fn clone(&self) -> Self {
+        Model {
+            inner: Rc::clone(&self.inner),
+        }
+    }
 }
 
 /// Internal Context struct that re-implements the legacy Context
@@ -319,8 +371,12 @@ struct ContextImpl {
 }
 
 impl GuestContext for ContextImpl {
-    fn new() -> Self {
-        let model = inferlet::get_auto_model();
+    fn new(wit_model: &WitModel) -> Self {
+        // Get the model name from the WIT model and look up the host model
+        let model_name = wit_model.get_name();
+        let api_model = api::runtime::get_model(&model_name).expect("Failed to get model by name");
+        let model = Model::from_api(api_model);
+
         let inner = Context::new(&model);
         ContextImpl {
             inner: Rc::new(RefCell::new(inner)),

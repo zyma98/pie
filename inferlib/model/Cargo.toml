@@ -1,0 +1,12 @@
+[package]
+name = "inferlib-model"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+name = "inferlib_model"
+
+[dependencies]
+wit-bindgen = { workspace = true }
+inferlet = { path = "../../inferlet" }

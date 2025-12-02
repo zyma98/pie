@@ -6,10 +6,13 @@
 //! ## Usage
 //!
 //! ```rust,no_run
-//! use inferlib_context_bindings::{Context, SamplerConfig, StopConfig};
+//! use inferlib_context_bindings::{Context, Model, SamplerConfig, StopConfig};
 //!
-//! // Create a context (uses auto-selected model)
-//! let ctx = Context::new();
+//! // Get a model
+//! let model = Model::get_auto();
+//!
+//! // Create a context for the model
+//! let ctx = Context::new(&model);
 //!
 //! // Fill with messages
 //! ctx.fill_system("You are a helpful assistant.");
@@ -20,7 +23,7 @@
 //!     max_tokens: 256,
 //!     eos_sequences: vec![],
 //! };
-//! let response = ctx.generate(SamplerConfig::TopP((0.6, 0.95)), stop_config);
+//! let response = ctx.generate(SamplerConfig::TopP((0.6, 0.95)), &stop_config);
 //! ```
 
 // Generate WIT bindings
@@ -28,14 +31,20 @@ wit_bindgen::generate!({
     path: "wit",
     world: "importer",
     with: {
+        "inferlib:model/models": generate,
         "inferlib:context/inference": generate,
     },
 });
 
 // Re-export the main types for convenience
 pub use self::inferlib::context::inference::{Context, SamplerConfig, StopConfig};
+pub use self::inferlib::model::models::{Model, Tokenizer};
 
 // Re-export the module structure for advanced usage
 pub mod context {
     pub use super::inferlib::context::*;
+}
+
+pub mod model {
+    pub use super::inferlib::model::*;
 }

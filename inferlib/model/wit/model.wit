@@ -1,0 +1,46 @@
+// WARNING: This file is the source of truth for the model interface.
+// It is accessed from multiple locations:
+//   - inferlib/model/wit/model.wit (this file, source)
+//   - inferlib/model-bindings/wit/deps/model/model.wit (symlink)
+// Any changes made here will be reflected in all locations that symlink to this file.
+
+package inferlib:model;
+
+/// Interface for model management
+interface models {
+    /// A model resource that provides access to model metadata and functionality
+    resource model {
+        /// Get a model by name, returns none if not found
+        get-by-name: static func(name: string) -> option<model>;
+        
+        /// Get the auto-selected model (first available)
+        get-auto: static func() -> model;
+        
+        /// Get all available model names
+        get-all-names: static func() -> list<string>;
+
+        /// Returns the model's name (e.g. "llama-3.1-8b-instruct")
+        get-name: func() -> string;
+
+        /// Returns the full set of model traits
+        get-traits: func() -> list<string>;
+
+        /// Check if model has all required traits
+        has-traits: func(required-traits: list<string>) -> bool;
+
+        /// Returns a human-readable description of the model
+        get-description: func() -> string;
+
+        /// Returns the prompt formatting template
+        get-prompt-template: func() -> string;
+
+        /// Returns EOS token sequences
+        eos-tokens: func() -> list<list<u32>>;
+
+        /// Gets the service ID for the model
+        get-service-id: func() -> u32;
+
+        /// Gets the KV page size for the model
+        get-kv-page-size: func() -> u32;
+    }
+}

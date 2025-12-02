@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["chat", "chat-bindings", "environment", "environment-bindings", "context", "context-bindings"]
+members = ["chat", "chat-bindings", "environment", "environment-bindings", "context", "context-bindings", "model", "model-bindings"]
 
 [workspace.dependencies]
 wit-bindgen = "0.48.0"

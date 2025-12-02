@@ -1,5 +1,8 @@
 package inferlib:context;
 
 world context-provider {
+    // Import the model interface to use in our exported interface
+    import inferlib:model/models;
+    
     export inference;
 }

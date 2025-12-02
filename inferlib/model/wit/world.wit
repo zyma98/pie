@@ -1,0 +1,5 @@
+package inferlib:model;
+
+world model-provider {
+    export models;
+}

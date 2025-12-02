@@ -8,6 +8,8 @@ package inferlib:context;
 
 /// Interface for inference context management
 interface inference {
+    use inferlib:model/models.{model};
+
     /// Sampler configuration for token generation
     variant sampler-config {
         /// Greedy sampling (temperature = 0)
@@ -34,8 +36,8 @@ interface inference {
 
     /// An inference context resource that maintains conversation state and KV cache
     resource context {
-        /// Create a new context for the auto-selected model
-        constructor();
+        /// Create a new context for the specified model
+        constructor(model: borrow<model>);
 
         /// Fill the context with raw text (tokenizes and adds to pending)
         fill: func(text: string);
