@@ -1,0 +1,5 @@
+package inferlib:queue;
+
+world queue-provider {
+    export queues;
+}

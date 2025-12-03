@@ -7,14 +7,19 @@ wit_bindgen::generate!({
 
 use exports::inferlib::context::inference::{Guest, GuestContext, SamplerConfig, StopConfig};
 
-// Import the WIT model type for the constructor
-use inferlib::model::models::Model as WitModel;
+// Import the WIT model type for the constructor (also provides Tokenizer)
+use inferlib::model::models::{Model as WitModel, Tokenizer};
+
+// Import the WIT queue types
+use inferlib::queue::queues::Queue as WitQueue;
+
+// Import the WIT chat formatter
+use inferlib::chat::formatter::ChatFormatter;
 
 // Import types from the legacy library that Context depends on
 use inferlet::brle::Brle;
-use inferlet::forward::{Forward, KvPage};
 use inferlet::stop_condition::{ends_with_any, max_len, StopCondition};
-use inferlet::{api, ChatFormatter, Queue, Sampler, Tokenizer};
+use inferlet::Sampler;
 
 use std::cell::RefCell;
 use std::cmp::Ordering;
@@ -27,58 +32,9 @@ impl Guest for InferenceImpl {
     type Context = ContextImpl;
 }
 
-/// Internal Model struct that wraps the host API Model
-struct Model {
-    inner: Rc<api::Model>,
-}
-
-impl Model {
-    /// Create from the host API model
-    fn from_api(inner: api::Model) -> Self {
-        Model {
-            inner: Rc::new(inner),
-        }
-    }
-
-    /// Get the prompt template
-    pub fn get_prompt_template(&self) -> String {
-        self.inner.get_prompt_template()
-    }
-
-    /// Get the KV page size
-    pub fn get_kv_page_size(&self) -> u32 {
-        self.inner.get_kv_page_size()
-    }
-
-    /// Create a queue for this model using the legacy Queue
-    pub fn create_queue(&self) -> Queue {
-        // Use the legacy library's Model to create the queue
-        // This requires getting a legacy Model first
-        let model_name = self.inner.get_name();
-        let legacy_model = inferlet::get_model(&model_name).expect("Failed to get legacy model");
-        legacy_model.create_queue()
-    }
-
-    /// Get a tokenizer for this model using the legacy Tokenizer
-    pub fn get_tokenizer(&self) -> Tokenizer {
-        let model_name = self.inner.get_name();
-        let legacy_model = inferlet::get_model(&model_name).expect("Failed to get legacy model");
-        Tokenizer::new(&legacy_model)
-    }
-}
-
-impl Clone for Model {
-    fn clone(&self) -> Self {
-        Model {
-            inner: Rc::clone(&self.inner),
-        }
-    }
-}
-
 /// Internal Context struct that re-implements the legacy Context
 struct Context {
-    queue: Queue,
-    model: Model,
+    queue: WitQueue,
     tokenizer: Tokenizer,
     formatter: ChatFormatter,
 
@@ -90,7 +46,8 @@ struct Context {
 
     position_ids: Vec<u32>,
 
-    kv_pages: Vec<KvPage>,
+    // Now using raw KV page pointers instead of KvPage wrappers
+    kv_page_ptrs: Vec<u32>,
     kv_page_last_len: usize,
     kv_page_size: usize,
 
@@ -98,21 +55,29 @@ struct Context {
 }
 
 impl Context {
-    pub fn new(model: &Model) -> Self {
-        let queue = model.create_queue();
-        let kv_page_size = model.get_kv_page_size() as usize;
-        let tokenizer = model.get_tokenizer();
+    pub fn new(wit_model: &WitModel) -> Self {
+        let model_name = wit_model.get_name();
+        let queue = WitQueue::from_model_name(&model_name);
+        let kv_page_size = wit_model.get_kv_page_size() as usize;
+        let prompt_template = wit_model.get_prompt_template();
+
+        // Get the tokenizer directly from the model (no redundant model lookup)
+        let tokenizer = wit_model.get_tokenizer();
+
+        // Create the chat formatter with the model's prompt template
+        let formatter =
+            ChatFormatter::new(&prompt_template).expect("Failed to create chat formatter");
+
         Context {
             queue,
-            model: model.clone(),
             tokenizer,
-            formatter: ChatFormatter::new(),
+            formatter,
             token_ids: Vec::new(),
             token_ids_pending: Vec::new(),
             token_mask_pending: Vec::new(),
             token_mask_current: Brle::new(0),
             position_ids: Vec::new(),
-            kv_pages: Vec::new(),
+            kv_page_ptrs: Vec::new(),
             kv_page_last_len: 0,
             kv_page_size,
             begin_of_sequence: true,
@@ -154,27 +119,25 @@ impl Context {
     }
 
     pub fn fill_system(&mut self, text: &str) {
-        self.formatter.system(text);
-        self.flush_chat_messages2(false);
+        self.formatter.add_system(text);
+        self.flush_chat_messages(false);
     }
 
     pub fn fill_user(&mut self, text: &str) {
-        self.formatter.user(text);
-        self.flush_chat_messages2(true);
+        self.formatter.add_user(text);
+        self.flush_chat_messages(true);
     }
 
     pub fn fill_assistant(&mut self, text: &str) {
-        self.formatter.assistant(text);
-        self.flush_chat_messages2(false);
+        self.formatter.add_assistant(text);
+        self.flush_chat_messages(false);
     }
 
-    fn flush_chat_messages2(&mut self, add_generation_prompt: bool) {
+    fn flush_chat_messages(&mut self, add_generation_prompt: bool) {
         if self.formatter.has_messages() {
-            let p = self.formatter.render(
-                &self.model.get_prompt_template(),
-                add_generation_prompt,
-                self.begin_of_sequence,
-            );
+            let p = self
+                .formatter
+                .render(add_generation_prompt, self.begin_of_sequence);
             self.begin_of_sequence = false;
             self.formatter.clear();
             self.fill(&p);
@@ -187,10 +150,10 @@ impl Context {
             return;
         }
 
-        let current_tokens = if self.kv_pages.is_empty() {
+        let current_tokens = if self.kv_page_ptrs.is_empty() {
             self.kv_page_last_len
         } else {
-            (self.kv_pages.len() - 1) * self.kv_page_size + self.kv_page_last_len
+            (self.kv_page_ptrs.len() - 1) * self.kv_page_size + self.kv_page_last_len
         };
 
         // Safely calculate the new total number of tokens after the adjustment.
@@ -199,19 +162,22 @@ impl Context {
             None => panic!("Token count adjustment resulted in underflow"),
         };
 
-        let current_pages = self.kv_pages.len();
+        let current_pages = self.kv_page_ptrs.len();
         let required_pages = new_total_tokens.div_ceil(self.kv_page_size);
 
         match required_pages.cmp(&current_pages) {
             Ordering::Greater => {
                 // Grow: Allocate new pages if more are needed.
                 let new_pages_needed = required_pages - current_pages;
-                let new_kv_page_ids = self.queue.new_kv_pages(new_pages_needed);
-                self.kv_pages.extend(new_kv_page_ids);
+                let new_kv_page_ptrs = self.queue.allocate_kv_pages(new_pages_needed as u32);
+                self.kv_page_ptrs.extend(new_kv_page_ptrs);
             }
             Ordering::Less => {
                 // Shrink: Deallocate pages that are no longer needed.
-                let _ = self.kv_pages.split_off(required_pages);
+                let pages_to_free = self.kv_page_ptrs.split_off(required_pages);
+                if !pages_to_free.is_empty() {
+                    self.queue.deallocate_kv_pages(&pages_to_free);
+                }
             }
             Ordering::Equal => {
                 // No change in the number of pages is required.
@@ -232,7 +198,7 @@ impl Context {
     }
 
     /// Processes a batch of pending tokens to update the model's internal state.
-    pub async fn flush(&mut self) {
+    pub fn flush(&mut self) {
         if self.token_ids_pending.is_empty() {
             return;
         }
@@ -258,17 +224,17 @@ impl Context {
 
         let p = self.queue.create_forward_pass();
         p.input_tokens(&pending_token_ids, &position_ids);
-        p.kv_cache(&self.kv_pages, self.kv_page_last_len);
+        p.kv_cache(&self.kv_page_ptrs, self.kv_page_last_len as u32);
         p.attention_mask(&mask);
 
-        let _ = p.execute().await;
+        let _ = p.execute();
 
         self.token_ids.extend(pending_token_ids);
         self.position_ids.extend(&position_ids);
     }
 
     /// Performs a single, atomic autoregressive decoding step.
-    pub async fn decode_step(&mut self, sampler: &Sampler) -> u32 {
+    pub fn decode_step(&mut self, sampler: &Sampler) -> u32 {
         assert!(
             !self.token_ids_pending.is_empty(),
             "Must have at least one seed token"
@@ -289,7 +255,7 @@ impl Context {
         let p = self.queue.create_forward_pass();
 
         p.input_tokens(&pending_token_ids, &position_ids);
-        p.kv_cache(&self.kv_pages, self.kv_page_last_len);
+        p.kv_cache(&self.kv_page_ptrs, self.kv_page_last_len as u32);
         p.attention_mask(&mask);
 
         let output_idx = pending_token_ids.len() as u32 - 1;
@@ -321,7 +287,7 @@ impl Context {
             }
         }
 
-        let res = p.execute().await;
+        let res = p.execute();
 
         let sampled = match sampler {
             Sampler::Custom {
@@ -341,16 +307,12 @@ impl Context {
     }
 
     /// Generates text autoregressively until a stop condition is met.
-    pub async fn generate<S: StopCondition>(
-        &mut self,
-        sampler: Sampler,
-        stop_condition: S,
-    ) -> String {
+    pub fn generate<S: StopCondition>(&mut self, sampler: Sampler, stop_condition: S) -> String {
         let mut generated_token_ids = Vec::new();
 
         // The autoregressive generation loop
         loop {
-            let next_token_id = self.decode_step(&sampler).await;
+            let next_token_id = self.decode_step(&sampler);
 
             self.fill_token(next_token_id);
 
@@ -365,6 +327,15 @@ impl Context {
     }
 }
 
+impl Drop for Context {
+    fn drop(&mut self) {
+        // Deallocate all KV pages when the context is dropped
+        if !self.kv_page_ptrs.is_empty() {
+            self.queue.deallocate_kv_pages(&self.kv_page_ptrs);
+        }
+    }
+}
+
 // WIT interface wrapper
 struct ContextImpl {
     inner: Rc<RefCell<Context>>,
@@ -372,12 +343,7 @@ struct ContextImpl {
 
 impl GuestContext for ContextImpl {
     fn new(wit_model: &WitModel) -> Self {
-        // Get the model name from the WIT model and look up the host model
-        let model_name = wit_model.get_name();
-        let api_model = api::runtime::get_model(&model_name).expect("Failed to get model by name");
-        let model = Model::from_api(api_model);
-
-        let inner = Context::new(&model);
+        let inner = Context::new(wit_model);
         ContextImpl {
             inner: Rc::new(RefCell::new(inner)),
         }
@@ -416,22 +382,11 @@ impl GuestContext for ContextImpl {
         let stop_cond =
             max_len(stop_config.max_tokens as usize).or(ends_with_any(stop_config.eos_sequences));
 
-        // Clone the Rc to move into the async block
-        let inner = Rc::clone(&self.inner);
-
-        // Run the async generate in a blocking context
-        inferlet::wstd::runtime::block_on(async move {
-            inner.borrow_mut().generate(sampler, stop_cond).await
-        })
+        self.inner.borrow_mut().generate(sampler, stop_cond)
     }
 
     fn flush(&self) {
-        // Clone the Rc to move into the async block
-        let inner = Rc::clone(&self.inner);
-
-        inferlet::wstd::runtime::block_on(async move {
-            inner.borrow_mut().flush().await;
-        });
+        self.inner.borrow_mut().flush();
     }
 
     fn get_text(&self) -> String {

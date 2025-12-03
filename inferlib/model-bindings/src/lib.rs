@@ -6,7 +6,7 @@
 //! ## Usage
 //!
 //! ```rust,no_run
-//! use inferlib_model_bindings::Model;
+//! use inferlib_model_bindings::{Model, Tokenizer};
 //!
 //! // Get the auto-selected model
 //! let model = Model::get_auto();
@@ -15,6 +15,11 @@
 //! let name = model.get_name();
 //! let template = model.get_prompt_template();
 //! let eos_tokens = model.eos_tokens();
+//!
+//! // Get a tokenizer from the model
+//! let tokenizer = model.get_tokenizer();
+//! let tokens = tokenizer.tokenize("Hello, world!");
+//! let text = tokenizer.detokenize(&tokens);
 //! ```
 
 // Generate WIT bindings
@@ -27,7 +32,7 @@ wit_bindgen::generate!({
 });
 
 // Re-export the main types for convenience
-pub use self::inferlib::model::models::Model;
+pub use self::inferlib::model::models::{Model, Tokenizer};
 
 // Re-export the module structure for advanced usage
 pub mod model {

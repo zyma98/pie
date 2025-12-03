@@ -2,7 +2,14 @@ package inferlib:context;
 
 world context-provider {
     // Import the model interface to use in our exported interface
+    // (Model also provides tokenizer functionality via get_tokenizer)
     import inferlib:model/models;
+    
+    // Import the queue interface for forward pass execution
+    import inferlib:queue/queues;
+    
+    // Import the chat formatter interface
+    import inferlib:chat/formatter;
     
     export inference;
 }

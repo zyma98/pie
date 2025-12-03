@@ -4,7 +4,7 @@ wit_bindgen::generate!({
     world: "model-provider",
 });
 
-use exports::inferlib::model::models::{Guest, GuestModel};
+use exports::inferlib::model::models::{Guest, GuestModel, GuestTokenizer};
 
 // Import types from the legacy library to access the host API
 use inferlet::api;
@@ -16,6 +16,7 @@ struct ModelsImpl;
 
 impl Guest for ModelsImpl {
     type Model = ModelImpl;
+    type Tokenizer = TokenizerImpl;
 }
 
 /// Internal Model struct that re-implements the legacy Model
@@ -109,6 +110,14 @@ impl Model {
         self.inner.get_kv_page_size()
     }
 
+    /// Gets a tokenizer for this model
+    pub fn get_tokenizer(&self) -> Tokenizer {
+        let api_tokenizer = api::tokenize::get_tokenizer(&self.inner);
+        Tokenizer {
+            inner: Rc::new(api_tokenizer),
+        }
+    }
+
     /// Get the inner API model reference (for internal use by other inferlib components)
     pub fn inner(&self) -> &Rc<api::Model> {
         &self.inner
@@ -123,7 +132,29 @@ impl Clone for Model {
     }
 }
 
-// WIT interface wrapper
+/// Internal Tokenizer struct that wraps the host API Tokenizer
+pub struct Tokenizer {
+    inner: Rc<api::tokenize::Tokenizer>,
+}
+
+impl Tokenizer {
+    /// Converts a string of text into a sequence of token IDs
+    pub fn tokenize(&self, text: &str) -> Vec<u32> {
+        self.inner.tokenize(text)
+    }
+
+    /// Converts a sequence of token IDs back into a human-readable string
+    pub fn detokenize(&self, tokens: &[u32]) -> String {
+        self.inner.detokenize(tokens)
+    }
+
+    /// Retrieves the entire vocabulary of the tokenizer
+    pub fn get_vocabs(&self) -> (Vec<u32>, Vec<Vec<u8>>) {
+        self.inner.get_vocabs()
+    }
+}
+
+// WIT interface wrapper for Model
 struct ModelImpl {
     inner: RefCell<Model>,
 }
@@ -178,6 +209,32 @@ impl GuestModel for ModelImpl {
 
     fn get_kv_page_size(&self) -> u32 {
         self.inner.borrow().get_kv_page_size()
+    }
+
+    fn get_tokenizer(&self) -> exports::inferlib::model::models::Tokenizer {
+        let tokenizer = self.inner.borrow().get_tokenizer();
+        exports::inferlib::model::models::Tokenizer::new(TokenizerImpl {
+            inner: RefCell::new(tokenizer),
+        })
+    }
+}
+
+// WIT interface wrapper for Tokenizer
+struct TokenizerImpl {
+    inner: RefCell<Tokenizer>,
+}
+
+impl GuestTokenizer for TokenizerImpl {
+    fn tokenize(&self, text: String) -> Vec<u32> {
+        self.inner.borrow().tokenize(&text)
+    }
+
+    fn detokenize(&self, tokens: Vec<u32>) -> String {
+        self.inner.borrow().detokenize(&tokens)
+    }
+
+    fn get_vocabs(&self) -> (Vec<u32>, Vec<Vec<u8>>) {
+        self.inner.borrow().get_vocabs()
     }
 }
 
