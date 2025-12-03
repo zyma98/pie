@@ -16,8 +16,10 @@ use inferlib::queue::queues::Queue as WitQueue;
 // Import the WIT chat formatter
 use inferlib::chat::formatter::ChatFormatter;
 
+// Import the WIT BRLE encoding
+use inferlib::brle::encoding::Brle;
+
 // Import types from the legacy library that Context depends on
-use inferlet::brle::Brle;
 use inferlet::stop_condition::{ends_with_any, max_len, StopCondition};
 use inferlet::Sampler;
 
@@ -213,7 +215,7 @@ impl Context {
         let mask = self
             .token_mask_pending
             .drain(..process_count)
-            .map(|b| b.buffer)
+            .map(|b| b.get_buffer())
             .collect::<Vec<Vec<u32>>>();
 
         let last_pos = self.position_ids.last().map(|&p| p + 1).unwrap_or(0);
@@ -249,7 +251,7 @@ impl Context {
 
         let mask = mem::take(&mut self.token_mask_pending)
             .into_iter()
-            .map(|brie| brie.buffer)
+            .map(|brie| brie.get_buffer())
             .collect::<Vec<Vec<u32>>>();
 
         let p = self.queue.create_forward_pass();

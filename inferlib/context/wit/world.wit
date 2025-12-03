@@ -11,5 +11,8 @@ world context-provider {
     // Import the chat formatter interface
     import inferlib:chat/formatter;
     
+    // Import the BRLE encoding interface
+    import inferlib:brle/encoding;
+    
     export inference;
 }
