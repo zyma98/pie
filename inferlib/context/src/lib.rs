@@ -19,10 +19,6 @@ use inferlib::chat::formatter::ChatFormatter;
 // Import the WIT BRLE encoding
 use inferlib::brle::encoding::Brle;
 
-// Import types from the legacy library that Context depends on
-use inferlet::stop_condition::{ends_with_any, max_len, StopCondition};
-use inferlet::Sampler;
-
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::mem;
@@ -236,7 +232,7 @@ impl Context {
     }
 
     /// Performs a single, atomic autoregressive decoding step.
-    pub fn decode_step(&mut self, sampler: &Sampler) -> u32 {
+    pub fn decode_step(&mut self, sampler: &SamplerConfig) -> u32 {
         assert!(
             !self.token_ids_pending.is_empty(),
             "Must have at least one seed token"
@@ -262,45 +258,28 @@ impl Context {
 
         let output_idx = pending_token_ids.len() as u32 - 1;
         match sampler {
-            Sampler::Custom {
-                temperature,
-                sampler: _sampler,
-            } => {
-                p.output_distributions(&[output_idx], *temperature, None);
+            SamplerConfig::Greedy => {
+                p.output_tokens(&[output_idx], 0.0);
             }
-            Sampler::Multinomial { temperature } => {
+            SamplerConfig::Multinomial(temperature) => {
                 p.output_tokens(&[output_idx], *temperature);
             }
-            Sampler::TopP { temperature, top_p } => {
+            SamplerConfig::TopP((temperature, top_p)) => {
                 p.output_tokens_top_p(&[output_idx], *temperature, *top_p);
             }
-            Sampler::TopK { temperature, top_k } => {
+            SamplerConfig::TopK((temperature, top_k)) => {
                 p.output_tokens_top_k(&[output_idx], *temperature, *top_k);
             }
-            Sampler::MinP { temperature, min_p } => {
+            SamplerConfig::MinP((temperature, min_p)) => {
                 p.output_tokens_min_p(&[output_idx], *temperature, *min_p);
             }
-            Sampler::TopKTopP {
-                temperature,
-                top_k,
-                top_p,
-            } => {
+            SamplerConfig::TopKTopP((temperature, top_k, top_p)) => {
                 p.output_tokens_top_k_top_p(&[output_idx], *temperature, *top_k, *top_p);
             }
         }
 
         let res = p.execute();
-
-        let sampled = match sampler {
-            Sampler::Custom {
-                temperature: _temperature,
-                sampler,
-            } => {
-                let dist = res.distributions.unwrap().into_iter().next().unwrap();
-                sampler.sample(&dist.ids, &dist.probs)
-            }
-            _ => res.tokens.unwrap().into_iter().next().unwrap(),
-        };
+        let sampled = res.tokens.unwrap().into_iter().next().unwrap();
 
         self.token_ids.extend(pending_token_ids);
         self.position_ids.extend(position_ids);
@@ -309,18 +288,25 @@ impl Context {
     }
 
     /// Generates text autoregressively until a stop condition is met.
-    pub fn generate<S: StopCondition>(&mut self, sampler: Sampler, stop_condition: S) -> String {
+    pub fn generate(&mut self, sampler: &SamplerConfig, stop_config: &StopConfig) -> String {
         let mut generated_token_ids = Vec::new();
 
         // The autoregressive generation loop
         loop {
-            let next_token_id = self.decode_step(&sampler);
+            let next_token_id = self.decode_step(sampler);
 
             self.fill_token(next_token_id);
 
             generated_token_ids.push(next_token_id);
 
-            if stop_condition.check(&generated_token_ids) {
+            // Check stop conditions: max length or any EOS sequence
+            let should_stop = generated_token_ids.len() >= stop_config.max_tokens as usize
+                || stop_config
+                    .eos_sequences
+                    .iter()
+                    .any(|seq| generated_token_ids.ends_with(seq));
+
+            if should_stop {
                 break;
             }
         }
@@ -368,23 +354,9 @@ impl GuestContext for ContextImpl {
     }
 
     fn generate(&self, sampler_config: SamplerConfig, stop_config: StopConfig) -> String {
-        // Convert WIT sampler config to inferlet Sampler
-        let sampler = match sampler_config {
-            SamplerConfig::Greedy => Sampler::greedy(),
-            SamplerConfig::Multinomial(temp) => Sampler::Multinomial { temperature: temp },
-            SamplerConfig::TopP((temp, top_p)) => Sampler::top_p(temp, top_p),
-            SamplerConfig::TopK((temp, top_k)) => Sampler::top_k(temp, top_k),
-            SamplerConfig::MinP((temp, min_p)) => Sampler::min_p(temp, min_p),
-            SamplerConfig::TopKTopP((temp, top_k, top_p)) => {
-                Sampler::top_k_top_p(temp, top_k, top_p)
-            }
-        };
-
-        // Convert WIT stop config to inferlet stop condition
-        let stop_cond =
-            max_len(stop_config.max_tokens as usize).or(ends_with_any(stop_config.eos_sequences));
-
-        self.inner.borrow_mut().generate(sampler, stop_cond)
+        self.inner
+            .borrow_mut()
+            .generate(&sampler_config, &stop_config)
     }
 
     fn flush(&self) {
