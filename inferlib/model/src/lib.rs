@@ -1,13 +1,17 @@
-// Generate WIT bindings for exports
+// Generate WIT bindings for both imports and exports
 wit_bindgen::generate!({
     path: "wit",
     world: "model-provider",
+    generate_all,
 });
 
 use exports::inferlib::model::models::{Guest, GuestModel, GuestTokenizer};
 
-// Import types from the legacy library to access the host API
-use inferlet::api;
+// Import host interfaces from the generated WIT bindings
+use crate::inferlet::core::common::Model as HostModel;
+use crate::inferlet::core::runtime::{get_all_models, get_model};
+use crate::inferlet::core::tokenize::{get_tokenizer, Tokenizer as HostTokenizer};
+
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -19,14 +23,14 @@ impl Guest for ModelsImpl {
     type Tokenizer = TokenizerImpl;
 }
 
-/// Internal Model struct that re-implements the legacy Model
+/// Internal Model struct that wraps the host model
 pub struct Model {
-    inner: Rc<api::Model>,
+    inner: Rc<HostModel>,
 }
 
 impl Model {
-    /// Create a new Model from a host API model
-    fn from_api(inner: api::Model) -> Self {
+    /// Create a new Model from a host model
+    fn from_host(inner: HostModel) -> Self {
         Model {
             inner: Rc::new(inner),
         }
@@ -34,24 +38,24 @@ impl Model {
 
     /// Get a model by name
     pub fn get_by_name(name: &str) -> Option<Self> {
-        api::runtime::get_model(name).map(|inner| Model::from_api(inner))
+        get_model(name).map(|inner| Model::from_host(inner))
     }
 
     /// Get the auto-selected model (first available)
     pub fn get_auto() -> Self {
-        let models = api::runtime::get_all_models();
+        let models = get_all_models();
         if models.is_empty() {
             panic!("No models available");
         }
         let model_name = &models[0];
-        api::runtime::get_model(model_name)
-            .map(|inner| Model::from_api(inner))
+        get_model(model_name)
+            .map(|inner| Model::from_host(inner))
             .expect("Failed to get first model")
     }
 
     /// Get all available model names
     pub fn get_all_names() -> Vec<String> {
-        api::runtime::get_all_models()
+        get_all_models()
     }
 
     /// Returns the model's name (e.g. "llama-3.1-8b-instruct")
@@ -92,7 +96,7 @@ impl Model {
 
     /// Returns EOS token sequences
     pub fn eos_tokens(&self) -> Vec<Vec<u32>> {
-        let tokenizer = api::tokenize::get_tokenizer(&self.inner);
+        let tokenizer = get_tokenizer(&self.inner);
         self.inner
             .get_stop_tokens()
             .into_iter()
@@ -112,14 +116,14 @@ impl Model {
 
     /// Gets a tokenizer for this model
     pub fn get_tokenizer(&self) -> Tokenizer {
-        let api_tokenizer = api::tokenize::get_tokenizer(&self.inner);
+        let host_tokenizer = get_tokenizer(&self.inner);
         Tokenizer {
-            inner: Rc::new(api_tokenizer),
+            inner: Rc::new(host_tokenizer),
         }
     }
 
-    /// Get the inner API model reference (for internal use by other inferlib components)
-    pub fn inner(&self) -> &Rc<api::Model> {
+    /// Get the inner host model reference (for internal use by other inferlib components)
+    pub fn inner(&self) -> &Rc<HostModel> {
         &self.inner
     }
 }
@@ -132,9 +136,9 @@ impl Clone for Model {
     }
 }
 
-/// Internal Tokenizer struct that wraps the host API Tokenizer
+/// Internal Tokenizer struct that wraps the host tokenizer
 pub struct Tokenizer {
-    inner: Rc<api::tokenize::Tokenizer>,
+    inner: Rc<HostTokenizer>,
 }
 
 impl Tokenizer {

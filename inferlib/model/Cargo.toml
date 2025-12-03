@@ -9,4 +9,3 @@ name = "inferlib_model"
 
 [dependencies]
 wit-bindgen = { workspace = true }
-inferlet = { path = "../../inferlet" }

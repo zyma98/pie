@@ -1,5 +1,10 @@
 package inferlib:model;
 
 world model-provider {
+    // Import host interfaces for model access
+    import inferlet:core/common;
+    import inferlet:core/runtime;
+    import inferlet:core/tokenize;
+    
     export models;
 }
