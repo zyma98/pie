@@ -11,6 +11,7 @@ inferlib-chat-bindings = { path = "../../inferlib/chat-bindings" }
 inferlib-environment-bindings = { path = "../../inferlib/environment-bindings" }
 inferlib-context-bindings = { path = "../../inferlib/context-bindings" }
 inferlib-run-bindings = { path = "../../inferlib/run-bindings" }
+inferlib-macros = { path = "../../inferlib-macros" }
 futures = "0.3.31"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
