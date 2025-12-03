@@ -1,5 +1,12 @@
 package inferlib:queue;
 
 world queue-provider {
+    // Import host interfaces
+    import inferlet:core/common;
+    import inferlet:core/runtime;
+    import inferlet:core/forward;
+    import inferlet:adapter/common;
+    import inferlet:zo/evolve;
+    
     export queues;
 }

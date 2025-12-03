@@ -9,4 +9,5 @@ name = "inferlib_queue"
 
 [dependencies]
 wit-bindgen = { workspace = true }
-inferlet = { path = "../../inferlet" }
+wstd = "0.5.6"
+wasip2 = "1.0.1"
