@@ -4,6 +4,7 @@ members = [
     "constrained-decoding",
     "graph-of-thought",
     "helloworld",
+    "hierarchical-attention",
     "image-fetch",
     "kvs",
     "output-validation",
