@@ -11,6 +11,7 @@ members = [
     "helloworld",
     "hierarchical-attention",
     "image-fetch",
+    "jacobi-decoding",
     "kvs",
     "output-validation",
     "parallel-generation",
