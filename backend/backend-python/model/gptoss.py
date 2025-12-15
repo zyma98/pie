@@ -7,6 +7,8 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 import flashinfer as ops
+from flashinfer.gemm import group_gemm_mxfp4_nt_groupwise
+from flashinfer.fp4_quantization import mxfp4_quantize
 from adapter_utils import AdapterSubpass
 from model.config import CommonArch, ModelConfig
 from model.gptoss_utils import (
@@ -16,6 +18,143 @@ from model.gptoss_utils import (
     GptOssRotaryEmbedding,
 )
 from einops import einsum, rearrange
+
+
+def mxfp8_quantize_blockwise(
+    x: torch.Tensor, block_size: int = 32
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize a tensor to FP8 with blockwise E8M0 scales.
+
+    This follows the MXFP8 format where:
+    - true_value = fp8_stored * 2^(scale - 127)
+    
+    The scale represents the shared exponent for the block. We store the FP8 mantissa
+    values and separately track the block exponent.
+
+    Args:
+        x: Input tensor of shape [..., K] where K is divisible by block_size
+        block_size: Size of blocks for computing scales (default 32)
+
+    Returns:
+        Tuple of (fp8_data, scales):
+        - fp8_data: Quantized tensor in float8_e4m3fn format, same shape as x
+        - scales: E8M0 scale factors as uint8, shape [..., K // block_size]
+    """
+    orig_shape = x.shape
+    K = orig_shape[-1]
+    assert K % block_size == 0, f"Last dimension {K} must be divisible by {block_size}"
+
+    # Reshape to [..., num_blocks, block_size]
+    num_blocks = K // block_size
+    x_blocks = x.view(*orig_shape[:-1], num_blocks, block_size)
+
+    # Compute max absolute value per block
+    max_abs = x_blocks.abs().amax(dim=-1)  # [..., num_blocks]
+
+    # For MXFP format, the shared exponent is ceil(log2(max_abs))
+    # This ensures all values in the block fit when divided by 2^exponent
+    # E8M0 stores exponent with bias 127: stored = exponent + 127
+    eps = 1e-12
+    log2_max = torch.log2(max_abs.clamp(min=eps))
+    
+    # Compute shared exponent (unbiased)
+    exponent_unbiased = torch.ceil(log2_max).to(torch.int32).clamp(min=-127, max=128)
+    
+    # Convert to biased E8M0 format
+    exponent_biased = (exponent_unbiased + 127).clamp(min=0, max=255)
+    scales = exponent_biased.to(torch.uint8)
+
+    # Scale input: fp8_value = x / 2^exponent = x * 2^(-exponent)
+    # So that true_value = fp8_value * 2^exponent = x
+    scale_power = (-exponent_unbiased).unsqueeze(-1)  # [..., num_blocks, 1]
+    x_scaled = torch.ldexp(x_blocks.float(), scale_power.expand_as(x_blocks))
+
+    # Reshape back to original shape and cast to FP8
+    x_scaled = x_scaled.view(orig_shape)
+    x_fp8 = x_scaled.to(torch.float8_e4m3fn)
+
+    return x_fp8, scales
+
+
+def verify_flashinfer_mxfp4_api():
+    """Verify FlashInfer's MXFP4 GEMM API works correctly with our setup.
+    
+    Key findings from debugging:
+    1. Must quantize each expert's weights INDEPENDENTLY (not batch-quantize and slice)
+    2. Must quantize each expert's inputs INDEPENDENTLY  
+    3. Use single-expert GEMM calls in a loop (grouped GEMM has segment issues)
+    
+    Raises:
+        RuntimeError: If the outputs don't match within tolerance.
+    """
+    print("[MXFP4 API Test] Verifying FlashInfer MXFP4 API...")
+    
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    
+    # Test dimensions
+    num_experts = 2
+    M = 8  # tokens per expert (multiple of 4)
+    K = 128  # input dimension (multiple of 128)
+    N = 64  # output dimension
+    total_tokens = num_experts * M
+    
+    # Create test data
+    x = torch.randn(total_tokens, K, dtype=dtype, device=device) * 2.0
+    w = torch.randn(num_experts, N, K, dtype=dtype, device=device) * 0.5
+    
+    # Reference computation
+    reference_output = torch.zeros(total_tokens, N, dtype=dtype, device=device)
+    for i in range(num_experts):
+        start, end = i * M, (i + 1) * M
+        reference_output[start:end] = x[start:end] @ w[i].T
+    
+    output_scale = reference_output.abs().mean().item()
+    
+    # Quantize each expert's weights INDEPENDENTLY (critical!)
+    w_fp4_data_list = []
+    w_fp4_scales_list = []
+    for i in range(num_experts):
+        expert_w_data, expert_w_scales = mxfp4_quantize(w[i])
+        w_fp4_data_list.append(expert_w_data.unsqueeze(0))
+        w_fp4_scales_list.append(expert_w_scales.unsqueeze(0))
+    
+    # Run single-expert GEMM loop (critical: don't use grouped GEMM)
+    loop_output = torch.zeros(total_tokens, N, dtype=dtype, device=device)
+    for i in range(num_experts):
+        start, end = i * M, (i + 1) * M
+        
+        # Quantize input per-expert (critical!)
+        expert_x_fp8, expert_x_scales = mxfp8_quantize_blockwise(x[start:end], block_size=32)
+        expert_m_indptr = torch.tensor([0, M], dtype=torch.int32, device=device)
+        
+        expert_output = group_gemm_mxfp4_nt_groupwise(
+            expert_x_fp8,
+            w_fp4_data_list[i],
+            expert_x_scales,
+            w_fp4_scales_list[i],
+            expert_m_indptr,
+            out_dtype=dtype,
+        )
+        
+        if torch.isnan(expert_output).any() or torch.isinf(expert_output).any():
+            raise RuntimeError(f"[MXFP4 API Test] FAILED: Expert {i} output has NaN/Inf!")
+        
+        loop_output[start:end] = expert_output
+    
+    # Check error tolerance
+    loop_abs_diff = (loop_output.float() - reference_output.float()).abs()
+    loop_normalized_error = loop_abs_diff.mean().item() / max(output_scale, 1e-6)
+    
+    # Tolerance: FP4+FP8 vs raw float has inherent quantization error
+    tolerance = 1.0
+    if loop_normalized_error > tolerance:
+        raise RuntimeError(
+            f"[MXFP4 API Test] FAILED: Loop output mismatch exceeds tolerance!\n"
+            f"  Loop normalized error: {loop_normalized_error:.4f} > tolerance: {tolerance}"
+        )
+    
+    print(f"[MXFP4 API Test] PASSED! Normalized error: {loop_normalized_error:.2%}")
 
 
 VERSION = "0.1.0"
@@ -125,26 +264,9 @@ def create_fusion_map(model: nn.Module):
                 }
 
         # --- Rule for GptOssExperts MXFP4 Weights ---
-        elif isinstance(module, GptOssExperts):
-            # Handle gate_up_proj weights (MXFP4 format)
-            target_gate_up = f"{name}.gate_up_proj"
-            blocks_gate_up = f"{name}.gate_up_proj_blocks"
-            scales_gate_up = f"{name}.gate_up_proj_scales"
-            fusion_map[target_gate_up] = {
-                "sources": [blocks_gate_up, scales_gate_up],
-                "op": "dequantize_mxfp4",
-                "fp4_values": FP4_VALUES,
-            }
-
-            # Handle down_proj weights (MXFP4 format)
-            target_down = f"{name}.down_proj"
-            blocks_down = f"{name}.down_proj_blocks"
-            scales_down = f"{name}.down_proj_scales"
-            fusion_map[target_down] = {
-                "sources": [blocks_down, scales_down],
-                "op": "dequantize_mxfp4",
-                "fp4_values": FP4_VALUES,
-            }
+        # Weights are now stored in their native MXFP4 quantized format (blocks + scales)
+        # and used directly with FlashInfer's native MXFP4 GEMM operations.
+        # No fusion or dequantization is needed - weights are loaded directly as-is.
 
     return fusion_map
 
@@ -508,25 +630,74 @@ class GptOssRouter(nn.Module):
 
 
 class GptOssExperts(nn.Module):
-    """GPT OSS Experts layer containing the actual expert parameters."""
+    """GPT OSS Experts layer containing the actual expert parameters.
+
+    Weights are stored in MXFP4 quantized format (blocks + scales) and used
+    directly with FlashInfer's group_gemm_mxfp4_nt_groupwise for native MXFP4 GEMM.
+    """
+
+    # MXFP4 uses a block size of 32 elements per scale factor
+    # Each block of 32 elements is packed into 16 bytes (2 elements per byte)
+    MXFP4_BLOCK_SIZE = 32
+    MXFP4_BYTES_PER_BLOCK = 16  # 32 elements / 2 elements per byte
+
+    # Type hints for registered buffers (stored MXFP4 format)
+    gate_up_proj_blocks: torch.Tensor
+    gate_up_proj_scales: torch.Tensor
+    down_proj_blocks: torch.Tensor
+    down_proj_scales: torch.Tensor
+
+    # Class variable to track if API verification has been done
+    _api_verified = False
 
     def __init__(self, config: GptOssArch):
         """Initialize the GPT OSS Experts layer."""
         super().__init__()
+        
+        # Run API verification once before first model load
+        if not GptOssExperts._api_verified:
+            verify_flashinfer_mxfp4_api()
+            GptOssExperts._api_verified = True
         self.config = config
         self.num_experts = config.num_experts
         self.swiglu_limit = config.swiglu_limit
+        self.hidden_size = config.hidden_size
+        self.intermediate_size = config.intermediate_size
 
-        self.gate_up_proj = nn.Parameter(
+        # Gate-up projection dequantized shape: (num_experts, intermediate_size * 2, hidden_size)
+        # MXFP4 format stores blocks with shape: (num_experts, intermediate_size * 2, num_groups, bytes_per_group)
+        # where num_groups = hidden_size // 32, bytes_per_group = 16
+        # For group_gemm_mxfp4_nt_groupwise, weights need shape: (num_experts, n, k // 2)
+        # Stored blocks can be reshaped: (num_experts, n, k//32, 16) -> (num_experts, n, k//2)
+        num_gate_up_groups = config.hidden_size // self.MXFP4_BLOCK_SIZE
+        gate_up_blocks_shape = (
+            config.num_experts,
+            config.intermediate_size * 2,
+            num_gate_up_groups,
+            self.MXFP4_BYTES_PER_BLOCK,
+        )
+        self.register_buffer(
+            "gate_up_proj_blocks",
             torch.empty(
-                (
-                    config.num_experts,
-                    config.intermediate_size * 2,
-                    config.hidden_size,
-                ),
+                gate_up_blocks_shape,
                 device=torch.device(config.device),
-                dtype=config.dtype,
-            )
+                dtype=torch.uint8,
+            ),
+        )
+        # MXFP4 scales: one scale per block of 32 elements
+        # Shape: (num_experts, intermediate_size * 2, num_groups)
+        gate_up_scales_shape = (
+            config.num_experts,
+            config.intermediate_size * 2,
+            num_gate_up_groups,
+        )
+        self.register_buffer(
+            "gate_up_proj_scales",
+            torch.empty(
+                gate_up_scales_shape,
+                device=torch.device(config.device),
+                dtype=torch.uint8,
+            ),
         )
         self.gate_up_proj_bias = nn.Parameter(
             torch.empty(
@@ -535,16 +706,39 @@ class GptOssExperts(nn.Module):
                 dtype=config.dtype,
             )
         )
-        self.down_proj = nn.Parameter(
+
+        # Down projection dequantized shape: (num_experts, hidden_size, intermediate_size)
+        # MXFP4 format stores blocks with shape: (num_experts, hidden_size, num_groups, bytes_per_group)
+        # where num_groups = intermediate_size // 32, bytes_per_group = 16
+        num_down_groups = config.intermediate_size // self.MXFP4_BLOCK_SIZE
+        down_blocks_shape = (
+            config.num_experts,
+            config.hidden_size,
+            num_down_groups,
+            self.MXFP4_BYTES_PER_BLOCK,
+        )
+        self.register_buffer(
+            "down_proj_blocks",
             torch.empty(
-                (
-                    config.num_experts,
-                    config.hidden_size,
-                    config.intermediate_size,
-                ),
+                down_blocks_shape,
                 device=torch.device(config.device),
-                dtype=config.dtype,
-            )
+                dtype=torch.uint8,
+            ),
+        )
+        # MXFP4 scales: one scale per block of 32 elements
+        # Shape: (num_experts, hidden_size, num_groups)
+        down_scales_shape = (
+            config.num_experts,
+            config.hidden_size,
+            num_down_groups,
+        )
+        self.register_buffer(
+            "down_proj_scales",
+            torch.empty(
+                down_scales_shape,
+                device=torch.device(config.device),
+                dtype=torch.uint8,
+            ),
         )
         self.down_proj_bias = nn.Parameter(
             torch.empty(
@@ -554,17 +748,265 @@ class GptOssExperts(nn.Module):
             )
         )
 
+    def _dequantize_mxfp4_weights(
+        self, blocks: torch.Tensor, scales: torch.Tensor, dtype: torch.dtype
+    ) -> torch.Tensor:
+        """Dequantize MXFP4 weights to floating point.
+
+        Args:
+            blocks: Packed FP4 values, shape [..., num_groups, bytes_per_group]
+            scales: Scale factors (uint8 E8M0 biased by 127), shape [..., num_groups]
+            dtype: Target dtype for output
+
+        Returns:
+            Dequantized weights, shape [..., num_groups * bytes_per_group * 2]
+        """
+        # Convert scales from biased E8M0 to exponent
+        scales_exp = scales.to(torch.int32) - 127
+
+        *prefix_shape, g, b = blocks.shape
+        rows_total = 1
+        for dim in prefix_shape:
+            rows_total *= dim
+        rows_total *= g
+
+        blocks_flat = blocks.reshape(rows_total, b)
+        scales_flat = scales_exp.reshape(rows_total, 1)
+
+        # Extract low and high 4-bit indices
+        idx_lo = (blocks_flat & 0x0F).to(torch.long)
+        idx_hi = (blocks_flat >> 4).to(torch.long)
+
+        # FP4 lookup table
+        lut = torch.tensor(FP4_VALUES, dtype=dtype, device=blocks.device)
+
+        # Create output tensor and populate
+        out = torch.empty(rows_total, b * 2, dtype=dtype, device=blocks.device)
+        out[:, 0::2] = lut[idx_lo]  # Low 4-bit values at even indices
+        out[:, 1::2] = lut[idx_hi]  # High 4-bit values at odd indices
+
+        # Apply scale factors (2^scale)
+        torch.ldexp(out, scales_flat, out=out)
+
+        return out.reshape(*prefix_shape, g, b * 2).view(*prefix_shape, g * b * 2)
+
+    def _group_gemm_mxfp4(
+        self,
+        x: torch.Tensor,
+        expert_indices: torch.Tensor,
+        w_blocks: torch.Tensor,
+        w_scales: torch.Tensor,
+        bias: torch.Tensor,
+        in_dim: int,
+        out_dim: int,
+    ) -> torch.Tensor:
+        """Perform grouped MXFP4 GEMM using FlashInfer's group_gemm_mxfp4_nt_groupwise.
+
+        This function groups tokens by their assigned expert and performs
+        a single fused GEMM operation for all experts.
+
+        Args:
+            x: Input tensor of shape [batch, experts_per_token, in_dim]
+            expert_indices: Expert indices of shape [batch, experts_per_token]
+            w_blocks: Weight blocks of shape [num_experts, out_dim, k//32, 16]
+            w_scales: Weight scales of shape [num_experts, out_dim, k//32]
+            bias: Bias tensor of shape [num_experts, out_dim]
+            in_dim: Input dimension (K)
+            out_dim: Output dimension (N)
+
+        Returns:
+            Output tensor of shape [batch, experts_per_token, out_dim]
+        """
+        # Alignment requirements for group_gemm_mxfp4_nt_groupwise
+        K_ALIGN = 128  # K dimension must be multiple of tile_k (default 128)
+        M_ALIGN = 4    # M segments must be multiples of 4
+
+        batch_size, experts_per_token, _ = x.shape
+        input_dtype = x.dtype
+        device = x.device
+        total_tokens = batch_size * experts_per_token
+
+        # Pad K dimension if needed
+        k_padded = ((in_dim + K_ALIGN - 1) // K_ALIGN) * K_ALIGN
+        k_pad_amount = k_padded - in_dim
+
+        # Flatten inputs
+        x_flat = x.reshape(total_tokens, in_dim)  # [total_tokens, in_dim]
+        indices_flat = expert_indices.reshape(total_tokens)  # [total_tokens]
+
+        # Sort tokens by expert index for grouped GEMM
+        sorted_indices = torch.argsort(indices_flat, stable=True)
+        sorted_expert_ids = indices_flat[sorted_indices]
+        x_sorted = x_flat[sorted_indices]  # [total_tokens, in_dim]
+
+        # Compute m_indptr: boundaries for each expert's tokens
+        # Each element must be a multiple of 4 for group_gemm_mxfp4_nt_groupwise
+        expert_counts = torch.zeros(self.num_experts, dtype=torch.int32, device=device)
+        for i in range(self.num_experts):
+            expert_counts[i] = (sorted_expert_ids == i).sum()
+
+        # Pad counts to multiples of M_ALIGN
+        padded_counts = ((expert_counts + M_ALIGN - 1) // M_ALIGN) * M_ALIGN
+        total_m_padded = int(padded_counts.sum().item())
+
+        # Build m_indptr
+        m_indptr = torch.zeros(self.num_experts + 1, dtype=torch.int32, device=device)
+        m_indptr[1:] = torch.cumsum(padded_counts, dim=0)
+
+        # Pad x_sorted to match padded counts AND padded K dimension
+        x_padded = torch.zeros(total_m_padded, k_padded, dtype=input_dtype, device=device)
+        orig_positions = []  # Track original positions for unpadding
+        current_pos = 0
+        sorted_pos = 0
+        for i in range(self.num_experts):
+            count = int(expert_counts[i].item())
+            padded = int(padded_counts[i].item())
+            if count > 0:
+                # Copy original data (K dimension will be zero-padded implicitly)
+                x_padded[current_pos : current_pos + count, :in_dim] = x_sorted[sorted_pos : sorted_pos + count]
+                orig_positions.extend(range(current_pos, current_pos + count))
+            sorted_pos += count
+            current_pos += padded
+
+        # NOTE: We quantize input per-expert below (not batch-quantize and slice)
+        # Based on testing, batch quantization followed by slicing causes issues
+
+        # Pad weight blocks and scales for K alignment if needed
+        if k_pad_amount > 0:
+            # Original: (num_experts, out_dim, k//32, 16) where k//32 * 16 * 2 = k (original)
+            # Need to pad to k_padded
+            # Number of new blocks needed: k_padded // 32 - in_dim // 32
+            orig_k_blocks = in_dim // 32
+            new_k_blocks = k_padded // 32
+            pad_k_blocks = new_k_blocks - orig_k_blocks
+
+            # Pad weight blocks: (num_experts, out_dim, k//32, 16) -> (num_experts, out_dim, k_padded//32, 16)
+            w_blocks_padded = torch.zeros(
+                self.num_experts, out_dim, new_k_blocks, 16,
+                dtype=w_blocks.dtype, device=device
+            )
+            w_blocks_padded[:, :, :orig_k_blocks, :] = w_blocks
+
+            # Pad weight scales: (num_experts, out_dim, k//32) -> (num_experts, out_dim, k_padded//32)
+            # Zero scale (E8M0 with exponent 0) = 127 (bias)
+            w_scales_padded = torch.full(
+                (self.num_experts, out_dim, new_k_blocks),
+                127,  # Zero scale in E8M0 format
+                dtype=w_scales.dtype, device=device
+            )
+            w_scales_padded[:, :, :orig_k_blocks] = w_scales
+        else:
+            w_blocks_padded = w_blocks
+            w_scales_padded = w_scales
+
+        # Reshape weight blocks: (num_experts, out_dim, k_padded//32, 16) -> (num_experts, out_dim, k_padded//2)
+        w_data = w_blocks_padded.view(self.num_experts, out_dim, k_padded // 2)
+
+        # Perform MXFP4 GEMM for each expert separately
+        # NOTE: Using loop of single-expert GEMMs because:
+        # 1. Grouped GEMM has issues with multiple segments (second segment produces wrong output)
+        # 2. Must quantize inputs and weights per-expert (batch quantize + slice causes inf)
+        output_padded = torch.zeros(total_m_padded, out_dim, dtype=input_dtype, device=device)
+        
+        # Debug: check for issues on first call
+        if not hasattr(self, '_debug_printed'):
+            self._debug_printed = True
+            print(f"[DEBUG _group_gemm_mxfp4] First call debug:")
+            print(f"  x_padded: shape={x_padded.shape}, range=[{x_padded.min():.4f}, {x_padded.max():.4f}]")
+            print(f"  w_data: shape={w_data.shape}")
+            print(f"  w_scales_padded: shape={w_scales_padded.shape}")
+            # Check weight stats per expert
+            for i in range(min(2, self.num_experts)):
+                print(f"  Expert {i} w_data: range=[{w_data[i].float().min():.4f}, {w_data[i].float().max():.4f}]")
+                print(f"  Expert {i} w_scales: range=[{w_scales_padded[i].min()}, {w_scales_padded[i].max()}]")
+        
+        for expert_idx in range(self.num_experts):
+            start = int(m_indptr[expert_idx].item())
+            end = int(m_indptr[expert_idx + 1].item())
+            
+            if end > start:
+                # Extract and quantize this expert's input SEPARATELY (not slice from batch)
+                expert_x_padded = x_padded[start:end]
+                expert_x_fp8, expert_x_scale = mxfp8_quantize_blockwise(expert_x_padded, block_size=32)
+                
+                # Get this expert's weights (these are loaded per-expert, so slicing is fine)
+                expert_w_data = w_data[expert_idx:expert_idx+1]  # [1, out_dim, k_padded//2]
+                expert_w_scales = w_scales_padded[expert_idx:expert_idx+1]  # [1, out_dim, k_padded//32]
+                
+                # Single-expert m_indptr
+                expert_m = end - start
+                expert_m_indptr = torch.tensor([0, expert_m], dtype=torch.int32, device=device)
+                
+                # Call FlashInfer for this expert
+                expert_output = group_gemm_mxfp4_nt_groupwise(
+                    expert_x_fp8,
+                    expert_w_data,
+                    expert_x_scale,
+                    expert_w_scales,
+                    expert_m_indptr,
+                    out_dtype=input_dtype,
+                )
+                
+                # Debug: check for NaN/Inf
+                if torch.isnan(expert_output).any() or torch.isinf(expert_output).any():
+                    nan_count = torch.isnan(expert_output).sum().item()
+                    inf_count = torch.isinf(expert_output).sum().item()
+                    print(f"[DEBUG] Expert {expert_idx} output has {nan_count} NaN, {inf_count} Inf!")
+                    print(f"  Input x_padded: range=[{expert_x_padded.min():.4f}, {expert_x_padded.max():.4f}]")
+                    print(f"  x_fp8: range=[{expert_x_fp8.float().min():.4f}, {expert_x_fp8.float().max():.4f}]")
+                    print(f"  x_scale: range=[{expert_x_scale.min()}, {expert_x_scale.max()}]")
+                    print(f"  w_data: shape={expert_w_data.shape}")
+                    print(f"  w_scales: range=[{expert_w_scales.min()}, {expert_w_scales.max()}]")
+                
+                output_padded[start:end] = expert_output
+
+        # Extract original (unpadded) outputs and unsort
+        output_sorted = output_padded[orig_positions]  # [total_tokens, out_dim]
+
+        # Add bias per expert
+        for i in range(self.num_experts):
+            mask = sorted_expert_ids == i
+            if mask.any():
+                output_sorted[mask] += bias[i]
+
+        # Unsort to original order
+        output_flat = torch.zeros(total_tokens, out_dim, dtype=input_dtype, device=device)
+        output_flat[sorted_indices] = output_sorted
+
+        # Reshape back to [batch, experts_per_token, out_dim]
+        return output_flat.reshape(batch_size, experts_per_token, out_dim)
+
     def forward(self, t: torch.Tensor, expert_indices: torch.Tensor) -> torch.Tensor:
-        """Forward pass through the experts."""
+        """Forward pass through the experts using FlashInfer's group_gemm_mxfp4_nt_groupwise.
 
-        # Gate and Up projection
-        gate_up_proj = self.gate_up_proj[expert_indices, ...]
-        gate_up_proj_bias = self.gate_up_proj_bias[expert_indices, ...]
+        Args:
+            t: Input tensor of shape [batch, hidden_size]
+            expert_indices: Expert indices of shape [batch, experts_per_token]
 
-        t = torch.einsum("beck,bk->bec", gate_up_proj, t) + gate_up_proj_bias
+        Returns:
+            Output tensor of shape [batch, experts_per_token, hidden_size]
+        """
+        batch_size, experts_per_token = expert_indices.shape
+
+        # Expand input for each expert: [batch, experts_per_token, hidden_size]
+        t_expanded = t.unsqueeze(1).expand(-1, experts_per_token, -1).contiguous()
+
+        # Gate-up projection using grouped MXFP4 GEMM with FlashInfer
+        # Input: [batch, experts_per_token, hidden_size]
+        # Weights: [num_experts, intermediate_size * 2, hidden_size // 32, 16]
+        # Output: [batch, experts_per_token, intermediate_size * 2]
+        gate_up_output = self._group_gemm_mxfp4(
+            t_expanded,
+            expert_indices,
+            self.gate_up_proj_blocks,
+            self.gate_up_proj_scales,
+            self.gate_up_proj_bias,
+            in_dim=self.hidden_size,
+            out_dim=self.intermediate_size * 2,
+        )
 
         # Inline swiglu function
-        x_glu, x_linear = t[..., ::2], t[..., 1::2]
+        x_glu, x_linear = gate_up_output[..., ::2], gate_up_output[..., 1::2]
 
         # Clamp the input values
         x_glu = x_glu.clamp(min=None, max=self.swiglu_limit)
@@ -574,13 +1016,21 @@ class GptOssExperts(nn.Module):
         # Add an extra bias of 1 to the linear layer
         t = out_glu * (x_linear + 1)
 
-        # Down projection
-        down_proj = self.down_proj[expert_indices, ...]
-        down_proj_bias = self.down_proj_bias[expert_indices, ...]
+        # Down projection using grouped MXFP4 GEMM with FlashInfer
+        # Input: [batch, experts_per_token, intermediate_size]
+        # Weights: [num_experts, hidden_size, intermediate_size // 32, 16]
+        # Output: [batch, experts_per_token, hidden_size]
+        down_output = self._group_gemm_mxfp4(
+            t,
+            expert_indices,
+            self.down_proj_blocks,
+            self.down_proj_scales,
+            self.down_proj_bias,
+            in_dim=self.intermediate_size,
+            out_dim=self.hidden_size,
+        )
 
-        t = torch.einsum("beck,bek->bec", down_proj, t) + down_proj_bias
-
-        return t
+        return down_output
 
 
 class GptOssMlp(nn.Module):

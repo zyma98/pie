@@ -681,6 +681,7 @@ class ForwardPassBatch:
         probs = torch.softmax(scaled_logits, dim=-1)
 
         if not torch.isfinite(probs).all():
+            print(f"probs: {probs}")
             raise RuntimeError("Non-finite probabilities produced by LM head")
 
         # Group requests by sampler type for efficient batch processing
