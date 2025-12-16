@@ -135,6 +135,9 @@ def load_model(
         else:
             print("\nSuccessfully loaded all expected model weights.")
 
+        # Note: MXFP4 scale swizzling is done at runtime in the forward pass
+        # to avoid complex dimension alignment issues during loading
+
         model.eval()
         return model
 
@@ -222,6 +225,155 @@ def _load_fused_parameter(
                 return False
 
             param.copy_(fused_tensor, non_blocking=non_blocking)
+
+        elif fusion_details["op"] == "load_mxfp4_blocks":
+            # Load MXFP4 blocks directly (packed FP4 values as uint8)
+            # Source format: (num_experts, N, K//32, block_size) where block_size=16
+            # Target format: (num_experts, N, K//2) - flattened
+            blocks = source_tensors[0].to(param.device)
+
+            # Reshape if source has 4 dimensions (grouped format)
+            if blocks.ndim == 4 and param.ndim == 3:
+                # Flatten last two dims: (experts, N, groups, block_size) -> (experts, N, K//2)
+                blocks = blocks.reshape(blocks.shape[0], blocks.shape[1], -1)
+
+            if blocks.shape != param.shape:
+                print(
+                    f"    Warning: Shape mismatch for MXFP4 blocks '{param_name}'. "
+                    f"Expected {param.shape}, got {blocks.shape}. Skipping."
+                )
+                return False
+            param.copy_(blocks, non_blocking=non_blocking)
+
+        elif fusion_details["op"] == "load_mxfp4_scales":
+            # Load MXFP4 scales with padding to n_padded
+            scales = source_tensors[0].to(param.device)
+            n_padded = fusion_details["n_padded"]
+            k_groups = fusion_details["k_groups"]
+
+            # scales from file: (num_experts, n, k_groups_file)
+            # param shape: (num_experts, n_padded, k_groups)
+            num_experts = scales.shape[0]
+            n_actual = scales.shape[1]
+            k_groups_actual = scales.shape[2]
+
+            # Pad scales if needed
+            if n_actual < n_padded or k_groups_actual < k_groups:
+                padded_scales = torch.full(
+                    (num_experts, n_padded, k_groups),
+                    127,  # Neutral scale value
+                    dtype=torch.uint8,
+                    device=param.device,
+                )
+                padded_scales[:, :n_actual, :k_groups_actual] = scales
+                param.copy_(padded_scales, non_blocking=non_blocking)
+            else:
+                if scales.shape != param.shape:
+                    print(
+                        f"    Warning: Shape mismatch for MXFP4 scales '{param_name}'. "
+                        f"Expected {param.shape}, got {scales.shape}. Skipping."
+                    )
+                    return False
+                param.copy_(scales, non_blocking=non_blocking)
+
+        elif fusion_details["op"] == "load_mxfp4_scales_direct":
+            # Load MXFP4 scales directly without padding (swizzling done at runtime)
+            scales = source_tensors[0].to(param.device)
+            
+            # Reshape if source has grouped format (num_experts, n, groups, 1)
+            if scales.ndim == 4:
+                scales = scales.squeeze(-1)
+            
+            if scales.shape != param.shape:
+                print(
+                    f"    Warning: Shape mismatch for MXFP4 scales '{param_name}'. "
+                    f"Expected {param.shape}, got {scales.shape}. Skipping."
+                )
+                return False
+            param.copy_(scales, non_blocking=non_blocking)
+
+        elif fusion_details["op"] == "load_mxfp4_blocks_padded":
+            # Load MXFP4 blocks with K-dimension padding at load time
+            # This avoids runtime padding overhead
+            from model.gptoss import _swizzle_blockscale  # Import swizzle function
+            
+            blocks = source_tensors[0].to(param.device)
+            k_original = fusion_details["k_original"]
+            k_gemm = fusion_details["k_gemm"]
+            
+            # Reshape if source has 4 dimensions (grouped format)
+            if blocks.ndim == 4:
+                # Flatten: (experts, N, groups, block_size) -> (experts, N, K_original//2)
+                blocks = blocks.reshape(blocks.shape[0], blocks.shape[1], -1)
+            
+            num_experts = blocks.shape[0]
+            n = blocks.shape[1]
+            k_original_half = k_original // 2
+            k_gemm_half = k_gemm // 2
+            
+            # Pad K dimension if needed
+            if k_original_half < k_gemm_half:
+                padded_blocks = torch.zeros(
+                    (num_experts, n, k_gemm_half),
+                    dtype=torch.uint8,
+                    device=param.device,
+                )
+                padded_blocks[:, :, :k_original_half] = blocks
+                blocks = padded_blocks
+            
+            if blocks.shape != param.shape:
+                print(
+                    f"    Warning: Shape mismatch for MXFP4 blocks '{param_name}'. "
+                    f"Expected {param.shape}, got {blocks.shape}. Skipping."
+                )
+                return False
+            param.copy_(blocks, non_blocking=non_blocking)
+
+        elif fusion_details["op"] == "load_mxfp4_scales_swizzled":
+            # Load MXFP4 scales with padding AND swizzling at load time
+            # This avoids runtime swizzling overhead
+            from model.gptoss import _swizzle_blockscale
+            
+            scales = source_tensors[0].to(param.device)
+            n = fusion_details["n"]
+            n_padded = fusion_details["n_padded"]
+            k_original = fusion_details["k_original"]
+            k_gemm = fusion_details["k_gemm"]
+            tile_size = fusion_details["tile_size"]
+            
+            # Reshape if source has grouped format (num_experts, n, groups, 1)
+            if scales.ndim == 4:
+                scales = scales.squeeze(-1)
+            
+            num_experts = scales.shape[0]
+            n_actual = scales.shape[1]
+            k_groups_original = k_original // tile_size
+            k_groups_gemm = k_gemm // tile_size
+            
+            # Step 1: Pad scales to (n_padded, k_groups_gemm)
+            if n_actual < n_padded or scales.shape[2] < k_groups_gemm:
+                padded_scales = torch.full(
+                    (num_experts, n_padded, k_groups_gemm),
+                    127,  # Neutral scale value
+                    dtype=torch.uint8,
+                    device=param.device,
+                )
+                padded_scales[:, :n_actual, :scales.shape[2]] = scales
+                scales = padded_scales
+            
+            # Step 2: Swizzle the scales
+            swizzled_scales = _swizzle_blockscale(
+                scales, num_experts, n_padded, k_gemm, tile_size
+            )
+            
+            if swizzled_scales.shape != param.shape:
+                print(
+                    f"    Warning: Shape mismatch for MXFP4 scales '{param_name}'. "
+                    f"Expected {param.shape}, got {swizzled_scales.shape}. Skipping."
+                )
+                return False
+            param.copy_(swizzled_scales, non_blocking=non_blocking)
+
         else:
             raise ValueError(f"Unknown fusion operation: {fusion_details['op']}")
 
