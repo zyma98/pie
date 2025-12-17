@@ -82,16 +82,9 @@ async function main(): Promise<void> {
   // Create a context for generation
   const ctx = new Context(model);
 
-  // Format prompt in Llama 3 style
-  const formattedPrompt = `<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-
-${system}<|eot_id|><|start_header_id|>user<|end_header_id|>
-
-${prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
-
-`;
-
-  ctx.fill(formattedPrompt);
+  // Use ChatFormatter for proper prompt formatting
+  ctx.fillSystem(system);
+  ctx.fillUser(prompt);
 
   // Create sampler and stop condition
   const sampler = Sampler.topP(0.6, 0.95);
