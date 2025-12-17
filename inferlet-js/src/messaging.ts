@@ -42,14 +42,34 @@ export class Blob {
  * Sends a message to the remote user client.
  * @param msg The message to send
  *
- * Note: Uses console.log as a workaround because the WIT message.send()
- * binding doesn't work correctly with componentize-js. The server handles
- * console.log output through WASI stdout/StreamingOutput.
+ * IMPLEMENTATION NOTE - Workaround for componentize-js limitation:
+ *
+ * The WIT interface (inferlet:core/message) defines a proper send() function:
+ *   send: func(message: string);
+ *
+ * However, this function does not work correctly when JavaScript inferlets are
+ * compiled with componentize-js. The exact root cause is unknown, but the WIT
+ * binding for message.send() fails to deliver messages to the client.
+ *
+ * CURRENT WORKAROUND:
+ * We use console.log() instead, which works because:
+ * 1. componentize-js compiles console.log to WASI stdout (wasi:cli/stdout)
+ * 2. The Pie runtime captures WASI stdout from the WebAssembly component
+ * 3. Stdout is delivered to clients via the StreamingOutput::Stdout message type
+ * 4. The server dispatches this as an InstanceEvent::StreamingOutput event
+ *
+ * This approach is functionally equivalent for text output, but bypasses the
+ * proper message.send() channel defined in the WIT interface.
+ *
+ * FUTURE WORK:
+ * - Investigate why componentize-js bindings for message.send() don't work
+ * - Test if this is a general componentize-js issue or specific to our WIT setup
+ * - Consider filing an issue with componentize-js if this is a binding bug
+ * - Once resolved, replace console.log with: message.send(msg);
  */
 export function send(msg: string): void {
-  // Workaround: Use console.log which works via WASI stdout
-  // The WIT message.send() binding is not functioning correctly
-  // TODO: Investigate why message.send() doesn't deliver to client
+  // Workaround: Use console.log which works via WASI stdout capture
+  // See documentation comment above for full explanation
   console.log(msg);
 }
 
