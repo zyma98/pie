@@ -15,3 +15,15 @@ export {
 // Re-export Sampler
 export { Sampler } from './sampler.js';
 export type { SamplerType } from './sampler.js';
+
+// Re-export StopCondition
+export {
+  MaxLen,
+  EndsWith,
+  AnyEndsWith,
+  Or,
+  maxLen,
+  endsWith,
+  endsWithAny,
+} from './stop-condition.js';
+export type { StopCondition } from './stop-condition.js';
