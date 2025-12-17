@@ -83,17 +83,8 @@ export class ForwardPass {
 
     // Wait for the async operation to complete
     const pollable = future.pollable();
-    // In WASM context, wstd handles the polling
-    await new Promise<void>((resolve) => {
-      const checkPoll = () => {
-        if (pollable.ready()) {
-          resolve();
-        } else {
-          setTimeout(checkPoll, 0);
-        }
-      };
-      checkPoll();
-    });
+    // Use pollable.block() which is the WASI way to wait
+    pollable.block();
 
     // Get results
     const distributions: Distribution[] = [];
@@ -116,56 +107,68 @@ export class ForwardPass {
    * Set embedding pointers as input.
    */
   inputEmbedPtrs(embedPtrs: number[], positions: number[]): void {
-    forward.inputEmbeddings(this.inner, embedPtrs, positions);
+    forward.inputEmbeddings(
+      this.inner,
+      new Uint32Array(embedPtrs),
+      new Uint32Array(positions)
+    );
   }
 
   /**
    * Set token IDs as input.
    */
   inputTokens(inputTokens: number[], positions: number[]): void {
-    forward.inputTokens(this.inner, inputTokens, positions);
+    forward.inputTokens(
+      this.inner,
+      new Uint32Array(inputTokens),
+      new Uint32Array(positions)
+    );
   }
 
   /**
    * Set embedding pointers for output capture.
    */
   outputEmbedPtrs(embedPtrs: number[], indices: number[]): void {
-    forward.outputEmbeddings(this.inner, embedPtrs, indices);
+    forward.outputEmbeddings(
+      this.inner,
+      new Uint32Array(embedPtrs),
+      new Uint32Array(indices)
+    );
   }
 
   /**
    * Request probability distributions at specified indices.
    */
   outputDistributions(indices: number[], temperature: number, topK?: number): void {
-    forward.outputDistributions(this.inner, indices, temperature, topK);
+    forward.outputDistributions(this.inner, new Uint32Array(indices), temperature, topK);
   }
 
   /**
    * Request sampled tokens at specified indices (multinomial sampling).
    */
   outputTokens(indices: number[], temperature: number): void {
-    forward.outputTokens(this.inner, indices, temperature);
+    forward.outputTokens(this.inner, new Uint32Array(indices), temperature);
   }
 
   /**
    * Request sampled tokens using top-p (nucleus) sampling.
    */
   outputTokensTopP(indices: number[], temperature: number, topP: number): void {
-    forward.outputTokensTopP(this.inner, indices, temperature, topP);
+    forward.outputTokensTopP(this.inner, new Uint32Array(indices), temperature, topP);
   }
 
   /**
    * Request sampled tokens using top-k sampling.
    */
   outputTokensTopK(indices: number[], temperature: number, topK: number): void {
-    forward.outputTokensTopK(this.inner, indices, temperature, topK);
+    forward.outputTokensTopK(this.inner, new Uint32Array(indices), temperature, topK);
   }
 
   /**
    * Request sampled tokens using min-p sampling.
    */
   outputTokensMinP(indices: number[], temperature: number, minP: number): void {
-    forward.outputTokensMinP(this.inner, indices, temperature, minP);
+    forward.outputTokensMinP(this.inner, new Uint32Array(indices), temperature, minP);
   }
 
   /**
@@ -177,7 +180,7 @@ export class ForwardPass {
     topK: number,
     topP: number
   ): void {
-    forward.outputTokensTopKTopP(this.inner, indices, temperature, topK, topP);
+    forward.outputTokensTopKTopP(this.inner, new Uint32Array(indices), temperature, topK, topP);
   }
 
   /**
@@ -185,8 +188,11 @@ export class ForwardPass {
    * Each element is a Brle or raw buffer representing which positions are visible.
    */
   attentionMask(mask: Brle[] | number[][]): void {
-    // Convert Brle array to raw buffers if needed
-    const rawMask = mask.map((m) => (m instanceof Brle ? m.buffer : m));
+    // Convert Brle array to Uint32Array[] as expected by the WIT binding
+    const rawMask = mask.map((m) => {
+      const buf = m instanceof Brle ? m.buffer : m;
+      return new Uint32Array(buf);
+    });
     forward.attentionMask(this.inner, rawMask);
   }
 
@@ -195,14 +201,14 @@ export class ForwardPass {
    */
   kvCache(kvPages: KvPage[], lastKvPageLen: number): void {
     const ptrs = kvPages.map((kv) => kv.ptr);
-    forward.kvCache(this.inner, ptrs, lastKvPageLen);
+    forward.kvCache(this.inner, new Uint32Array(ptrs), lastKvPageLen);
   }
 
   /**
    * Set the KV cache using raw pointers.
    */
   kvCachePtrs(kvPagePtrs: number[], lastKvPageLen: number): void {
-    forward.kvCache(this.inner, kvPagePtrs, lastKvPageLen);
+    forward.kvCache(this.inner, new Uint32Array(kvPagePtrs), lastKvPageLen);
   }
 }
 

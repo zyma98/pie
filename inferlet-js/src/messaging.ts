@@ -41,9 +41,16 @@ export class Blob {
 /**
  * Sends a message to the remote user client.
  * @param msg The message to send
+ *
+ * Note: Uses console.log as a workaround because the WIT message.send()
+ * binding doesn't work correctly with componentize-js. The server handles
+ * console.log output through WASI stdout/StreamingOutput.
  */
 export function send(msg: string): void {
-  message.send(msg);
+  // Workaround: Use console.log which works via WASI stdout
+  // The WIT message.send() binding is not functioning correctly
+  // TODO: Investigate why message.send() doesn't deliver to client
+  console.log(msg);
 }
 
 /**

@@ -4,8 +4,6 @@
 import {
   getAutoModel,
   getArguments,
-  getInstanceId,
-  getVersion,
   send,
   Context,
   Sampler,
@@ -26,6 +24,7 @@ Options:
 `;
 
 // Parse command line arguments
+// Supports both --option=value and --option value formats
 function parseArgs(args: string[]): {
   help: boolean;
   prompt: string;
@@ -37,15 +36,22 @@ function parseArgs(args: string[]): {
   let maxTokens = 256;
   let system = 'You are a helpful, respectful and honest assistant.';
 
-  for (const arg of args) {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
     if (arg === '-h' || arg === '--help') {
       help = true;
     } else if (arg.startsWith('--prompt=')) {
       prompt = arg.slice('--prompt='.length);
+    } else if (arg === '--prompt' && i + 1 < args.length) {
+      prompt = args[++i];
     } else if (arg.startsWith('--max-tokens=')) {
       maxTokens = parseInt(arg.slice('--max-tokens='.length), 10);
+    } else if (arg === '--max-tokens' && i + 1 < args.length) {
+      maxTokens = parseInt(args[++i], 10);
     } else if (arg.startsWith('--system=')) {
       system = arg.slice('--system='.length);
+    } else if (arg === '--system' && i + 1 < args.length) {
+      system = args[++i];
     }
   }
 
@@ -62,23 +68,22 @@ async function main(): Promise<void> {
     return;
   }
 
-  // Display runtime info
-  const instanceId = getInstanceId();
-  const version = getVersion();
-  send(`Instance: ${instanceId}, Runtime: ${version}\n`);
-
   // Get the model
   const model = getAutoModel();
-  send(`Using model: ${model.getName()}\n`);
 
   // Create a context for generation
   const ctx = new Context(model);
 
-  // Fill the conversation
-  ctx.fillSystem(system);
-  ctx.fillUser(prompt);
+  // Format prompt in Llama 3 style
+  const formattedPrompt = `<|begin_of_text|><|start_header_id|>system<|end_header_id|>
 
-  send(`\nGenerating response...\n\n`);
+${system}<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+${prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+`;
+
+  ctx.fill(formattedPrompt);
 
   // Create sampler and stop condition
   const sampler = Sampler.topP(0.6, 0.95);
@@ -100,6 +105,8 @@ export const run = {
       await main();
       return { tag: 'ok' };
     } catch (e) {
+      const err = e instanceof Error ? `${e.message}\n${e.stack}` : String(e);
+      send(`\nERROR: ${err}\n`);
       return { tag: 'err', val: String(e) };
     }
   },
