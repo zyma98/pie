@@ -108,7 +108,7 @@ export const run = {
     } catch (e) {
       const err = e instanceof Error ? `${e.message}\n${e.stack}` : String(e);
       send(`\nERROR: ${err}\n`);
-      return { tag: 'err', val: String(e) };
+      return { tag: 'err', val: err };
     }
   },
 };

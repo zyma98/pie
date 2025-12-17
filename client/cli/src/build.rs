@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use clap::Args;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::fs;
@@ -27,6 +28,41 @@ fn command_exists(cmd: &str) -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+/// Run npm install in a directory if node_modules doesn't exist
+fn ensure_npm_dependencies(package_dir: &Path) -> Result<()> {
+    let node_modules = package_dir.join("node_modules");
+    if node_modules.exists() {
+        return Ok(());
+    }
+
+    println!("📦 npm dependencies not found in {}", package_dir.display());
+    print!("   Run 'npm install'? (Y/n) ");
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let input = input.trim().to_lowercase();
+
+    if input == "n" || input == "no" {
+        bail!("npm install cancelled. Please run 'npm install' manually in {}", package_dir.display());
+    }
+
+    println!("   Installing...");
+
+    let output = Command::new("npm")
+        .arg("install")
+        .current_dir(package_dir)
+        .output()
+        .context("Failed to run npm install")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("npm install failed in {}:\n{}", package_dir.display(), stderr);
+    }
+
+    Ok(())
 }
 
 /// Get the path to the inferlet-js library bundled with pie-cli
@@ -164,6 +200,18 @@ fn run_esbuild(
 ) -> Result<()> {
     println!("📦 Bundling with esbuild...");
 
+    // Validate the inferlet alias target exists
+    let inferlet_entry = inferlet_js_path.join("src").join("index.ts");
+    if !inferlet_entry.is_file() {
+        bail!(
+            "inferlet entry not found at '{}', ensure inferlet-js/src/index.ts exists",
+            inferlet_entry.display()
+        );
+    }
+    let inferlet_entry = inferlet_entry
+        .canonicalize()
+        .with_context(|| format!("Failed to canonicalize inferlet entry path: {}", inferlet_entry.display()))?;
+
     // Build the esbuild command
     let mut cmd = Command::new("npx");
     cmd.arg("esbuild")
@@ -174,7 +222,7 @@ fn run_esbuild(
         .arg("--target=es2020")
         .arg("--main-fields=module,main")  // Resolve package entry points on neutral platform
         .arg(format!("--outfile={}", output_file.display()))
-        .arg(format!("--alias:inferlet={}", inferlet_js_path.join("src").join("index.ts").display()));
+        .arg(format!("--alias:inferlet={}", inferlet_entry.display()));
 
     if debug {
         cmd.arg("--sourcemap=inline");
