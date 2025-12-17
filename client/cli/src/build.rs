@@ -186,15 +186,6 @@ fn run_esbuild(
     cmd.arg("--external:wasi:*");
     cmd.arg("--external:inferlet:*");
 
-    // Use nunjucks browser build to avoid Node.js dependencies
-    // Note: Must use full nunjucks.js (not slim) for runtime template compilation
-    let nunjucks_browser = inferlet_js_path
-        .join("node_modules")
-        .join("nunjucks")
-        .join("browser")
-        .join("nunjucks.js");
-    cmd.arg(format!("--alias:nunjucks={}", nunjucks_browser.display()));
-
     // Mark Node.js built-ins as external (not used in browser build)
     for builtin in ["fs", "path", "events", "os", "crypto", "child_process", "net", "http", "https", "stream", "util", "url", "buffer", "process", "domain"] {
         cmd.arg(format!("--external:{}", builtin));
