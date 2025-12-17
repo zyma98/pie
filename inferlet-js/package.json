@@ -1,5 +1,5 @@
 {
-  "name": "inferlet-js",
+  "name": "inferlet",
   "version": "0.1.0",
   "description": "JavaScript library for writing Pie inferlets",
   "type": "module",
