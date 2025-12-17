@@ -334,6 +334,9 @@ pub async fn handle_build_command(args: BuildArgs) -> Result<()> {
     let inferlet_js_path = get_inferlet_js_path()?;
     let wit_path = get_wit_path()?;
 
+    // Ensure npm dependencies are installed for inferlet-js
+    ensure_npm_dependencies(&inferlet_js_path)?;
+
     println!("🏗️  Building JS inferlet...");
     println!("   Input: {}", args.input.display());
     println!("   Output: {}", args.output.display());
