@@ -3,7 +3,11 @@
 
 export const VERSION = '0.1.0';
 
-// Placeholder - will be filled in subsequent tasks
-export function getVersion(): string {
-  return VERSION;
-}
+// Re-export runtime functions
+export {
+  getVersion,
+  getInstanceId,
+  getArguments,
+  setReturn,
+  debugQuery,
+} from './runtime.js';
