@@ -27,3 +27,6 @@ export {
   endsWithAny,
 } from './stop-condition.js';
 export type { StopCondition } from './stop-condition.js';
+
+// Re-export Tokenizer
+export { Tokenizer } from './tokenizer.js';
