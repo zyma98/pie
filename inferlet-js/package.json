@@ -8,7 +8,7 @@
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
-    "generate-bindings": "jco types ../inferlet/wit -o src/bindings --world exec"
+    "generate-bindings": "jco types ../inferlet/wit -o src/bindings --world-name exec"
   },
   "dependencies": {
     "nunjucks": "^3.2.4"
