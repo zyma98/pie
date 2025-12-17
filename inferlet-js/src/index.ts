@@ -30,3 +30,6 @@ export type { StopCondition } from './stop-condition.js';
 
 // Re-export Tokenizer
 export { Tokenizer } from './tokenizer.js';
+
+// Re-export Model and Queue
+export { Model, Queue, getModel, getAllModels, getAutoModel, getAllModelsWithTraits } from './model.js';
