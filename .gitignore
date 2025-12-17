@@ -227,3 +227,7 @@ tensor_references
 
 # Github Spec-kit
 .spec-kit/
+
+# Node.js
+node_modules/
+package-lock.json
