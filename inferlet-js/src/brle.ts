@@ -261,6 +261,102 @@ export class Brle {
   clone(): Brle {
     return new Brle([...this.buffer], this.totalSize);
   }
+
+  /**
+   * Removes a range of boolean values. The range is exclusive (`start..end`).
+   * Creates a new Brle by concatenating the parts before and after the range.
+   */
+  removeRange(start: number, end: number): void {
+    const clampedEnd = Math.min(end, this.totalSize);
+    if (start >= clampedEnd) {
+      return;
+    }
+
+    const head = this.slice(0, start);
+    const tail = this.slice(clampedEnd, this.totalSize);
+
+    // Merge head and tail
+    if (head.totalSize === 0) {
+      this.buffer = [...tail.buffer];
+      this.totalSize = tail.totalSize;
+    } else if (tail.totalSize === 0) {
+      this.buffer = [...head.buffer];
+      this.totalSize = head.totalSize;
+    } else {
+      // Need to properly merge - check if last run of head and first run of tail have same value
+      const headLastIsTrue = (head.buffer.length - 1) % 2 !== 0;
+      const tailFirstIsTrue = tail.buffer[0] === 0 && tail.buffer.length > 1;
+
+      if (headLastIsTrue === tailFirstIsTrue) {
+        // Merge the runs
+        const tailFirstRunLen = tailFirstIsTrue ? tail.buffer[1] : tail.buffer[0];
+        const tailSliceStart = tailFirstIsTrue ? 2 : 1;
+
+        const newBuffer = [...head.buffer];
+        newBuffer[newBuffer.length - 1] += tailFirstRunLen;
+        newBuffer.push(...tail.buffer.slice(tailSliceStart));
+
+        this.buffer = newBuffer;
+      } else {
+        // No merge needed
+        if (tailFirstIsTrue) {
+          this.buffer = [...head.buffer, ...tail.buffer.slice(1)];
+        } else {
+          this.buffer = [...head.buffer, ...tail.buffer];
+        }
+      }
+      this.totalSize = head.totalSize + tail.totalSize;
+    }
+  }
+
+  /**
+   * Truncates the Brle to the first `newSize` elements.
+   * If newSize >= totalSize, returns a clone unchanged.
+   */
+  truncate(newSize: number): Brle {
+    if (newSize >= this.totalSize) {
+      return this.clone();
+    }
+    return this.slice(0, newSize);
+  }
+
+  /**
+   * Creates a new Brle representing a slice of the current one.
+   */
+  private slice(start: number, end: number): Brle {
+    const clampedEnd = Math.min(end, this.totalSize);
+    if (start >= clampedEnd) {
+      return Brle.new(0);
+    }
+
+    const newSize = clampedEnd - start;
+    const newBuffer: number[] = [];
+
+    for (const [val, rStart, rEnd] of this.iterRuns()) {
+      const sliceRStart = Math.max(rStart, start);
+      const sliceREnd = Math.min(rEnd, clampedEnd);
+
+      if (sliceRStart < sliceREnd) {
+        const len = sliceREnd - sliceRStart;
+
+        if (newBuffer.length === 0) {
+          if (val) {
+            newBuffer.push(0);
+          }
+          newBuffer.push(len);
+        } else {
+          const lastRunIsTrue = (newBuffer.length - 1) % 2 !== 0;
+          if (lastRunIsTrue === val) {
+            newBuffer[newBuffer.length - 1] += len;
+          } else {
+            newBuffer.push(len);
+          }
+        }
+      }
+    }
+
+    return new Brle(newBuffer, newSize);
+  }
 }
 
 /**

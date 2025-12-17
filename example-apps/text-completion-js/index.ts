@@ -19,6 +19,7 @@ A simple text completion example for the Pie runtime.
 Options:
   --prompt=<text>      The prompt to complete (default: "Hello, world!")
   --max-tokens=<n>     Maximum tokens to generate (default: 256)
+                       Must be a positive integer (> 0)
   --system=<text>      System prompt (default: helpful assistant)
   -h, --help           Prints this help message
 `;
@@ -66,6 +67,13 @@ async function main(): Promise<void> {
   if (help) {
     send(HELP);
     return;
+  }
+
+  // Validate numeric arguments
+  if (!Number.isFinite(maxTokens) || !Number.isInteger(maxTokens) || maxTokens <= 0) {
+    throw new Error(
+      `Invalid --max-tokens value: must be a positive integer (> 0), got '${maxTokens}'`
+    );
   }
 
   // Get the model

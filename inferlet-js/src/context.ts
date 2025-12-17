@@ -160,6 +160,7 @@ export class Context {
       forked.kvPageLastLen = this.kvPageLastLen;
       forked.positionIds = [...this.positionIds];
       forked.tokenMaskPending = this.tokenMaskPending.map((m) => m.clone());
+      forked.tokenMaskCurrent = this.tokenMaskCurrent.clone();
     } else {
       // Hard case: the last page is partially full and must be recomputed.
       const keptKvPageLen = Math.max(0, this.kvPages.length - 1);
@@ -183,16 +184,18 @@ export class Context {
       const parentTotalMaskLen =
         this.tokenIds.length + this.tokenIdsPending.length;
       // Remove the range that's being moved to pending
-      // This is a simplified version - full implementation would need removeRange
+      maskBuilder.removeRange(keptTokensLen, parentTotalMaskLen);
 
       forked.tokenMaskPending = [];
       for (let i = 0; i < forked.tokenIdsPending.length; i++) {
         maskBuilder.append(false);
         forked.tokenMaskPending.push(maskBuilder.clone());
       }
+
+      // tokenMaskCurrent includes both committed and pending tokens
+      forked.tokenMaskCurrent = maskBuilder;
     }
 
-    forked.tokenMaskCurrent = this.tokenMaskCurrent.clone();
     forked.adapterPtr = this.adapterPtr;
     forked.adapterRandomSeed = this.adapterRandomSeed;
     forked.beginOfSequence = this.beginOfSequence;
