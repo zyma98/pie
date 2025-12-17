@@ -62,17 +62,8 @@ export async function receive(): Promise<string> {
   const future = message.receive();
   const pollable: Pollable = future.pollable();
 
-  // Wait for the pollable to be ready
-  await new Promise<void>((resolve) => {
-    const checkPoll = () => {
-      if (pollable.ready()) {
-        resolve();
-      } else {
-        setTimeout(checkPoll, 0);
-      }
-    };
-    checkPoll();
-  });
+  // Use pollable.block() which is the WASI way to wait
+  pollable.block();
 
   const result = future.get();
   if (result === undefined) {
@@ -98,17 +89,8 @@ export async function receiveBlob(): Promise<Blob> {
   const future = message.receiveBlob();
   const pollable: Pollable = future.pollable();
 
-  // Wait for the pollable to be ready
-  await new Promise<void>((resolve) => {
-    const checkPoll = () => {
-      if (pollable.ready()) {
-        resolve();
-      } else {
-        setTimeout(checkPoll, 0);
-      }
-    };
-    checkPoll();
-  });
+  // Use pollable.block() which is the WASI way to wait
+  pollable.block();
 
   const result = future.get();
   if (result === undefined) {
@@ -136,17 +118,8 @@ export async function subscribe(topic: string): Promise<string> {
   const future = message.subscribe(topic);
   const pollable: Pollable = future.pollable();
 
-  // Wait for the pollable to be ready
-  await new Promise<void>((resolve) => {
-    const checkPoll = () => {
-      if (pollable.ready()) {
-        resolve();
-      } else {
-        setTimeout(checkPoll, 0);
-      }
-    };
-    checkPoll();
-  });
+  // Use pollable.block() which is the WASI way to wait
+  pollable.block();
 
   const result = future.get();
   if (result === undefined) {
