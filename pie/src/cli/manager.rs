@@ -333,7 +333,7 @@ pub async fn start_engine_and_backend(
 pub async fn stop_backend_heartbeat() -> Result<()> {
     println!("🔄 Stopping backend heartbeat...");
     let (tx, rx) = oneshot::channel();
-    InternalEvent::StopBackendHeartbeat { tx }.dispatch()?;
+    InternalEvent::StopBackendHeartbeat { tx }.dispatch();
     rx.await?;
     println!("✅ Backend heartbeat stopped.");
     Ok(())
@@ -387,14 +387,14 @@ pub async fn terminate_engine_and_backend(
 }
 
 /// Submits an inferlet to the engine but does not wait for it to finish.
-pub async fn submit_detached_inferlet(
+pub async fn submit_concurrent_inferlet(
     client_config: &ClientConfig,
     inferlet_path: PathBuf,
     arguments: Vec<String>,
     stream_output: bool,
     printer: SharedPrinter,
 ) -> Result<()> {
-    let instance = submit_inferlet(client_config, inferlet_path, arguments).await?;
+    let instance = submit_inferlet(client_config, inferlet_path, arguments, false).await?;
 
     if stream_output {
         tokio::spawn(stream_inferlet_output(instance, Some(printer)));
@@ -410,7 +410,7 @@ pub async fn submit_inferlet_and_wait(
     arguments: Vec<String>,
     printer: Option<SharedPrinter>,
 ) -> Result<()> {
-    let instance = submit_inferlet(client_config, inferlet_path, arguments).await?;
+    let instance = submit_inferlet(client_config, inferlet_path, arguments, false).await?;
     stream_inferlet_output(instance, printer).await
 }
 
@@ -419,6 +419,7 @@ async fn submit_inferlet(
     client_config: &ClientConfig,
     inferlet_path: PathBuf,
     arguments: Vec<String>,
+    detached: bool,
 ) -> Result<Instance> {
     let client = connect_and_authenticate(client_config).await?;
 
@@ -432,7 +433,14 @@ async fn submit_inferlet(
         println!("✅ Inferlet upload successful.");
     }
 
-    let instance = client.launch_instance(&hash, arguments).await?;
+    let cmd_name = inferlet_path
+        .file_stem()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let instance = client
+        .launch_instance(hash, cmd_name, arguments, detached)
+        .await?;
     println!("✅ Inferlet launched with ID: {}", instance.id());
     Ok(instance)
 }
@@ -443,6 +451,10 @@ async fn stream_inferlet_output(
     printer: Option<SharedPrinter>,
 ) -> Result<()> {
     let instance_id = instance.id().to_string();
+    let short_id = instance_id[..instance_id.len().min(8)].to_string();
+    let mut at_line_start_stdout = true;
+    let mut at_line_start_stderr = true;
+
     loop {
         let event = match instance.recv().await {
             Ok(ev) => ev,
@@ -485,8 +497,137 @@ async fn stream_inferlet_output(
                     }
                 }
             }
+            // Handle streaming stdout
+            InstanceEvent::Stdout(content) => {
+                handle_streaming_output(
+                    false,
+                    content,
+                    &short_id,
+                    &mut at_line_start_stdout,
+                    &printer,
+                )
+                .await;
+            }
+            // Handle streaming stderr
+            InstanceEvent::Stderr(content) => {
+                handle_streaming_output(
+                    true,
+                    content,
+                    &short_id,
+                    &mut at_line_start_stderr,
+                    &printer,
+                )
+                .await;
+            }
             // If we receive a raw data blob, we'll ignore it and wait for the next event.
             InstanceEvent::Blob(_) => continue,
+        }
+    }
+}
+
+/// Helper to handle streaming output (stdout or stderr).
+async fn handle_streaming_output(
+    is_stderr: bool,
+    content: String,
+    short_id: &str,
+    at_line_start: &mut bool,
+    printer: &Option<SharedPrinter>,
+) {
+    if let Some(printer) = printer {
+        write_with_prefix_to_printer(printer, &content, short_id, at_line_start).await;
+    } else {
+        let at_start = *at_line_start;
+        let short_id = short_id.to_string();
+
+        // Spawn a blocking task to write the output to the console.
+        // This is to avoid deadlock when we call `lock()` on
+        // stdout and stderr.
+        *at_line_start = tokio::task::spawn_blocking(move || {
+            let mut at_start_local = at_start;
+            if is_stderr {
+                write_with_prefix(
+                    std::io::stderr().lock(),
+                    &content,
+                    &short_id,
+                    &mut at_start_local,
+                );
+            } else {
+                write_with_prefix(
+                    std::io::stdout().lock(),
+                    &content,
+                    &short_id,
+                    &mut at_start_local,
+                );
+            }
+            at_start_local
+        })
+        .await
+        .unwrap_or(at_start);
+    }
+}
+
+/// Helper function to print output with instance ID prefix only at the start of new lines.
+fn write_with_prefix(
+    mut writer: impl std::io::Write,
+    content: &str,
+    short_id: &str,
+    at_line_start: &mut bool,
+) {
+    if content.is_empty() {
+        return;
+    }
+
+    let lines = content.split('\n');
+    let mut first = true;
+
+    for line in lines {
+        if !first {
+            // We encountered a '\n' separator, print it
+            let _ = writeln!(writer);
+            *at_line_start = true;
+        }
+        first = false;
+
+        // Add prefix only if we're at line start and the line is non-empty
+        if !line.is_empty() {
+            if *at_line_start {
+                let _ = write!(writer, "[Inferlet {}] ", short_id);
+                *at_line_start = false;
+            }
+            let _ = write!(writer, "{}", line);
+        }
+    }
+}
+
+/// Helper function to print output with instance ID prefix to SharedPrinter.
+async fn write_with_prefix_to_printer(
+    printer: &SharedPrinter,
+    content: &str,
+    short_id: &str,
+    at_line_start: &mut bool,
+) {
+    if content.is_empty() {
+        return;
+    }
+
+    let lines = content.split('\n');
+    let mut first = true;
+
+    for line in lines {
+        if !first {
+            *at_line_start = true;
+        }
+        first = false;
+
+        // Add prefix only if we're at line start and the line is non-empty
+        if !line.is_empty() {
+            let mut content_line = String::new();
+            if *at_line_start {
+                content_line.push_str(&format!("[Inferlet {}] ", short_id));
+                *at_line_start = false;
+            }
+            content_line.push_str(line);
+            let _ = printer.lock().await.print(content_line);
         }
     }
 }
@@ -516,7 +657,7 @@ pub async fn wait_for_backend_ready(num_backends: usize) -> Result<()> {
         cur_num_rejected_backends: None,
         tx,
     }
-    .dispatch()?;
+    .dispatch();
 
     // Get initial backend state
     let (mut num_attached, mut num_rejected) = tokio::select! {
@@ -539,7 +680,7 @@ pub async fn wait_for_backend_ready(num_backends: usize) -> Result<()> {
             cur_num_rejected_backends: Some(num_rejected),
             tx,
         }
-        .dispatch()?;
+        .dispatch();
         (num_attached, num_rejected) = tokio::select! {
             result = rx => {
                 result?

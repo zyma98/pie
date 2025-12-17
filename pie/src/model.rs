@@ -9,50 +9,85 @@ use super::model::request::{
 };
 use super::model::resource::{ResourceId, ResourceManager, ResourceTypeId};
 use super::model::tokenizer::BytePairEncoder;
-use super::runtime::trap_exception;
-use super::service::{self, Service, ServiceError};
+use super::runtime::{self, TerminationCause};
+use super::service::ServiceCommand;
 use crate::instance::InstanceId;
 use anyhow::Result;
 use anyhow::bail;
 use bytes::Bytes;
 use futures::future;
-use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
-use tokio::sync::{broadcast, mpsc, oneshot};
-use tokio::task::JoinHandle;
+use thiserror::Error;
+use tokio::sync::{Notify, broadcast, mpsc, oneshot};
+use tokio::task::{self, JoinHandle};
 use zeromq::{DealerSocket, Socket, SocketRecv, SocketSend, ZmqMessage};
 
 pub type HandlerId = u32;
 
 pub type CmdQueueId = u32;
 
-static REGISTERED_MODELS: std::sync::LazyLock<boxcar::Vec<(String, usize)>> =
-    std::sync::LazyLock::new(boxcar::Vec::new);
+static MODEL_DISPATCHER: LazyLock<ModelDispatcher> = LazyLock::new(|| ModelDispatcher {
+    models: boxcar::Vec::new(),
+});
+
+#[derive(Debug, Error)]
+pub enum ModelDispatchError {
+    #[error("Invalid model index: {0}")]
+    InvalidModelIndex(usize),
+}
+
+#[derive(Debug)]
+struct ModelDispatcher {
+    models: boxcar::Vec<(String, mpsc::UnboundedSender<Command>)>,
+}
+
+pub fn install_model(model_name: String, mut model: Model) -> Option<usize> {
+    // Make sure the name is not already registered
+    for (_, (existing_name, _)) in MODEL_DISPATCHER.models.iter() {
+        if existing_name == &model_name {
+            return None;
+        }
+    }
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+
+    MODEL_DISPATCHER.models.push((model_name, tx));
+    let model_id = MODEL_DISPATCHER.models.count() - 1;
+
+    // Start the handler task for the model.
+    task::spawn(async move {
+        while let Some(cmd) = rx.recv().await {
+            model.handle(cmd).await;
+        }
+    });
+
+    Some(model_id)
+}
 
 pub fn registered_models() -> Vec<String> {
-    REGISTERED_MODELS
+    MODEL_DISPATCHER
+        .models
         .iter()
-        .map(|(_, (model_name, _))| model_name.clone())
+        .map(|(_, (name, _))| name.clone())
         .collect()
 }
 
-pub fn register_model(model_name: String, service_id: usize) {
-    REGISTERED_MODELS.push((model_name, service_id));
-}
-
 pub fn model_service_id(model_name: &str) -> Option<usize> {
-    REGISTERED_MODELS
+    MODEL_DISPATCHER
+        .models
         .iter()
         .find(|(_, (name, _))| name == model_name)
-        .map(|(_, (_, service_id))| *service_id)
+        .map(|(idx, _)| idx)
 }
 
 pub fn cleanup_instance(inst_id: InstanceId) {
-    REGISTERED_MODELS.iter().for_each(|(_, (_, service_id))| {
-        Command::Cleanup { inst_id }.dispatch(*service_id).ok();
-    })
+    for (model_id, _) in MODEL_DISPATCHER.models.iter() {
+        Command::Cleanup { inst_id }.dispatch(model_id).ok();
+    }
 }
 
 /// Asynchronously collects runtime statistics from all registered models.
@@ -61,11 +96,11 @@ pub async fn runtime_stats() -> HashMap<String, String> {
     let mut futures = Vec::new();
 
     // Dispatch requests to all models concurrently.
-    for (_, (model_name, service_id)) in REGISTERED_MODELS.iter() {
+    for (model_id, (model_name, _)) in MODEL_DISPATCHER.models.iter() {
         let (tx, rx) = oneshot::channel();
         let cmd = Command::GetRuntimeStats { response: tx };
 
-        if cmd.dispatch(*service_id).is_ok() {
+        if cmd.dispatch(model_id).is_ok() {
             // Store the model name and the future for its response.
             futures.push((model_name.clone(), rx));
         } else {
@@ -112,10 +147,10 @@ pub async fn runtime_stats() -> HashMap<String, String> {
 /// the backend after it has exited.
 pub async fn stop_heartbeat() {
     let mut ack_receivers = Vec::new();
-    for (_, (_, service_id)) in REGISTERED_MODELS.iter() {
+    for (model_id, _) in MODEL_DISPATCHER.models.iter() {
         let (tx, rx) = oneshot::channel();
         Command::StopHeartbeat { acknowledge: tx }
-            .dispatch(*service_id)
+            .dispatch(model_id)
             .unwrap();
         ack_receivers.push(rx);
     }
@@ -140,6 +175,17 @@ pub fn submit_request(
     }
     .dispatch(service_id)?;
     Ok(())
+}
+
+fn terminate_instance_with_exception<T>(inst_id: InstanceId, exception: T)
+where
+    T: ToString,
+{
+    runtime::Command::TerminateInstance {
+        inst_id,
+        notification_to_client: Some(TerminationCause::Exception(exception.to_string())),
+    }
+    .dispatch();
 }
 
 /// Defines the set of operations available for the key-value store.
@@ -197,8 +243,15 @@ pub enum Command {
 }
 
 impl Command {
-    pub fn dispatch(self, service_id: usize) -> Result<(), ServiceError> {
-        service::dispatch(service_id, self)
+    pub fn dispatch(self, model_id: usize) -> Result<(), ModelDispatchError> {
+        let (_, tx) = MODEL_DISPATCHER
+            .models
+            .get(model_id)
+            .ok_or(ModelDispatchError::InvalidModelIndex(model_id))?;
+
+        tx.send(self).unwrap();
+
+        Ok(())
     }
 }
 
@@ -253,10 +306,13 @@ impl Model {
         let (stop_heartbeat_tx, stop_heartbeat_rx) = oneshot::channel();
         let (stop_heartbeat_ack_tx, stop_heartbeat_ack_rx) = oneshot::channel();
 
+        let scheduler_notify = Arc::new(Notify::new());
+
         let backend_worker_handle = tokio::spawn(Self::backend_worker(
             socket,
             backend_rx,
             batch_triggers,
+            scheduler_notify.clone(),
             stop_heartbeat_rx,
             stop_heartbeat_ack_tx,
             shutdown_rx,
@@ -265,6 +321,7 @@ impl Model {
             batch_policy,
             scheduler_rx,
             backend_tx,
+            scheduler_notify,
             shutdown_tx.subscribe(),
         ));
 
@@ -344,6 +401,7 @@ impl Model {
         batch_policy: BatchPolicySelector,
         mut req_rx: mpsc::UnboundedReceiver<(CmdQueueId, u32, Request)>,
         backend_tx: mpsc::UnboundedSender<Vec<Request>>,
+        scheduler_notify: Arc<Notify>,
         mut shutdown_rx: broadcast::Receiver<()>,
     ) {
         let mut sched = BatchScheduler::new(batch_policy);
@@ -372,6 +430,7 @@ impl Model {
                         break;
                     }
                 },
+                _ = scheduler_notify.notified() => {},
                 _ = tokio::time::sleep(sleep_duration) => {}
             }
 
@@ -393,6 +452,7 @@ impl Model {
         mut socket: DealerSocket,
         mut batch_rx: mpsc::UnboundedReceiver<Vec<Request>>,
         batch_triggers: HashMap<HandlerId, Arc<AtomicBool>>,
+        scheduler_notify: Arc<Notify>,
         stop_heartbeat_rx: oneshot::Receiver<()>,
         stop_heartbeat_ack_tx: oneshot::Sender<()>,
         mut shutdown_rx: broadcast::Receiver<()>,
@@ -527,6 +587,7 @@ impl Model {
 
                             if let Some(trigger) = batch_triggers.get(&received_handler_id) {
                                 trigger.store(true, std::sync::atomic::Ordering::SeqCst);
+                                scheduler_notify.notify_one();
                             }
                         },
                         Err(e) => {
@@ -618,12 +679,8 @@ impl Model {
 
         Ok((received_corr_id, received_handler_id, frames))
     }
-}
 
-impl Service for Model {
-    type Command = Command;
-
-    async fn handle(&mut self, cmd: Self::Command) {
+    async fn handle(&mut self, cmd: Command) {
         match cmd {
             Command::Submit {
                 cmd_queue_id,
@@ -659,7 +716,7 @@ impl Service for Model {
                         println!("[Warn] Allocate response channel closed before sending.");
                     }
                 }
-                Err(e) => trap_exception(inst_id, e),
+                Err(e) => terminate_instance_with_exception(inst_id, e),
             },
             Command::Deallocate {
                 inst_id,
@@ -667,12 +724,12 @@ impl Service for Model {
                 ptrs,
             } => {
                 if let Err(e) = self.resource_manager.deallocate(inst_id, type_id, ptrs) {
-                    trap_exception(inst_id, e);
+                    terminate_instance_with_exception(inst_id, e);
                 }
             }
             Command::Cleanup { inst_id } => {
                 if let Err(e) = self.resource_manager.cleanup(inst_id) {
-                    trap_exception(inst_id, e);
+                    terminate_instance_with_exception(inst_id, e);
                 }
             }
             Command::GetAllExported { type_id, response } => {
@@ -688,7 +745,7 @@ impl Service for Model {
                 name,
             } => {
                 if let Err(e) = self.resource_manager.export(inst_id, type_id, ptrs, name) {
-                    trap_exception(inst_id, e);
+                    terminate_instance_with_exception(inst_id, e);
                 }
             }
             Command::Import {
@@ -702,7 +759,7 @@ impl Service for Model {
                         println!("[Warn] Import response channel closed before sending.");
                     }
                 }
-                Err(e) => trap_exception(inst_id, e),
+                Err(e) => terminate_instance_with_exception(inst_id, e),
             },
             Command::ReleaseExported {
                 inst_id,
@@ -710,7 +767,7 @@ impl Service for Model {
                 name,
             } => {
                 if let Err(e) = self.resource_manager.release_exported(type_id, name) {
-                    trap_exception(inst_id, e);
+                    terminate_instance_with_exception(inst_id, e);
                 }
             }
             Command::StopHeartbeat {

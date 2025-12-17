@@ -1,20 +1,17 @@
-use super::instance::InstanceId;
-use super::messaging::dispatch_u2i;
-use super::service::{Service, ServiceError, install_service};
-use super::utils::IdPool;
-use super::{messaging, runtime, service};
 use crate::auth::{AuthorizedUsers, PublicKey};
+use crate::instance::{InstanceId, OutputChannel, OutputDelivery};
+use crate::messaging::PushPullCommand;
 use crate::model;
 use crate::model::Model;
+use crate::runtime::{self, AttachInstanceResult, TerminationCause};
+use crate::service::{CommandDispatcher, Service, ServiceCommand};
+use crate::utils::IdPool;
 use anyhow::{Result, anyhow, bail};
 use base64::Engine;
 use bytes::Bytes;
 use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
-use pie_client::message::{
-    CHUNK_SIZE_BYTES, QUERY_BACKEND_STATS, QUERY_MODEL_STATUS, QUERY_PROGRAM_EXISTS,
-};
-use pie_client::message::{ClientMessage, EventCode, ServerMessage};
+use pie_client::message::{self, ClientMessage, EventCode, ServerMessage, StreamingOutput};
 use ring::rand::{SecureRandom, SystemRandom};
 use std::mem;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -30,6 +27,22 @@ use tungstenite::Message as WsMessage;
 use uuid::Uuid;
 
 type ClientId = u32;
+
+/// The sender of the command channel, which is used to send commands to the
+/// handler task.
+static COMMAND_DISPATCHER: OnceLock<CommandDispatcher<ServerEvent>> = OnceLock::new();
+
+/// Starts the server service. A daemon task will be spawned to handle the
+/// commands dispatched from other services.
+pub fn start_service(
+    ip_port: &str,
+    enable_auth: bool,
+    authorized_users: AuthorizedUsers,
+    internal_auth_token: String,
+) {
+    let server = Server::new(ip_port, enable_auth, authorized_users, internal_auth_token);
+    server.start(&COMMAND_DISPATCHER);
+}
 
 #[derive(Debug)]
 pub enum ServerEvent {
@@ -59,10 +72,14 @@ pub enum InstanceEvent {
         inst_id: InstanceId,
         data: Bytes,
     },
-    DetachInstance {
+    Terminate {
         inst_id: InstanceId,
-        termination_code: u32,
-        message: String,
+        cause: TerminationCause,
+    },
+    StreamingOutput {
+        inst_id: InstanceId,
+        output_type: OutputChannel,
+        content: String,
     },
 }
 
@@ -78,23 +95,18 @@ pub enum InternalEvent {
     },
 }
 
-impl ServerEvent {
-    pub fn dispatch(self) -> Result<(), ServiceError> {
-        static SERVICE_ID_SERVER: OnceLock<usize> = OnceLock::new();
-        let service_id =
-            *SERVICE_ID_SERVER.get_or_init(move || service::get_service_id("server").unwrap());
-        service::dispatch(service_id, self)
-    }
+impl ServiceCommand for ServerEvent {
+    const DISPATCHER: &'static OnceLock<CommandDispatcher<Self>> = &COMMAND_DISPATCHER;
 }
 
 impl InstanceEvent {
-    pub fn dispatch(self) -> Result<(), ServiceError> {
+    pub fn dispatch(self) {
         ServerEvent::from(self).dispatch()
     }
 }
 
 impl InternalEvent {
-    pub fn dispatch(self) -> Result<(), ServiceError> {
+    pub fn dispatch(self) {
         ServerEvent::from(self).dispatch()
     }
 }
@@ -168,13 +180,12 @@ impl BackendStatus {
     }
 }
 
-pub struct Server {
+struct Server {
     state: Arc<ServerState>,
-    listener_loop: task::JoinHandle<()>,
 }
 
 impl Server {
-    pub fn new(
+    fn new(
         ip_port: &str,
         enable_auth: bool,
         authorized_users: AuthorizedUsers,
@@ -190,11 +201,8 @@ impl Server {
             backend_status: Arc::new(BackendStatus::new()),
         });
 
-        let listener_loop = task::spawn(Self::listener_loop(ip_port.to_string(), state.clone()));
-        Server {
-            state,
-            listener_loop,
-        }
+        let _listener = task::spawn(Self::listener_loop(ip_port.to_string(), state.clone()));
+        Server { state }
     }
 
     async fn listener_loop(ip_port: String, state: Arc<ServerState>) {
@@ -227,8 +235,9 @@ impl Service for Server {
                 // Correctly extract instance_id from all relevant commands
                 let inst_id = match &event {
                     InstanceEvent::SendMsgToClient { inst_id, .. }
-                    | InstanceEvent::DetachInstance { inst_id, .. }
-                    | InstanceEvent::SendBlobToClient { inst_id, .. } => *inst_id,
+                    | InstanceEvent::Terminate { inst_id, .. }
+                    | InstanceEvent::SendBlobToClient { inst_id, .. }
+                    | InstanceEvent::StreamingOutput { inst_id, .. } => *inst_id,
                 };
 
                 // Send it to the client if it's connected
@@ -258,7 +267,6 @@ impl Service for Server {
 
 /// A generic struct to manage chunked, in-flight uploads for both programs and blobs.
 struct InFlightUpload {
-    hash: String,
     total_chunks: usize,
     buffer: Vec<u8>,
     next_chunk_index: usize,
@@ -271,7 +279,7 @@ struct Session {
 
     inflight_program_upload: Option<InFlightUpload>,
     inflight_blob_uploads: DashMap<String, InFlightUpload>,
-    inst_owned: Vec<InstanceId>,
+    attached_instances: Vec<InstanceId>,
 
     ws_msg_tx: mpsc::Sender<WsMessage>,
     client_cmd_rx: mpsc::Receiver<SessionEvent>,
@@ -341,7 +349,7 @@ impl Session {
             state,
             inflight_program_upload: None,
             inflight_blob_uploads: DashMap::new(),
-            inst_owned: Vec::new(),
+            attached_instances: Vec::new(),
             ws_msg_tx,
             client_cmd_rx,
             client_cmd_tx,
@@ -545,27 +553,49 @@ impl Session {
                 ClientMessage::LaunchInstance {
                     corr_id,
                     program_hash,
+                    cmd_name,
                     arguments,
+                    detached,
                 } => {
-                    self.handle_launch_instance(corr_id, program_hash, arguments)
-                        .await
+                    self.handle_launch_instance(
+                        corr_id,
+                        program_hash,
+                        cmd_name,
+                        arguments,
+                        detached,
+                    )
+                    .await
+                }
+                ClientMessage::AttachInstance {
+                    corr_id,
+                    instance_id,
+                } => {
+                    self.handle_attach_instance(corr_id, instance_id).await;
                 }
                 ClientMessage::LaunchServerInstance {
                     corr_id,
                     port,
                     program_hash,
+                    cmd_name,
                     arguments,
                 } => {
-                    self.handle_launch_server_instance(corr_id, port, program_hash, arguments)
-                        .await
+                    self.handle_launch_server_instance(
+                        corr_id,
+                        port,
+                        program_hash,
+                        cmd_name,
+                        arguments,
+                    )
+                    .await
                 }
                 ClientMessage::SignalInstance {
                     instance_id,
                     message,
                 } => self.handle_signal_instance(instance_id, message).await,
-                ClientMessage::TerminateInstance { instance_id } => {
-                    self.handle_terminate_instance(instance_id).await
-                }
+                ClientMessage::TerminateInstance {
+                    corr_id,
+                    instance_id,
+                } => self.handle_terminate_instance(corr_id, instance_id).await,
                 ClientMessage::AttachRemoteService {
                     corr_id,
                     endpoint,
@@ -601,22 +631,28 @@ impl Session {
                 ClientMessage::Ping { corr_id } => {
                     self.send_response(corr_id, true, "Pong".to_string()).await;
                 }
+                ClientMessage::ListInstances { corr_id } => {
+                    self.handle_list_instances(corr_id).await;
+                }
             },
             SessionEvent::InstanceEvent(cmd) => match cmd {
                 InstanceEvent::SendMsgToClient { inst_id, message } => {
                     self.send_inst_event(inst_id, EventCode::Message, message)
                         .await
                 }
-                InstanceEvent::DetachInstance {
-                    inst_id,
-                    termination_code,
-                    message,
-                } => {
-                    self.handle_detach_instance(inst_id, termination_code, message)
-                        .await;
+                InstanceEvent::Terminate { inst_id, cause } => {
+                    self.handle_instance_termination(inst_id, cause).await;
                 }
                 InstanceEvent::SendBlobToClient { inst_id, data } => {
                     self.handle_send_blob(inst_id, data).await;
+                }
+                InstanceEvent::StreamingOutput {
+                    inst_id,
+                    output_type,
+                    content,
+                } => {
+                    self.handle_streaming_output(inst_id, output_type, content)
+                        .await;
                 }
             },
         }
@@ -644,6 +680,24 @@ impl Session {
         .await;
     }
 
+    async fn send_launch_result(&self, corr_id: u32, successful: bool, message: String) {
+        self.send(ServerMessage::InstanceLaunchResult {
+            corr_id,
+            successful,
+            message,
+        })
+        .await;
+    }
+
+    async fn send_attach_result(&self, corr_id: u32, successful: bool, message: String) {
+        self.send(ServerMessage::InstanceAttachResult {
+            corr_id,
+            successful,
+            message,
+        })
+        .await;
+    }
+
     async fn send_inst_event(&self, inst_id: InstanceId, event: EventCode, message: String) {
         self.send(ServerMessage::InstanceEvent {
             instance_id: inst_id.to_string(),
@@ -653,39 +707,34 @@ impl Session {
         .await;
     }
 
-    async fn handle_detach_instance(
-        &mut self,
-        inst_id: InstanceId,
-        termination_code: u32,
-        message: String,
-    ) {
-        self.inst_owned.retain(|&id| id != inst_id);
+    async fn handle_instance_termination(&mut self, inst_id: InstanceId, cause: TerminationCause) {
+        self.attached_instances.retain(|&id| id != inst_id);
 
         if self.state.client_cmd_txs.remove(&inst_id).is_some() {
-            let event_code = match termination_code {
-                0 => EventCode::Completed,
-                1 => EventCode::Aborted,
-                2 => EventCode::Exception,
-                _ => EventCode::ServerError,
+            let (event_code, message) = match cause {
+                TerminationCause::Normal(message) => (EventCode::Completed, message),
+                TerminationCause::Signal => (EventCode::Aborted, "Signal termination".to_string()),
+                TerminationCause::Exception(message) => (EventCode::Exception, message),
+                TerminationCause::OutOfResources(message) => (EventCode::ServerError, message),
             };
+
             self.send_inst_event(inst_id, event_code, message).await;
         }
     }
 
     async fn handle_query(&mut self, corr_id: u32, subject: String, record: String) {
         match subject.as_str() {
-            QUERY_PROGRAM_EXISTS => {
+            message::QUERY_PROGRAM_EXISTS => {
                 let (evt_tx, evt_rx) = oneshot::channel();
                 runtime::Command::ProgramExists {
                     hash: record,
                     event: evt_tx,
                 }
-                .dispatch()
-                .unwrap();
+                .dispatch();
                 self.send_response(corr_id, true, evt_rx.await.unwrap().to_string())
                     .await;
             }
-            QUERY_MODEL_STATUS => {
+            message::QUERY_MODEL_STATUS => {
                 let runtime_stats = model::runtime_stats().await;
                 self.send_response(
                     corr_id,
@@ -694,7 +743,7 @@ impl Session {
                 )
                 .await;
             }
-            QUERY_BACKEND_STATS => {
+            message::QUERY_BACKEND_STATS => {
                 let runtime_stats = model::runtime_stats().await;
                 let mut sorted_stats: Vec<_> = runtime_stats.iter().collect();
                 sorted_stats.sort_by_key(|(k, _)| *k);
@@ -709,6 +758,16 @@ impl Session {
         }
     }
 
+    async fn handle_list_instances(&self, corr_id: u32) {
+        let (evt_tx, evt_rx) = oneshot::channel();
+        runtime::Command::ListInstances { event: evt_tx }.dispatch();
+
+        let instances = evt_rx.await.unwrap();
+
+        self.send(ServerMessage::LiveInstances { corr_id, instances })
+            .await;
+    }
+
     async fn handle_upload_program(
         &mut self,
         corr_id: u32,
@@ -717,14 +776,14 @@ impl Session {
         total_chunks: usize,
         mut chunk_data: Vec<u8>,
     ) {
-        if chunk_data.len() > CHUNK_SIZE_BYTES {
+        if chunk_data.len() > message::CHUNK_SIZE_BYTES {
             self.send_response(
                 corr_id,
                 false,
                 format!(
                     "Chunk size {} exceeds limit {}",
                     chunk_data.len(),
-                    CHUNK_SIZE_BYTES
+                    message::CHUNK_SIZE_BYTES
                 ),
             )
             .await;
@@ -740,7 +799,6 @@ impl Session {
                 return;
             }
             self.inflight_program_upload = Some(InFlightUpload {
-                hash: program_hash.clone(),
                 total_chunks,
                 buffer: Vec::new(),
                 next_chunk_index: 0,
@@ -802,8 +860,7 @@ impl Session {
                     raw: mem::take(&mut inflight.buffer),
                     event: evt_tx,
                 }
-                .dispatch()
-                .unwrap();
+                .dispatch();
                 evt_rx.await.unwrap().unwrap();
                 self.send_response(corr_id, true, final_hash).await;
             }
@@ -815,27 +872,136 @@ impl Session {
         &mut self,
         corr_id: u32,
         program_hash: String,
+        cmd_name: String,
         arguments: Vec<String>,
+        detached: bool,
     ) {
         let (evt_tx, evt_rx) = oneshot::channel();
+
         runtime::Command::LaunchInstance {
             program_hash,
+            cmd_name,
             arguments,
+            detached,
             event: evt_tx,
         }
-        .dispatch()
-        .unwrap();
+        .dispatch();
+
         match evt_rx.await.unwrap() {
+            // The instance was launched successfully. Notify the client about the instance ID.
             Ok(instance_id) => {
+                // If the instance is not detached, add it to the attached instances so that its
+                // output can be streamed to the client after it is launched.
+                if !detached {
+                    self.state
+                        .client_cmd_txs
+                        .insert(instance_id, self.client_cmd_tx.clone());
+                    self.attached_instances.push(instance_id);
+                }
+
+                // Send the instance ID to the client before allowing output. This is especially
+                // important for attached instances to prevent a race condition where output
+                // arrives at the client side before the client receives the instance ID.
+                self.send_launch_result(corr_id, true, instance_id.to_string())
+                    .await;
+
+                // Allow the instance to start producing output. We must do this after sending the
+                // instance ID to the client to prevent a race condition where output arrives at
+                // the client side before the client receives the instance ID.
+                runtime::Command::AllowOutput {
+                    inst_id: instance_id,
+                }
+                .dispatch();
+            }
+            // The instance failed to launch. Notify the client about the error.
+            Err(e) => {
+                self.send_launch_result(corr_id, false, e.to_string()).await;
+            }
+        }
+    }
+
+    async fn handle_attach_instance(&mut self, corr_id: u32, instance_id: String) {
+        // Parse the instance ID from the string.
+        let inst_id = match Uuid::parse_str(&instance_id) {
+            Ok(id) => id,
+            Err(_) => {
+                self.send_attach_result(corr_id, false, "Invalid instance_id".to_string())
+                    .await;
+                return;
+            }
+        };
+
+        let (evt_tx, evt_rx) = oneshot::channel();
+
+        // Change instance state to attached.
+        runtime::Command::AttachInstance {
+            inst_id,
+            event: evt_tx,
+        }
+        .dispatch();
+
+        match evt_rx.await.unwrap() {
+            // The instance was attached successfully. Notify the client first and then change
+            // the output delivery mode to streamed so that the client can start receiving output.
+            AttachInstanceResult::AttachedRunning => {
+                self.send_attach_result(corr_id, true, "Instance attached".to_string())
+                    .await;
+
+                // Update the map so that instance events will be forwarded to this session.
                 self.state
                     .client_cmd_txs
-                    .insert(instance_id, self.client_cmd_tx.clone());
-                self.inst_owned.push(instance_id);
-                self.send_response(corr_id, true, instance_id.to_string())
+                    .insert(inst_id, self.client_cmd_tx.clone());
+                self.attached_instances.push(inst_id);
+
+                // Set the output delivery mode to streamed so that new and any buffered output
+                // will be sent to the server as instance events, which will be forwarded to this
+                // session.
+                runtime::Command::SetOutputDelivery {
+                    inst_id,
+                    mode: OutputDelivery::Streamed,
+                }
+                .dispatch();
+            }
+            // The instance has finished execution. Notify the client first and then change the
+            // output delivery mode to streamed so that the client can receive the final output.
+            // Then, terminate the instance and notify the client about the termination.
+            AttachInstanceResult::AttachedFinished(cause) => {
+                self.send_attach_result(corr_id, true, "Instance attached".to_string())
+                    .await;
+
+                // Update the map so that instance events will be forwarded to this session.
+                self.state
+                    .client_cmd_txs
+                    .insert(inst_id, self.client_cmd_tx.clone());
+                self.attached_instances.push(inst_id);
+
+                // Set the output delivery mode to streamed so that new and any buffered output
+                // will be sent to the server as instance events, which will be forwarded to this
+                // session.
+                runtime::Command::SetOutputDelivery {
+                    inst_id,
+                    mode: OutputDelivery::Streamed,
+                }
+                .dispatch();
+
+                // Terminate the instance and notify the client about the termination.
+                runtime::Command::TerminateInstance {
+                    inst_id,
+                    notification_to_client: Some(cause),
+                }
+                .dispatch();
+            }
+            // The instance was not found.
+            // Remove it from the attached instances and notify the client about the error.
+            AttachInstanceResult::InstanceNotFound => {
+                self.send_attach_result(corr_id, false, "Instance not found".to_string())
                     .await;
             }
-            Err(e) => {
-                self.send_response(corr_id, false, e.to_string()).await;
+            // The instance is already attached to another client.
+            // Remove it from the attached instances and notify the client about the error.
+            AttachInstanceResult::AlreadyAttached => {
+                self.send_attach_result(corr_id, false, "Instance already attached".to_string())
+                    .await;
             }
         }
     }
@@ -845,17 +1011,18 @@ impl Session {
         corr_id: u32,
         port: u32,
         program_hash: String,
+        cmd_name: String,
         arguments: Vec<String>,
     ) {
         let (evt_tx, evt_rx) = oneshot::channel();
         runtime::Command::LaunchServerInstance {
             program_hash,
             port,
+            cmd_name,
             arguments,
             event: evt_tx,
         }
-        .dispatch()
-        .unwrap();
+        .dispatch();
         match evt_rx.await.unwrap() {
             Ok(_) => {
                 self.send_response(corr_id, true, "server launched".to_string())
@@ -867,20 +1034,29 @@ impl Session {
 
     async fn handle_signal_instance(&mut self, instance_id: String, message: String) {
         if let Ok(inst_id) = Uuid::parse_str(&instance_id) {
-            if self.inst_owned.contains(&inst_id) {
-                dispatch_u2i(messaging::PushPullCommand::Push {
+            if self.attached_instances.contains(&inst_id) {
+                PushPullCommand::Push {
                     topic: inst_id.to_string(),
                     message,
-                });
+                }
+                .dispatch();
             }
         }
     }
 
-    async fn handle_terminate_instance(&mut self, instance_id: String) {
+    async fn handle_terminate_instance(&mut self, corr_id: u32, instance_id: String) {
         if let Ok(inst_id) = Uuid::parse_str(&instance_id) {
-            if self.inst_owned.contains(&inst_id) {
-                runtime::trap(inst_id, runtime::TerminationCause::Signal);
+            runtime::Command::TerminateInstance {
+                inst_id,
+                notification_to_client: Some(runtime::TerminationCause::Signal),
             }
+            .dispatch();
+
+            self.send_response(corr_id, true, "Instance terminated".to_string())
+                .await;
+        } else {
+            self.send_response(corr_id, false, "Malformed instance ID".to_string())
+                .await;
         }
     }
 
@@ -894,8 +1070,7 @@ impl Session {
         match service_type.as_str() {
             "model" => match Model::new(&endpoint).await {
                 Ok(model_service) => {
-                    if let Some(service_id) = install_service(&service_name, model_service) {
-                        model::register_model(service_name, service_id);
+                    if model::install_model(service_name, model_service).is_some() {
                         self.send_response(corr_id, true, "Model service registered".into())
                             .await;
                         self.state.backend_status.increment_attached_count();
@@ -941,7 +1116,7 @@ impl Session {
                 return;
             }
         };
-        if !self.inst_owned.contains(&inst_id) {
+        if !self.attached_instances.contains(&inst_id) {
             self.send_response(
                 corr_id,
                 false,
@@ -961,9 +1136,8 @@ impl Session {
             self.inflight_blob_uploads.insert(
                 blob_hash.clone(),
                 InFlightUpload {
-                    hash: blob_hash.clone(),
                     total_chunks,
-                    buffer: Vec::with_capacity(total_chunks * CHUNK_SIZE_BYTES),
+                    buffer: Vec::with_capacity(total_chunks * message::CHUNK_SIZE_BYTES),
                     next_chunk_index: 0,
                 },
             );
@@ -994,10 +1168,11 @@ impl Session {
                 let final_hash = blake3::hash(&inflight.buffer).to_hex().to_string();
 
                 if final_hash == blob_hash {
-                    dispatch_u2i(messaging::PushPullCommand::PushBlob {
+                    PushPullCommand::PushBlob {
                         topic: inst_id.to_string(),
                         message: Bytes::from(mem::take(&mut inflight.buffer)),
-                    });
+                    }
+                    .dispatch();
                     self.send_response(corr_id, true, "Blob sent to instance".to_string())
                         .await;
                 } else {
@@ -1016,9 +1191,9 @@ impl Session {
     /// Handles an internal command to send a blob to the connected client.
     async fn handle_send_blob(&mut self, inst_id: InstanceId, data: Bytes) {
         let blob_hash = blake3::hash(&data).to_hex().to_string();
-        let total_chunks = (data.len() + CHUNK_SIZE_BYTES - 1) / CHUNK_SIZE_BYTES;
+        let total_chunks = (data.len() + message::CHUNK_SIZE_BYTES - 1) / message::CHUNK_SIZE_BYTES;
 
-        for (i, chunk) in data.chunks(CHUNK_SIZE_BYTES).enumerate() {
+        for (i, chunk) in data.chunks(message::CHUNK_SIZE_BYTES).enumerate() {
             self.send(ServerMessage::DownloadBlob {
                 corr_id: 0,
                 instance_id: inst_id.to_string(),
@@ -1030,14 +1205,47 @@ impl Session {
             .await;
         }
     }
+
+    async fn handle_streaming_output(
+        &mut self,
+        inst_id: InstanceId,
+        output_type: OutputChannel,
+        content: String,
+    ) {
+        let output = match output_type {
+            OutputChannel::Stdout => StreamingOutput::Stdout(content),
+            OutputChannel::Stderr => StreamingOutput::Stderr(content),
+        };
+        self.send(ServerMessage::StreamingOutput {
+            instance_id: inst_id.to_string(),
+            output,
+        })
+        .await;
+    }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
-        for inst_id in self.inst_owned.drain(..) {
-            if self.state.client_cmd_txs.remove(&inst_id).is_some() {
-                runtime::trap_exception(inst_id, "socket terminated");
-            }
+        // Detach all attached instances.
+        for inst_id in self.attached_instances.drain(..) {
+            let server_state = Arc::clone(&self.state);
+
+            // We need to spawn a task to detach the instance because the drop handler
+            // is not async. It's okay as long as the instance is detached eventually.
+            task::spawn(async move {
+                // Set the output delivery mode to buffered.
+                runtime::Command::SetOutputDelivery {
+                    inst_id,
+                    mode: OutputDelivery::Buffered,
+                }
+                .dispatch();
+
+                // Remove the forwarding channel to the instance from the server state.
+                server_state.client_cmd_txs.remove(&inst_id);
+
+                // Set the instance as detached so that it can be attached to another client.
+                runtime::Command::DetachInstance { inst_id }.dispatch();
+            });
         }
 
         // Abort the receive pump so that it no longer receives messages from the client.

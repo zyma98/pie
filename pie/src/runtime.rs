@@ -1,19 +1,19 @@
-use super::instance::{InstanceId, InstanceState};
-use super::service::{Service, ServiceError};
-use super::{api, server, service};
+use super::instance::{InstanceId, InstanceState, OutputDelivery, OutputDeliveryCtrl};
+use super::service::{CommandDispatcher, Service};
+use super::{api, server};
 use crate::model;
 use crate::model::request::QueryResponse;
+use crate::service::ServiceCommand;
 use dashmap::DashMap;
 use hyper::server::conn::http1;
+use pie_client::message;
 use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock};
 use thiserror::Error;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 use wasmtime::component::Resource;
-use wasmtime::{
-    Config, Engine, PoolingAllocationConfig, Store, component::Component, component::Linker,
-};
+use wasmtime::{Config, Engine, Store, component::Component, component::Linker};
 use wasmtime_wasi_http::WasiHttpView;
 use wasmtime_wasi_http::bindings::exports::wasi::http::incoming_handler::{
     IncomingRequest, ResponseOutparam,
@@ -24,27 +24,18 @@ use wasmtime_wasi_http::io::TokioIo;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-static SERVICE_ID_RUNTIME: OnceLock<usize> = OnceLock::new();
+/// The sender of the command channel, which is used to send commands to the
+/// handler task.
+static COMMAND_DISPATCHER: OnceLock<CommandDispatcher<Command>> = OnceLock::new();
 
-pub fn trap(instance_id: InstanceId, cause: TerminationCause) {
-    Command::Trap {
-        inst_id: instance_id,
-        cause,
-    }
-    .dispatch()
-    .unwrap();
-}
+/// Starts the runtime service. A daemon task will be spawned to handle the
+/// commands dispatched from other services.
+pub fn start_service<P: AsRef<std::path::Path>>(cache_dir: P) {
+    let runtime = Runtime::new(cache_dir);
 
-pub fn trap_exception<T>(instance_id: InstanceId, exception: T)
-where
-    T: ToString,
-{
-    Command::Trap {
-        inst_id: instance_id,
-        cause: TerminationCause::Exception(exception.to_string()),
-    }
-    .dispatch()
-    .unwrap();
+    // Loading existing programs should not fail.
+    runtime.load_existing_programs().unwrap();
+    runtime.start(&COMMAND_DISPATCHER);
 }
 
 #[derive(Debug, Error)]
@@ -74,7 +65,6 @@ pub enum RuntimeError {
     Other(String),
 }
 
-#[derive(Debug)]
 pub enum Command {
     GetVersion {
         event: oneshot::Sender<String>,
@@ -93,45 +83,65 @@ pub enum Command {
 
     LaunchInstance {
         program_hash: String,
+        cmd_name: String,
         arguments: Vec<String>,
+        detached: bool,
         event: oneshot::Sender<Result<InstanceId, RuntimeError>>,
+    },
+
+    AttachInstance {
+        inst_id: InstanceId,
+        event: oneshot::Sender<AttachInstanceResult>,
+    },
+
+    DetachInstance {
+        inst_id: InstanceId,
+    },
+
+    AllowOutput {
+        inst_id: InstanceId,
     },
 
     LaunchServerInstance {
         program_hash: String,
         port: u32,
+        cmd_name: String,
         arguments: Vec<String>,
         event: oneshot::Sender<Result<(), RuntimeError>>,
     },
 
-    Trap {
+    TerminateInstance {
+        inst_id: InstanceId,
+        notification_to_client: Option<TerminationCause>,
+    },
+
+    FinishInstance {
         inst_id: InstanceId,
         cause: TerminationCause,
     },
 
-    Warn {
+    SetOutputDelivery {
         inst_id: InstanceId,
-        message: String,
+        mode: OutputDelivery,
     },
 
     DebugQuery {
         query: String,
         event: oneshot::Sender<QueryResponse>,
     },
+
+    ListInstances {
+        event: oneshot::Sender<Vec<message::InstanceInfo>>,
+    },
 }
 
-impl Command {
-    pub fn dispatch(self) -> Result<(), ServiceError> {
-        let service_id =
-            *SERVICE_ID_RUNTIME.get_or_init(move || service::get_service_id("runtime").unwrap());
-
-        service::dispatch(service_id, self)
-    }
+impl ServiceCommand for Command {
+    const DISPATCHER: &'static OnceLock<CommandDispatcher<Self>> = &COMMAND_DISPATCHER;
 }
 
 /// Holds the “global” or “runtime” data that the controller needs to manage
 /// instances, compiled programs, etc.
-pub struct Runtime {
+struct Runtime {
     /// The Wasmtime engine (global)
     engine: Engine,
     linker: Arc<Linker<InstanceState>>,
@@ -147,6 +157,9 @@ pub struct Runtime {
     /// Running instances
     running_instances: DashMap<InstanceId, InstanceHandle>,
 
+    /// Finished instances
+    finished_instances: DashMap<InstanceId, InstanceHandle>,
+
     /// Running server instances
     running_server_instances: DashMap<InstanceId, InstanceHandle>,
 }
@@ -156,19 +169,66 @@ pub enum TerminationCause {
     Normal(String),
     Signal,
     Exception(String),
-    SystemError(String),
     OutOfResources(String),
 }
 
-pub struct InstanceHandle {
-    pub hash: String,
-    //pub to_origin: Sender<ServerMessage>,
-    // pub evt_from_system: Sender<String>,
-    // pub evt_from_origin: Sender<String>,
-    // pub evt_from_peers: Sender<(String, String)>,
-    pub join_handle: tokio::task::JoinHandle<()>,
+#[derive(Debug, Clone)]
+pub enum InstanceRunningState {
+    /// The instance is running and a client is attached to it.
+    /// The output will be streamed to the client.
+    ///
+    /// Note that this enum does not directly affect the output streaming behavior.
+    /// The output streaming behavior is determined by the output delivery mode.
+    /// The `Attached` state merely prevents other clients from attaching to the same
+    /// instance. Once an instance is set to `Attached`, the output delivery mode must
+    /// be set to `Streamed` via the `SetOutputDelivery` command.
+    Attached,
+    /// The instance is running and not attached to a client.
+    /// The output will be buffered.
+    ///
+    /// Note that this enum does not directly affect the output streaming behavior.
+    /// The output streaming behavior is determined by the output delivery mode.
+    /// The `Detached` state merely indicates that the instance is not attached to a
+    /// client and other clients can attach to it. Before setting the instance to
+    /// `Detached`, the output delivery mode must be set to `Buffered` via the
+    /// `SetOutputDelivery` command, so to prevent the output from being lost.
+    Detached,
+    /// The instance has finished execution.
+    /// The output is buffered and waiting to be streamed to the client.
+    Finished(TerminationCause),
 }
-//#[async_trait]
+
+impl From<InstanceRunningState> for message::InstanceStatus {
+    fn from(state: InstanceRunningState) -> Self {
+        match state {
+            InstanceRunningState::Attached => message::InstanceStatus::Attached,
+            InstanceRunningState::Detached => message::InstanceStatus::Detached,
+            InstanceRunningState::Finished(_) => message::InstanceStatus::Finished,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub enum AttachInstanceResult {
+    /// The instance is running and the client has been attached to it successfully.
+    AttachedRunning,
+    /// The instance has finished execution and the client has been attached to it successfully.
+    AttachedFinished(TerminationCause),
+    /// The instance is not found.
+    InstanceNotFound,
+    /// Another client has already been attached to this instance.
+    AlreadyAttached,
+}
+
+struct InstanceHandle {
+    program_hash: String,
+    cmd_name: String,
+    arguments: Vec<String>,
+    output_delivery_ctrl: OutputDeliveryCtrl,
+    running_state: InstanceRunningState,
+    join_handle: tokio::task::JoinHandle<()>,
+}
+
 impl Service for Runtime {
     type Command = Command;
 
@@ -199,34 +259,65 @@ impl Service for Runtime {
             }
 
             Command::LaunchInstance {
-                program_hash: hash,
+                program_hash,
+                cmd_name,
                 event,
                 arguments,
+                detached,
             } => {
-                let instance_id = self.launch_instance(&hash, arguments).await.unwrap();
-                event.send(Ok(instance_id)).unwrap();
+                let res = self
+                    .launch_instance(program_hash, cmd_name, arguments, detached)
+                    .await;
+                event
+                    .send(res)
+                    .map_err(|_| "Failed to send instance ID after launching instance")
+                    .unwrap();
+            }
+
+            Command::AttachInstance { inst_id, event } => {
+                let res = self.attach_instance(inst_id);
+                event
+                    .send(res)
+                    .map_err(|_| "Failed to send attach instance result")
+                    .unwrap();
+            }
+
+            Command::DetachInstance { inst_id } => {
+                self.detach_instance(inst_id);
+            }
+
+            Command::AllowOutput { inst_id } => {
+                self.allow_output(inst_id);
             }
 
             Command::LaunchServerInstance {
-                program_hash: hash,
+                program_hash,
                 port,
+                cmd_name,
                 arguments,
                 event,
             } => {
-                let _ = self.launch_server_instance(&hash, port, arguments).await;
+                let _ = self
+                    .launch_server_instance(program_hash, cmd_name, port, arguments)
+                    .await;
                 event.send(Ok(())).unwrap();
             }
 
-            Command::Trap { inst_id, cause } => {
-                self.terminate_instance(inst_id, cause).await;
+            Command::TerminateInstance {
+                inst_id,
+                notification_to_client,
+            } => {
+                self.terminate_instance(inst_id, notification_to_client);
             }
 
-            Command::Warn { inst_id, message } => server::InstanceEvent::SendMsgToClient {
-                inst_id,
-                message: message.clone(),
+            Command::FinishInstance { inst_id, cause } => {
+                self.finish_instance(inst_id, cause);
             }
-            .dispatch()
-            .unwrap(),
+
+            Command::SetOutputDelivery { inst_id, mode } => {
+                self.set_output_delivery(inst_id, mode);
+            }
+
             Command::GetVersion { event } => {
                 event.send(VERSION.to_string()).unwrap();
             }
@@ -251,7 +342,7 @@ impl Service for Runtime {
                                 format!(
                                     "Instance ID: {}, Program Hash: {}",
                                     item.key(),
-                                    item.value().hash
+                                    item.value().program_hash
                                 )
                             })
                             .collect();
@@ -275,20 +366,33 @@ impl Service for Runtime {
 
                 event.send(QueryResponse { value: res }).unwrap();
             }
+            Command::ListInstances { event } => {
+                let instances: Vec<message::InstanceInfo> = self
+                    .running_instances
+                    .iter()
+                    .chain(self.finished_instances.iter())
+                    .map(|item| message::InstanceInfo {
+                        id: item.key().to_string(),
+                        cmd_name: item.value().cmd_name.clone(),
+                        arguments: item.value().arguments.clone(),
+                        status: item.value().running_state.clone().into(),
+                    })
+                    .collect();
+
+                event.send(instances).unwrap();
+            }
         }
     }
 }
 
 impl Runtime {
-    pub fn new<P: AsRef<std::path::Path>>(cache_dir: P) -> Self {
+    fn new<P: AsRef<std::path::Path>>(cache_dir: P) -> Self {
         // Configure Wasmtime engine
         let mut config = Config::default();
         config.async_support(true);
 
-        let mut pooling_config = PoolingAllocationConfig::default();
-
         // TODO: Adjust settings later: https://docs.wasmtime.dev/api/wasmtime/struct.PoolingAllocationConfig.html
-
+        // let mut pooling_config = PoolingAllocationConfig::default();
         //config.allocation_strategy(InstanceAllocationStrategy::Pooling(pooling_config));
 
         let engine = Engine::new(&config).unwrap();
@@ -316,11 +420,12 @@ impl Runtime {
             programs_in_memory: DashMap::new(),
             programs_in_disk: DashMap::new(),
             running_instances: DashMap::new(),
+            finished_instances: DashMap::new(),
             running_server_instances: DashMap::new(),
         }
     }
 
-    pub fn load_existing_programs(&self) -> Result<(), RuntimeError> {
+    fn load_existing_programs(&self) -> Result<(), RuntimeError> {
         let entries = std::fs::read_dir(&self.cache_dir)?; // Will map to RuntimeError::Io automatically
         for entry in entries {
             let entry = entry?; // same here, auto-converted to RuntimeError::Io
@@ -369,13 +474,14 @@ impl Runtime {
     }
 
     /// Actually start a program instance
-    pub async fn launch_instance(
+    async fn launch_instance(
         &self,
-        hash: &str,
+        program_hash: String,
+        cmd_name: String,
         arguments: Vec<String>,
+        detached: bool,
     ) -> Result<InstanceId, RuntimeError> {
-        let component = self.get_component(hash)?;
-
+        let component = self.get_component(&program_hash)?;
         let instance_id = Uuid::new_v4();
 
         // Instantiate and run in a task
@@ -384,19 +490,36 @@ impl Runtime {
 
         // Create a oneshot channel to signal when the task can start
         let (start_tx, start_rx) = oneshot::channel();
+        // Create a oneshot channel to receive the output delivery controller
+        let (output_delivery_ctrl_tx, output_delivery_ctrl_rx) = oneshot::channel();
 
         let join_handle = tokio::spawn(Self::launch(
             instance_id,
             component,
-            arguments,
+            arguments.clone(),
+            detached,
             engine,
             linker,
             start_rx,
+            output_delivery_ctrl_tx,
         ));
+
+        // Wait for the output delivery controller to be sent back
+        let output_delivery_ctrl = output_delivery_ctrl_rx.await.unwrap();
+
+        let running_state = if detached {
+            InstanceRunningState::Detached
+        } else {
+            InstanceRunningState::Attached
+        };
 
         // Record in the "running_instances" so we can manage it later
         let instance_handle = InstanceHandle {
-            hash: hash.to_string(),
+            program_hash,
+            cmd_name,
+            arguments,
+            output_delivery_ctrl,
+            running_state,
             join_handle,
         };
         self.running_instances.insert(instance_id, instance_handle);
@@ -407,15 +530,61 @@ impl Runtime {
         Ok(instance_id)
     }
 
+    /// Set the instance as attached. Its output will be streamed to the client.
+    fn attach_instance(&self, inst_id: InstanceId) -> AttachInstanceResult {
+        // Check if the instance is still running.
+        if let Some(mut handle) = self.running_instances.get_mut(&inst_id) {
+            // An instance cannot be attached if it is already attached.
+            if let InstanceRunningState::Attached = handle.running_state {
+                return AttachInstanceResult::AlreadyAttached;
+            }
+
+            handle.running_state = InstanceRunningState::Attached;
+            return AttachInstanceResult::AttachedRunning;
+        }
+
+        // Check if the instance has finished execution.
+        if let Some(mut handle) = self.finished_instances.get_mut(&inst_id) {
+            // Set the instance to attached to prevent other clients from attaching to it.
+            // Take the termination cause from the finished state and return it. The code that
+            // takes the termination cause should be responsible for later cleaning up the instance.
+            if matches!(&handle.running_state, InstanceRunningState::Finished(_)) {
+                if let InstanceRunningState::Finished(cause) =
+                    std::mem::replace(&mut handle.running_state, InstanceRunningState::Attached)
+                {
+                    return AttachInstanceResult::AttachedFinished(cause);
+                }
+            }
+        }
+
+        return AttachInstanceResult::InstanceNotFound;
+    }
+
+    /// Set the instance as detached. Prior to calling this method, the instance output delivery
+    /// mode must be set to buffered.
+    fn detach_instance(&self, inst_id: InstanceId) {
+        if let Some(mut handle) = self.running_instances.get_mut(&inst_id) {
+            handle.running_state = InstanceRunningState::Detached;
+        }
+    }
+
+    /// Allow output for a running instance
+    fn allow_output(&self, inst_id: InstanceId) {
+        if let Some(handle) = self.running_instances.get(&inst_id) {
+            handle.output_delivery_ctrl.allow_output();
+        }
+    }
+
     /// Actually start a program instance
-    pub async fn launch_server_instance(
+    async fn launch_server_instance(
         &self,
-        hash: &str,
+        program_hash: String,
+        cmd_name: String,
         port: u32,
         arguments: Vec<String>,
     ) -> Result<InstanceId, RuntimeError> {
         let instance_id = Uuid::new_v4();
-        let component = self.get_component(hash)?;
+        let component = self.get_component(&program_hash)?;
 
         // Instantiate and run in a task
         let engine = self.engine.clone();
@@ -426,12 +595,25 @@ impl Runtime {
         let (start_tx, start_rx) = oneshot::channel();
 
         let join_handle = tokio::spawn(Self::launch_server(
-            addr, component, arguments, engine, linker, start_rx,
+            addr,
+            component,
+            arguments.clone(),
+            engine,
+            linker,
+            start_rx,
         ));
+
+        // Create a dummy output delivery controller for server instances (not used since each request gets its own instance)
+        let (dummy_state, output_delivery_ctrl) = InstanceState::new(Uuid::new_v4(), vec![]).await;
+        drop(dummy_state); // We don't actually use this
 
         // Record in the "running_instances" so we can manage it later
         let instance_handle = InstanceHandle {
-            hash: hash.to_string(),
+            program_hash,
+            cmd_name,
+            arguments,
+            output_delivery_ctrl,
+            running_state: InstanceRunningState::Detached,
             join_handle,
         };
         self.running_server_instances
@@ -443,28 +625,79 @@ impl Runtime {
         Ok(instance_id)
     }
 
-    /// Terminate or abort a running instance
-    async fn terminate_instance(&self, instance_id: InstanceId, cause: TerminationCause) {
-        if let Some((_, handle)) = self.running_instances.remove(&instance_id) {
+    /// Terminate a running instance, and optionally notify the client.
+    fn terminate_instance(
+        &self,
+        instance_id: InstanceId,
+        notification_to_client: Option<TerminationCause>,
+    ) {
+        let instance = self
+            .running_instances
+            .remove(&instance_id)
+            .or(self.finished_instances.remove(&instance_id));
+
+        if let Some((_, handle)) = instance {
             handle.join_handle.abort();
 
             model::cleanup_instance(instance_id.clone());
 
-            let (termination_code, message) = match cause {
-                TerminationCause::Normal(message) => (0, message),
-                TerminationCause::Signal => (1, "Signal termination".to_string()),
-                TerminationCause::Exception(message) => (2, message),
-                TerminationCause::SystemError(message) => (3, message),
-                TerminationCause::OutOfResources(message) => (4, message),
-            };
-
-            server::InstanceEvent::DetachInstance {
-                inst_id: instance_id.clone(),
-                termination_code,
-                message,
+            if let Some(cause) = notification_to_client {
+                server::InstanceEvent::Terminate {
+                    inst_id: instance_id,
+                    cause,
+                }
+                .dispatch();
             }
-            .dispatch()
-            .ok();
+        }
+    }
+
+    /// Finish a running instance. If the instance is attached, it will notify the client and
+    /// clean up the instance. If the instance is detached, it will mark the instance as finished
+    /// and add it to the finished instances map. If the instance is already finished, it will
+    /// panic.
+    fn finish_instance(&self, instance_id: InstanceId, cause: TerminationCause) {
+        if let Some((_, mut handle)) = self.running_instances.remove(&instance_id) {
+            match handle.running_state {
+                // For an attached instance, its output must have been streamed to the client,
+                // so we can clean up the instance and notify the client about the termination.
+                InstanceRunningState::Attached => {
+                    handle.join_handle.abort();
+                    model::cleanup_instance(instance_id.clone());
+
+                    server::InstanceEvent::Terminate {
+                        inst_id: instance_id,
+                        cause,
+                    }
+                    .dispatch();
+                }
+                // For a detached instance, we can just mark it as finished and add it to the
+                // finished instances map. Its output is buffered and waiting to be streamed to
+                //the client.
+                InstanceRunningState::Detached => {
+                    handle.running_state = InstanceRunningState::Finished(cause);
+                    self.finished_instances.insert(instance_id, handle);
+                }
+                // If the instance is already finished, we can't finish it again.
+                // This should never happen.
+                InstanceRunningState::Finished(_) => {
+                    panic!("Instance {instance_id} is already finished and cannot be sealed again")
+                }
+            }
+        }
+    }
+
+    /// Set the output delivery for a running instance
+    fn set_output_delivery(&self, instance_id: InstanceId, output_delivery: OutputDelivery) {
+        if let Some(handle) = self.running_instances.get(&instance_id) {
+            handle
+                .output_delivery_ctrl
+                .set_output_delivery(output_delivery);
+        }
+
+        if let Some(handle) = self.finished_instances.get(&instance_id) {
+            handle
+                .output_delivery_ctrl
+                .set_output_delivery(output_delivery);
         }
     }
 
@@ -476,7 +709,7 @@ impl Runtime {
         req: hyper::Request<hyper::body::Incoming>,
     ) -> anyhow::Result<hyper::Response<HyperOutgoingBody>> {
         let inst_id = Uuid::new_v4();
-        let inst_state = InstanceState::new(inst_id, arguments).await;
+        let (inst_state, _output_delivery_ctrl) = InstanceState::new(inst_id, arguments).await;
 
         let mut store = Store::new(&engine, inst_state);
         let (sender, receiver) = oneshot::channel();
@@ -586,14 +819,32 @@ impl Runtime {
         instance_id: InstanceId,
         component: Component,
         arguments: Vec<String>,
+        detached: bool,
         engine: Engine,
         linker: Arc<Linker<InstanceState>>,
         start_rx: oneshot::Receiver<()>,
+        output_delivery_ctrl_tx: oneshot::Sender<OutputDeliveryCtrl>,
     ) {
-        // Wait for the signal to start
-        let _ = start_rx.await;
+        // Create the instance state and output delivery controller
+        let (inst_state, output_delivery_ctrl) = InstanceState::new(instance_id, arguments).await;
 
-        let inst_state = InstanceState::new(instance_id, arguments).await;
+        let output_delivery = if detached {
+            OutputDelivery::Buffered
+        } else {
+            OutputDelivery::Streamed
+        };
+
+        // Set the initial output delivery mode
+        output_delivery_ctrl.set_output_delivery(output_delivery);
+
+        // Send the output delivery controller back before starting
+        output_delivery_ctrl_tx
+            .send(output_delivery_ctrl)
+            .map_err(|_| "Failed to send output delivery controller")
+            .unwrap();
+
+        // Wait for the signal to start
+        start_rx.await.unwrap();
 
         // Wrap everything in a closure returning a Result,
         // so we can capture errors more systematically if desired:
@@ -638,21 +889,19 @@ impl Runtime {
 
         match result {
             Ok(return_value) => {
-                Command::Trap {
+                Command::FinishInstance {
                     inst_id: instance_id,
                     cause: TerminationCause::Normal(return_value.unwrap_or_default()),
                 }
-                .dispatch()
-                .ok();
+                .dispatch();
             }
             Err(err) => {
                 println!("Instance {instance_id} failed: {err}");
-                Command::Trap {
+                Command::FinishInstance {
                     inst_id: instance_id,
                     cause: TerminationCause::Exception(err.to_string()),
                 }
-                .dispatch()
-                .ok();
+                .dispatch();
             }
         }
     }

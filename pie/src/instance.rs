@@ -1,25 +1,59 @@
 use super::api::core::Queue;
 use super::utils;
 use crate::model::resource::{ResourceId, ResourceTypeId};
+use crate::server::InstanceEvent;
 use anyhow::{Result, format_err};
 use bytes::Bytes;
+use ringbuffer::{AllocRingBuffer, RingBuffer};
 use std::collections::HashMap;
 use std::io;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use tokio::io::AsyncWrite;
+use tokio::sync::Notify;
 use uuid::Uuid;
 use wasmtime::component::{Resource, ResourceTable};
 use wasmtime_wasi::async_trait;
 use wasmtime_wasi::cli::IsTerminal;
 use wasmtime_wasi::cli::StdoutStream;
-use wasmtime_wasi::p2::{OutputStream, Pollable, StreamError, StreamResult};
+use wasmtime_wasi::p2::{OutputStream, Pollable, StreamResult};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpView};
 
 pub type InstanceId = Uuid;
+
+/// Controller for controlling the output delivery mode of a running instance
+#[derive(Clone)]
+pub struct OutputDeliveryCtrl {
+    stdout_stream: LogStream,
+    stderr_stream: LogStream,
+}
+
+impl OutputDeliveryCtrl {
+    /// Set output mode
+    pub fn set_output_delivery(&self, output_delivery: OutputDelivery) {
+        match output_delivery {
+            OutputDelivery::Buffered => {
+                self.stdout_stream.set_deliver_to_buffer();
+                self.stderr_stream.set_deliver_to_buffer();
+            }
+            OutputDelivery::Streamed => {
+                self.stdout_stream.set_deliver_to_stream();
+                self.stderr_stream.set_deliver_to_stream();
+            }
+        }
+    }
+
+    /// Allow output to be written to the streams.
+    /// This should be called after the instance ID has been communicated to the client
+    /// to prevent a race condition where output arrives before the instance ID.
+    pub fn allow_output(&self) {
+        self.stdout_stream.allow_output();
+        self.stderr_stream.allow_output();
+    }
+}
 
 /// Manages the mapping between virtual and physical resource identifiers.
 #[derive(Debug)]
@@ -106,21 +140,25 @@ impl WasiHttpView for InstanceState {
     }
 }
 
-// Define your custom stdout type.
-
 impl InstanceState {
-    pub async fn new(id: Uuid, arguments: Vec<String>) -> Self {
+    pub async fn new(id: InstanceId, arguments: Vec<String>) -> (Self, OutputDeliveryCtrl) {
         let mut builder = WasiCtx::builder();
         builder.inherit_network(); // TODO: Replace with socket_addr_check later.
 
-        let short_id = shorten_uuid(&id);
-        let stdout_prefix = format!("stdout [{short_id}] :: ");
-        let stderr_prefix = format!("stderr [{short_id}] :: ");
+        // Create LogStream instances and keep handles for delivery mode control
+        let stdout_stream = LogStream::new(OutputChannel::Stdout, id);
+        let stderr_stream = LogStream::new(OutputChannel::Stderr, id);
 
-        builder.stdout(LogStream::new(stdout_prefix, Output::Stdout));
-        builder.stderr(LogStream::new(stderr_prefix, Output::Stderr));
+        // Clone the streams for the WASI context (LogStream is cheap to clone due to Arc)
+        builder.stdout(stdout_stream.clone());
+        builder.stderr(stderr_stream.clone());
 
-        InstanceState {
+        let streaming_ctrl = OutputDeliveryCtrl {
+            stdout_stream,
+            stderr_stream,
+        };
+
+        let state = InstanceState {
             id,
             arguments,
             return_value: None,
@@ -128,7 +166,9 @@ impl InstanceState {
             resource_table: ResourceTable::new(),
             http_ctx: WasiHttpCtx::new(),
             resources: HashMap::new(),
-        }
+        };
+
+        (state, streaming_ctrl)
     }
 
     pub fn id(&self) -> InstanceId {
@@ -194,82 +234,143 @@ impl InstanceState {
     }
 }
 
-////////////////////////
-// Helper functions for making stdout and stderr more readable.
-
-fn shorten_uuid(uuid: &Uuid) -> String {
-    // Convert the UUID to a string and split it by '-' to take the first segment.
-    uuid.to_string().split('-').next().unwrap().to_string()
-}
-
-#[derive(Clone)]
-enum Output {
+#[derive(Clone, Debug)]
+pub enum OutputChannel {
     Stdout,
     Stderr,
 }
 
-impl Output {
-    fn write_all(&self, buf: &[u8]) -> io::Result<()> {
-        use io::Write;
-
+impl OutputChannel {
+    /// Send the output to the server so that it can be delivered to the client
+    fn dispatch_output(&self, content: String, instance_id: InstanceId) {
         match self {
-            Output::Stdout => io::stdout().write_all(buf),
-            Output::Stderr => io::stderr().write_all(buf),
+            OutputChannel::Stdout => InstanceEvent::StreamingOutput {
+                inst_id: instance_id,
+                output_type: OutputChannel::Stdout,
+                content,
+            }
+            .dispatch(),
+            OutputChannel::Stderr => InstanceEvent::StreamingOutput {
+                inst_id: instance_id,
+                output_type: OutputChannel::Stderr,
+                content,
+            }
+            .dispatch(),
         }
+    }
+}
+
+/// Output mode for LogStream
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(u8)]
+pub enum OutputDelivery {
+    /// Buffer output in a circular buffer, discarding old content when full
+    Buffered = 0,
+    /// Stream buffered content via instance events
+    Streamed = 1,
+}
+
+impl OutputDelivery {
+    fn from_u8(value: u8) -> Self {
+        match value {
+            0 => OutputDelivery::Buffered,
+            1 => OutputDelivery::Streamed,
+            _ => OutputDelivery::Buffered, // Default to buffering for invalid values
+        }
+    }
+
+    fn to_u8(self) -> u8 {
+        self as u8
     }
 }
 
 #[derive(Clone)]
 struct LogStream {
-    output: Output,
+    channel: OutputChannel,
     state: Arc<LogStreamState>,
 }
 
 struct LogStreamState {
-    prefix: String,
-    needs_prefix_on_next_write: AtomicBool,
+    instance_id: InstanceId,
+    mode: AtomicU8,
+    buffer: Mutex<AllocRingBuffer<u8>>,
+    /// Tracks whether output is allowed to be written.
+    /// Starts as false to prevent output before the instance ID is sent to the client.
+    output_allowed: AtomicBool,
+    /// Notifies async waiters when output becomes allowed.
+    output_allowed_notify: Notify,
 }
 
 impl LogStream {
-    fn new(prefix: String, output: Output) -> LogStream {
+    /// Default buffer capacity: 1MB
+    const DEFAULT_BUFFER_CAPACITY: usize = 1024 * 1024;
+
+    fn new(channel: OutputChannel, instance_id: InstanceId) -> LogStream {
         LogStream {
-            output,
+            channel,
             state: Arc::new(LogStreamState {
-                prefix,
-                needs_prefix_on_next_write: AtomicBool::new(true),
+                instance_id,
+                mode: AtomicU8::new(OutputDelivery::Buffered.to_u8()),
+                buffer: Mutex::new(AllocRingBuffer::new(Self::DEFAULT_BUFFER_CAPACITY)),
+                output_allowed: AtomicBool::new(false),
+                output_allowed_notify: Notify::new(),
             }),
         }
     }
 
-    fn write_all(&mut self, mut bytes: &[u8]) -> io::Result<()> {
-        while !bytes.is_empty() {
-            if self
-                .state
-                .needs_prefix_on_next_write
-                .load(Ordering::Relaxed)
-            {
-                self.output.write_all(self.state.prefix.as_bytes())?;
-                self.state
-                    .needs_prefix_on_next_write
-                    .store(false, Ordering::Relaxed);
+    /// Allow output to be written to this stream.
+    /// This should be called after the instance ID has been communicated to the client.
+    fn allow_output(&self) {
+        self.state.output_allowed.store(true, Ordering::Release);
+        self.state.output_allowed_notify.notify_waiters();
+    }
+
+    /// Set the delivery mode to buffering
+    pub fn set_deliver_to_buffer(&self) {
+        self.state
+            .mode
+            .store(OutputDelivery::Buffered.to_u8(), Ordering::Release);
+    }
+
+    /// Set the delivery mode to streaming
+    ///
+    /// When transitioning from buffering to streaming, any buffered content
+    /// will be immediately flushed.
+    pub fn set_deliver_to_stream(&self) {
+        self.state
+            .mode
+            .store(OutputDelivery::Streamed.to_u8(), Ordering::Release);
+        self.flush_buffer();
+    }
+
+    /// Flush any buffered content to output
+    fn flush_buffer(&self) {
+        let mut buffer = self.state.buffer.lock().unwrap();
+        if !buffer.is_empty() {
+            let content = String::from_utf8_lossy(&buffer.drain().collect::<Vec<u8>>()).to_string();
+            self.channel
+                .dispatch_output(content, self.state.instance_id);
+        }
+    }
+
+    /// Write bytes according to the current mode
+    fn write_bytes(&self, bytes: &[u8]) {
+        let mode = OutputDelivery::from_u8(self.state.mode.load(Ordering::Acquire));
+
+        match mode {
+            // In buffering mode, append to the circular buffer
+            OutputDelivery::Buffered => {
+                let mut buffer = self.state.buffer.lock().unwrap();
+                buffer.extend(bytes.iter().copied());
             }
-            match bytes.iter().position(|b| *b == b'\n') {
-                Some(i) => {
-                    let (a, b) = bytes.split_at(i + 1);
-                    bytes = b;
-                    self.output.write_all(a)?;
-                    self.state
-                        .needs_prefix_on_next_write
-                        .store(true, Ordering::Relaxed);
-                }
-                None => {
-                    self.output.write_all(bytes)?;
-                    break;
-                }
+            // In streaming mode, dispatch the new content immediately
+            OutputDelivery::Streamed => {
+                self.channel.dispatch_output(
+                    String::from_utf8_lossy(&bytes).to_string(),
+                    self.state.instance_id,
+                );
             }
         }
-
-        Ok(())
     }
 }
 
@@ -284,17 +385,16 @@ impl StdoutStream for LogStream {
 
 impl IsTerminal for LogStream {
     fn is_terminal(&self) -> bool {
-        match &self.output {
-            Output::Stdout => std::io::stdout().is_terminal(),
-            Output::Stderr => std::io::stderr().is_terminal(),
+        match &self.channel {
+            OutputChannel::Stdout => false,
+            OutputChannel::Stderr => false,
         }
     }
 }
 
 impl OutputStream for LogStream {
     fn write(&mut self, bytes: Bytes) -> StreamResult<()> {
-        self.write_all(&bytes)
-            .map_err(|e| StreamError::LastOperationFailed(e.into()))?;
+        self.write_bytes(&bytes);
         Ok(())
     }
 
@@ -303,26 +403,46 @@ impl OutputStream for LogStream {
     }
 
     fn check_write(&mut self) -> StreamResult<usize> {
-        Ok(1024 * 1024)
+        // If output is not allowed yet, return 0 to signal backpressure.
+        // This prevents writes until the instance ID has been sent to the client.
+        if !self.state.output_allowed.load(Ordering::Acquire) {
+            Ok(0)
+        } else {
+            Ok(1024 * 1024)
+        }
     }
 }
 
 #[async_trait]
 impl Pollable for LogStream {
-    async fn ready(&mut self) {}
+    async fn ready(&mut self) {
+        // IMPORTANT: Call notified() BEFORE checking the condition to avoid
+        // missing the notification (lost wakeup problem).
+        let notified = self.state.output_allowed_notify.notified();
+
+        // Wait until output is allowed before becoming ready.
+        // This prevents a race condition where output is sent before
+        // the client receives the instance ID.
+        if !self.state.output_allowed.load(Ordering::Acquire) {
+            notified.await;
+        }
+    }
 }
 
 impl AsyncWrite for LogStream {
     fn poll_write(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        Poll::Ready(self.write_all(buf).map(|_| buf.len()))
+        self.write_bytes(buf);
+        Poll::Ready(Ok(buf.len()))
     }
+
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Poll::Ready(Ok(()))
     }
+
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Poll::Ready(Ok(()))
     }

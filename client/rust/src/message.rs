@@ -29,6 +29,27 @@ impl EventCode {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub enum InstanceStatus {
+    Attached,
+    Detached,
+    Finished,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct InstanceInfo {
+    pub id: String,
+    pub cmd_name: String,
+    pub arguments: Vec<String>,
+    pub status: InstanceStatus,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum StreamingOutput {
+    Stdout(String),
+    Stderr(String),
+}
+
 /// Messages from client -> server
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -60,14 +81,20 @@ pub enum ClientMessage {
     LaunchInstance {
         corr_id: u32,
         program_hash: String,
+        cmd_name: String,
         arguments: Vec<String>,
+        detached: bool,
     },
+
+    #[serde(rename = "attach_instance")]
+    AttachInstance { corr_id: u32, instance_id: String },
 
     #[serde(rename = "launch_server_instance")]
     LaunchServerInstance {
         corr_id: u32,
         port: u32,
         program_hash: String,
+        cmd_name: String,
         arguments: Vec<String>,
     },
 
@@ -89,7 +116,7 @@ pub enum ClientMessage {
     },
 
     #[serde(rename = "terminate_instance")]
-    TerminateInstance { instance_id: String },
+    TerminateInstance { corr_id: u32, instance_id: String },
 
     #[serde(rename = "attach_remote_service")]
     AttachRemoteService {
@@ -104,6 +131,9 @@ pub enum ClientMessage {
 
     #[serde(rename = "ping")]
     Ping { corr_id: u32 },
+
+    #[serde(rename = "list_instances")]
+    ListInstances { corr_id: u32 },
 }
 
 /// Messages from server -> client
@@ -115,6 +145,20 @@ pub enum ServerMessage {
         corr_id: u32,
         successful: bool,
         result: String,
+    },
+
+    #[serde(rename = "instance_launch_result")]
+    InstanceLaunchResult {
+        corr_id: u32,
+        successful: bool,
+        message: String,
+    },
+
+    #[serde(rename = "instance_attach_result")]
+    InstanceAttachResult {
+        corr_id: u32,
+        successful: bool,
+        message: String,
     },
 
     #[serde(rename = "instance_event")]
@@ -140,4 +184,16 @@ pub enum ServerMessage {
 
     #[serde(rename = "challenge")]
     Challenge { corr_id: u32, challenge: String },
+
+    #[serde(rename = "live_instances")]
+    LiveInstances {
+        corr_id: u32,
+        instances: Vec<InstanceInfo>,
+    },
+
+    #[serde(rename = "streaming_output")]
+    StreamingOutput {
+        instance_id: String,
+        output: StreamingOutput,
+    },
 }
