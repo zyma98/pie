@@ -11,3 +11,7 @@ export {
   setReturn,
   debugQuery,
 } from './runtime.js';
+
+// Re-export Sampler
+export { Sampler } from './sampler.js';
+export type { SamplerType } from './sampler.js';
