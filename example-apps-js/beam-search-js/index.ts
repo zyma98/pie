@@ -1,5 +1,3 @@
-/// <reference types="inferlet/globals" />
-
 // Beam Search Example - JavaScript/TypeScript Inferlet
 // Demonstrates beam search decoding for text generation
 // No boilerplate needed - just write top-level code!
@@ -101,6 +99,3 @@ if (help) {
   send(result);
   send('\n');
 }
-
-// Make this a module for top-level await support
-export {};

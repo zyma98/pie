@@ -40,6 +40,12 @@ declare global {
   const ForwardPass: typeof import('./index.js').ForwardPass;
   const KvPage: typeof import('./index.js').KvPage;
   const Resource: typeof import('./index.js').Resource;
+  /**
+   * Inferlet's Blob type - intentionally shadows the Web API Blob.
+   * This Blob is used for messaging and runtime operations within the Inferlet environment.
+   * WARNING: The native Web API Blob is not available in this context. Use the Inferlet
+   * Blob API (sendBlob, receiveBlob) or convert data to compatible formats accordingly.
+   */
   const Blob: typeof import('./index.js').Blob;
 
   // Stop condition functions

@@ -1,5 +1,3 @@
-/// <reference types="inferlet/globals" />
-
 // Text Completion Example - JavaScript/TypeScript Inferlet
 // Demonstrates basic text generation using the inferlet library
 // No boilerplate needed - just write top-level code!
@@ -88,6 +86,3 @@ if (help) {
   send(result);
   send('\n');
 }
-
-// Make this a module for top-level await support
-export {};

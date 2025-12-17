@@ -270,7 +270,7 @@ fn run_componentize_js(
         .arg("exec");
 
     if debug {
-        cmd.arg("--debug");
+        cmd.arg("--use-debug-build");
     }
 
     let output = cmd.output().context("Failed to run componentize-js")?;
