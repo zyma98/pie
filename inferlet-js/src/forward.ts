@@ -5,8 +5,8 @@ import type { Queue } from './model.js';
 import { Brle } from './brle.js';
 
 // WIT bindings - these will be available at runtime through componentize-js
-import type { ForwardPass as WitForwardPass } from './bindings/interfaces/inferlet-core-forward.js';
-import * as forward from './bindings/interfaces/inferlet-core-forward.js';
+import type { ForwardPass as WitForwardPass } from 'inferlet:core/forward';
+import * as forward from 'inferlet:core/forward';
 
 /**
  * Represents a probability distribution over a set of tokens.

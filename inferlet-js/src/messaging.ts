@@ -1,8 +1,8 @@
 // Messaging functions for communicating with the remote user client.
 // Mirrors the Rust messaging functions from inferlet/src/lib.rs
 
-import * as message from './bindings/interfaces/inferlet-core-message.js';
-import type { Pollable } from './bindings/interfaces/wasi-io-poll.js';
+import * as message from 'inferlet:core/message';
+import type { Pollable } from 'wasi:io/poll';
 
 /**
  * Represents a binary blob that can be sent/received.

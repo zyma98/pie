@@ -57,8 +57,8 @@ function parseArgs(args: string[]): {
   return { help, prompt, maxTokens, beamSize, system };
 }
 
-// Main entry point - exported for the WASM component
-export async function run(): Promise<void> {
+// Main implementation
+async function main(): Promise<void> {
   const args = getArguments();
   const { help, prompt, maxTokens, beamSize, system } = parseArgs(args);
 
@@ -110,3 +110,15 @@ export async function run(): Promise<void> {
     send(`Per token latency: ${perTokenLatency.toFixed(2)}ms\n`);
   }
 }
+
+// Export in WIT-compatible format for inferlet:core/run interface
+export const run = {
+  run: async (): Promise<{ tag: 'ok' } | { tag: 'err'; val: string }> => {
+    try {
+      await main();
+      return { tag: 'ok' };
+    } catch (e) {
+      return { tag: 'err', val: String(e) };
+    }
+  },
+};

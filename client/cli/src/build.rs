@@ -172,6 +172,7 @@ fn run_esbuild(
         .arg("--format=esm")
         .arg("--platform=neutral")
         .arg("--target=es2020")
+        .arg("--main-fields=module,main")  // Resolve package entry points on neutral platform
         .arg(format!("--outfile={}", output_file.display()))
         .arg(format!("--alias:inferlet-js={}", inferlet_js_path.join("src").join("index.ts").display()));
 
@@ -181,8 +182,22 @@ fn run_esbuild(
         cmd.arg("--minify");
     }
 
-    // Add external marker for WASI imports
+    // Add external markers for WIT imports (provided by componentize-js at runtime)
     cmd.arg("--external:wasi:*");
+    cmd.arg("--external:inferlet:*");
+
+    // Use nunjucks browser build to avoid Node.js dependencies
+    let nunjucks_browser = inferlet_js_path
+        .join("node_modules")
+        .join("nunjucks")
+        .join("browser")
+        .join("nunjucks-slim.js");
+    cmd.arg(format!("--alias:nunjucks={}", nunjucks_browser.display()));
+
+    // Mark Node.js built-ins as external (not used in browser build)
+    for builtin in ["fs", "path", "events", "os", "crypto", "child_process", "net", "http", "https", "stream", "util", "url", "buffer", "process", "domain"] {
+        cmd.arg(format!("--external:{}", builtin));
+    }
 
     let output = cmd.output().context("Failed to run esbuild")?;
 

@@ -1,7 +1,7 @@
 // Key-Value Store functions for persistent storage.
 // Mirrors the Rust KVS functions from inferlet/src/lib.rs
 
-import * as kvs from './bindings/interfaces/inferlet-core-kvs.js';
+import * as kvs from 'inferlet:core/kvs';
 
 /**
  * Retrieves a value from the persistent store for a given key.

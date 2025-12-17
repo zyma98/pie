@@ -1,17 +1,17 @@
 // Model and Queue wrapper classes for inferlet-core bindings
 // These classes wrap the WASM component bindings with a clean TypeScript API
 
-import * as runtime from './bindings/interfaces/inferlet-core-runtime.js';
-import * as apiCommon from './bindings/interfaces/inferlet-core-common.js';
-import * as apiForward from './bindings/interfaces/inferlet-core-forward.js';
+import * as runtime from 'inferlet:core/runtime';
+import * as apiCommon from 'inferlet:core/common';
+import * as apiForward from 'inferlet:core/forward';
 import type {
   Model as ModelResource,
   Queue as QueueResource,
   Priority,
   SynchronizationResult,
   DebugQueryResult,
-} from './bindings/interfaces/inferlet-core-common.js';
-import type { Pollable } from './bindings/interfaces/wasi-io-poll.js';
+} from 'inferlet:core/common';
+import type { Pollable } from 'wasi:io/poll';
 import { Tokenizer } from './tokenizer.js';
 import { ForwardPass, KvPage, Resource, type Forward } from './forward.js';
 
