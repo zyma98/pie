@@ -33,3 +33,7 @@ export { Tokenizer } from './tokenizer.js';
 
 // Re-export Model and Queue
 export { Model, Queue, getModel, getAllModels, getAutoModel, getAllModelsWithTraits } from './model.js';
+
+// Re-export ChatFormatter
+export { ChatFormatter } from './chat.js';
+export type { ToolCall } from './chat.js';
