@@ -234,16 +234,23 @@ export class Context {
         forked.kvPages.length > 0 ? this.kvPageSize : 0;
 
       // Rebuild the mask for pending tokens
+      // Optimization: Build final mask first, then truncate (avoids O(n²) clone+append)
       let maskBuilder = this.tokenMaskCurrent.clone();
-      const parentTotalMaskLen =
-        this.tokenIds.length + this.tokenIdsPending.length;
-      // Remove the range that's being moved to pending
+      const parentTotalMaskLen = this.tokenIds.length + this.tokenIdsPending.length;
       maskBuilder.removeRange(keptTokensLen, parentTotalMaskLen);
 
-      forked.tokenMaskPending = [];
-      for (let i = 0; i < forked.tokenIdsPending.length; i++) {
+      const pendingCount = forked.tokenIdsPending.length;
+      const baseLen = maskBuilder.len();
+
+      // Append all positions at once
+      for (let i = 0; i < pendingCount; i++) {
         maskBuilder.append(false);
-        forked.tokenMaskPending.push(maskBuilder.clone());
+      }
+
+      // Build masks by truncating from final (cheaper than repeated clone+append)
+      forked.tokenMaskPending = [];
+      for (let i = 0; i < pendingCount; i++) {
+        forked.tokenMaskPending.push(maskBuilder.truncate(baseLen + i + 1));
       }
 
       // tokenMaskCurrent includes both committed and pending tokens
