@@ -1,11 +1,13 @@
 use anyhow::{Context, Result, bail};
 use clap::Args;
-use regex::Regex;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::fs;
 use std::env;
+use swc_common::{sync::Lrc, SourceMap, FileName};
+use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax};
+use swc_ecma_ast::{Decl, ExportDecl, ModuleDecl, ModuleItem, Pat};
 
 #[derive(Args, Debug)]
 pub struct BuildArgs {
@@ -322,64 +324,109 @@ fn check_for_nodejs_imports(bundled_js: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Check for forbidden patterns in user code that conflict with auto-wrapping
+/// Check for forbidden patterns in user code using AST analysis
 fn validate_user_code(bundled_js: &Path) -> Result<()> {
     let content = fs::read_to_string(bundled_js)
         .context("Failed to read bundled JS for validation")?;
 
-    // Check for export const run (various forms)
-    // Patterns to catch: export const run, export { run }, export { x as run }
-    let export_run_patterns = [
-        r"export\s+const\s+run\s*=",
-        r"export\s+let\s+run\s*=",
-        r"export\s+var\s+run\s*=",
-        r"export\s+function\s+run\s*\(",
-        r"export\s*\{\s*run\s*\}",
-        r"export\s*\{\s*\w+\s+as\s+run\s*\}",
-    ];
+    // Parse JavaScript into AST
+    let cm: Lrc<SourceMap> = Default::default();
+    let fm = cm.new_source_file(
+        FileName::Custom(bundled_js.display().to_string()).into(),
+        content
+    );
 
-    for pattern in &export_run_patterns {
-        let re = Regex::new(pattern).unwrap();
-        if re.is_match(&content) {
-            bail!(
-                "User code must not export 'run' - it is auto-generated.\n\n\
-                 To fix: Remove the 'export const run = {{ ... }}' block from your code.\n\
-                 The WIT interface is now automatically created by pie-cli build."
-            );
+    let lexer = Lexer::new(
+        Syntax::Es(Default::default()),
+        Default::default(),
+        StringInput::from(&*fm),
+        None,
+    );
+
+    let mut parser = Parser::new_from(lexer);
+
+    let module = parser.parse_module().map_err(|e| {
+        anyhow::anyhow!("Failed to parse JavaScript: {:?}", e)
+    })?;
+
+    // Walk AST looking for forbidden exports
+    for item in &module.body {
+        if let ModuleItem::ModuleDecl(decl) = item {
+            check_module_decl(decl)?;
         }
     }
 
-    // Check for function main() at module level
-    // This is tricky - we want top-level main, not class methods or nested functions
-    // Simple heuristic: look for "function main(" or "async function main("
-    // at the start of a line or after export
-    let main_patterns = [
-        r"(?m)^function\s+main\s*\(",
-        r"(?m)^async\s+function\s+main\s*\(",
-        r"(?m)^export\s+function\s+main\s*\(",
-        r"(?m)^export\s+async\s+function\s+main\s*\(",
-        r"(?m)^const\s+main\s*=\s*(async\s*)?\(",
-        r"(?m)^let\s+main\s*=\s*(async\s*)?\(",
-    ];
+    Ok(())
+}
 
-    for pattern in &main_patterns {
-        let re = Regex::new(pattern).unwrap();
-        if re.is_match(&content) {
-            bail!(
-                "User code must not define a 'main()' function - use top-level code instead.\n\n\
-                 To fix: Move your code from inside main() to the top level:\n\n\
-                 Before:\n\
-                   async function main() {{\n\
-                     const model = getAutoModel();\n\
-                     // ...\n\
-                   }}\n\n\
-                 After:\n\
-                   const model = getAutoModel();\n\
-                   // ..."
-            );
+/// Check a module declaration for forbidden exports
+fn check_module_decl(decl: &ModuleDecl) -> Result<()> {
+    match decl {
+        // export const run = ..., export function run(), etc.
+        ModuleDecl::ExportDecl(ExportDecl { decl, .. }) => {
+            check_decl_for_forbidden_names(decl)?;
         }
+        // export { run }, export { foo as run }
+        ModuleDecl::ExportNamed(named) => {
+            for spec in &named.specifiers {
+                if let swc_ecma_ast::ExportSpecifier::Named(n) = spec {
+                    let exported_name = n.exported.as_ref().unwrap_or(&n.orig);
+                    if let swc_ecma_ast::ModuleExportName::Ident(ident) = exported_name {
+                        check_forbidden_export_name(&ident.sym)?;
+                    }
+                }
+            }
+        }
+        // export default function run() - check if named 'run' or 'main'
+        ModuleDecl::ExportDefaultDecl(default_decl) => {
+            if let swc_ecma_ast::DefaultDecl::Fn(fn_expr) = &default_decl.decl {
+                if let Some(ident) = &fn_expr.ident {
+                    // Default export with explicit name - rare but check it
+                    check_forbidden_export_name(&ident.sym)?;
+                }
+            }
+        }
+        _ => {}
     }
+    Ok(())
+}
 
+/// Check a declaration for forbidden export names
+fn check_decl_for_forbidden_names(decl: &Decl) -> Result<()> {
+    match decl {
+        Decl::Fn(fn_decl) => {
+            check_forbidden_export_name(&fn_decl.ident.sym)?;
+        }
+        Decl::Var(var_decl) => {
+            for decl in &var_decl.decls {
+                if let Pat::Ident(ident) = &decl.name {
+                    check_forbidden_export_name(&ident.id.sym)?;
+                }
+            }
+        }
+        Decl::Class(class_decl) => {
+            check_forbidden_export_name(&class_decl.ident.sym)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Check if an export name is forbidden
+fn check_forbidden_export_name(name: &str) -> Result<()> {
+    if name == "run" {
+        bail!(
+            "User code must not export 'run' - it is auto-generated.\n\n\
+             To fix: Remove the 'export const run = {{ ... }}' block from your code.\n\
+             The WIT interface is now automatically created by pie-cli build."
+        );
+    }
+    if name == "main" {
+        bail!(
+            "User code must not export 'main' - use top-level code instead.\n\n\
+             To fix: Move your code from inside main() to the top level."
+        );
+    }
     Ok(())
 }
 
