@@ -14,6 +14,8 @@
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
+    "test:watch": "vitest",
+    "test:wasm": "vitest run test/wasm/__tests__",
     "generate-bindings": "jco types ../inferlet/wit -o src/bindings --world-name exec"
   },
   "dependencies": {
