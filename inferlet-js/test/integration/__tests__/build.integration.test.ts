@@ -117,10 +117,18 @@ describe.skipIf(!pieCliAvailable || !jcoAvailable)(
       });
     });
 
-    // Note: tokenizer tests are skipped because they require complex WIT resource
-    // handle management that isn't fully implemented in the mock system yet.
-    // The Model resource returned by getAutoModel() needs to be properly registered
-    // in jco's resource table, which requires additional infrastructure.
+    // TODO: Tokenizer integration tests are disabled because they require:
+    // 1. WIT resource handle management - Model resource from getAutoModel() needs
+    //    proper registration in jco's resource table
+    // 2. Mock implementation of the full inference pipeline (forward pass, sampling)
+    // 3. Significant infrastructure work to create proper host function bindings
+    //
+    // Current workaround: tokenizer behavior is tested via:
+    // - Unit tests in src/__tests__/ using direct module imports
+    // - WASM mock tests in test/wasm/__tests__/tokenizer.wasm.test.ts
+    //
+    // To re-enable: implement createResource/dropResource in host-mocks.ts
+    // and register the Model handle before returning from getAutoModel mock.
     describe.skip('tokenizer-test Execution', () => {
       let modulePath: string;
 
