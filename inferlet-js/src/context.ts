@@ -8,6 +8,7 @@ import { Brle } from './brle.js';
 import { KvPage, ForwardPass, type Distribution } from './forward.js';
 import { Sampler, type SamplerType, type SamplingConfig } from './sampler.js';
 import { MaxLen, AnyEndsWith, type StopCondition } from './stop-condition.js';
+import { KvPageManager } from './kv-page-manager.js';
 
 // Debug tracing for Context
 const DEBUG_CONTEXT = false;
@@ -69,8 +70,7 @@ export class Context {
 
   positionIds: number[] = [];
 
-  kvPages: KvPage[] = [];
-  kvPageLastLen: number = 0;
+  private kvPageManager: KvPageManager;
   kvPageSize: number;
 
   adapterPtr?: number;
@@ -83,6 +83,7 @@ export class Context {
   constructor(model: Model) {
     this.queue = model.createQueue();
     this.kvPageSize = model.kvPageSize;
+    this.kvPageManager = new KvPageManager(this.queue, this.kvPageSize);
     this.tokenizer = model.tokenizer;
     this.model = model;
     this.formatter = new ChatFormatter();
@@ -91,6 +92,27 @@ export class Context {
     if (DEBUG_CONTEXT) {
       console.log(`[Context] CREATE id=${this._debugId}`);
     }
+  }
+
+  /**
+   * The KV pages array (for backward compatibility)
+   */
+  get kvPages(): KvPage[] {
+    return this.kvPageManager.allPages;
+  }
+
+  /**
+   * The last page length
+   */
+  get kvPageLastLen(): number {
+    return this.kvPageManager.lastPageLen;
+  }
+
+  /**
+   * The unique IDs of the KV cache pages currently in use
+   */
+  get kvPagePtrs(): number[] {
+    return this.kvPageManager.ptrs;
   }
 
   /**
@@ -116,8 +138,10 @@ export class Context {
 
     ctx.tokenIds = [...prefixTokens];
     ctx.positionIds = Array.from({ length: prefixTokens.length }, (_, i) => i);
-    ctx.kvPages = kvPages;
-    ctx.kvPageLastLen = kvPageLastLen;
+
+    // Import pages into manager
+    ctx.kvPageManager.importPages(kvPages, kvPageLastLen);
+
     ctx.tokenMaskCurrent = Brle.new(prefixTokens.length);
     ctx.beginOfSequence = false;
 
@@ -129,13 +153,6 @@ export class Context {
    */
   get text(): string {
     return this.tokenizer.detokenize(new Uint32Array(this.tokenIds));
-  }
-
-  /**
-   * The unique IDs of the KV cache pages currently in use
-   */
-  get kvPagePtrs(): number[] {
-    return this.kvPages.map((p) => p.ptr);
   }
 
   /**
@@ -181,33 +198,18 @@ export class Context {
       // Easy case: the last page is full, we can share everything.
       forked.tokenIds = [...this.tokenIds];
       forked.tokenIdsPending = [...this.tokenIdsPending];
-      forked.kvPages = [...this.kvPages];
-      // Increment ref count for shared pages
-      if (DEBUG_CONTEXT) {
-        console.log(`[Context] FORK easy case: ref'ing ${forked.kvPages.length} pages`);
-      }
-      for (const page of forked.kvPages) {
-        page.ref();
-      }
-      forked.kvPageLastLen = this.kvPageLastLen;
+      forked.kvPageManager = this.kvPageManager.fork();
       forked.positionIds = [...this.positionIds];
       forked.tokenMaskPending = this.tokenMaskPending.map((m) => m.clone());
       forked.tokenMaskCurrent = this.tokenMaskCurrent.clone();
     } else {
       // Hard case: the last page is partially full and must be recomputed.
-      const keptKvPageLen = Math.max(0, this.kvPages.length - 1);
-      const keptTokensLen = keptKvPageLen * this.kvPageSize;
+      const { manager: forkedKvManager, droppedTokenCount } = this.kvPageManager.forkPartial();
+      forked.kvPageManager = forkedKvManager;
+
+      const keptTokensLen = forkedKvManager.totalTokens;
 
       forked.tokenIds = this.tokenIds.slice(0, keptTokensLen);
-      forked.kvPages = this.kvPages.slice(0, keptKvPageLen);
-      // Increment ref count for shared pages
-      if (DEBUG_CONTEXT) {
-        const keptPtrs = forked.kvPages.map(p => p.ptr).join(',');
-        console.log(`[Context] FORK hard case: keeping ${keptKvPageLen} pages [${keptPtrs}], dropping last page`);
-      }
-      for (const page of forked.kvPages) {
-        page.ref();
-      }
       forked.positionIds = this.positionIds.slice(0, keptTokensLen);
 
       // Combine uncommitted tokens from last page with pending tokens
@@ -215,9 +217,6 @@ export class Context {
         ...this.tokenIds.slice(keptTokensLen),
         ...this.tokenIdsPending,
       ];
-
-      forked.kvPageLastLen =
-        forked.kvPages.length > 0 ? this.kvPageSize : 0;
 
       // Rebuild the mask for pending tokens
       // Optimization: Build final mask first, then truncate (avoids O(n²) clone+append)
@@ -257,13 +256,9 @@ export class Context {
    */
   release(): void {
     if (DEBUG_CONTEXT) {
-      const pagePtrs = this.kvPages.map(p => `${p.ptr}(rc=${p.refCount})`).join(',');
-      console.log(`[Context] RELEASE id=${this._debugId} pages=[${pagePtrs}]`);
+      console.log(`[Context] RELEASE id=${this._debugId}`);
     }
-    for (const page of this.kvPages) {
-      page.release();
-    }
-    this.kvPages = [];
+    this.kvPageManager.release();
   }
 
   /**
@@ -352,66 +347,17 @@ export class Context {
   }
 
   /**
-   * Adjusts the number of KV pages to match the required number of tokens.
-   */
-  private adjustKvPages(numTokens: number): void {
-    if (numTokens === 0) return;
-
-    const currentTokens =
-      this.kvPages.length === 0
-        ? this.kvPageLastLen
-        : (this.kvPages.length - 1) * this.kvPageSize + this.kvPageLastLen;
-
-    const newTotalTokens = currentTokens + numTokens;
-    if (newTotalTokens < 0) {
-      throw new Error('Token count adjustment resulted in underflow');
-    }
-
-    const currentPages = this.kvPages.length;
-    const requiredPages = Math.ceil(newTotalTokens / this.kvPageSize);
-
-    if (requiredPages > currentPages) {
-      // Grow: Allocate new pages
-      const newPagesNeeded = requiredPages - currentPages;
-      if (DEBUG_CONTEXT) {
-        console.log(`[Context] GROW id=${this._debugId} allocating ${newPagesNeeded} new pages`);
-      }
-      const newKvPages = this.queue.newKvPages(newPagesNeeded);
-      this.kvPages.push(...newKvPages);
-      if (DEBUG_CONTEXT) {
-        const allPtrs = this.kvPages.map(p => p.ptr).join(',');
-        console.log(`[Context] GROW id=${this._debugId} now has pages=[${allPtrs}]`);
-      }
-    } else if (requiredPages < currentPages) {
-      // Shrink: Release excess pages
-      if (DEBUG_CONTEXT) {
-        const toReleasePtrs = this.kvPages.slice(requiredPages).map(p => `${p.ptr}(rc=${p.refCount})`).join(',');
-        console.log(`[Context] SHRINK id=${this._debugId} releasing pages=[${toReleasePtrs}]`);
-      }
-      const pagesToRelease = this.kvPages.splice(requiredPages);
-      for (const page of pagesToRelease) {
-        page.release();
-      }
-    }
-
-    // Update the length of the last page
-    const lastPageLen = newTotalTokens % this.kvPageSize;
-    this.kvPageLastLen =
-      lastPageLen === 0 && newTotalTokens > 0 ? this.kvPageSize : lastPageLen;
-  }
-
-  /**
    * Grow the KV cache by the specified number of tokens
    */
   growKvPages(numTokens: number): void {
-    this.adjustKvPages(numTokens);
+    this.kvPageManager.grow(numTokens);
   }
 
   /**
    * Shrink the KV cache by the specified number of tokens
    */
   shrinkKvPages(numTokens: number): void {
-    this.adjustKvPages(-numTokens);
+    this.kvPageManager.shrink(numTokens);
   }
 
   /**
@@ -779,24 +725,10 @@ export class Context {
           console.log(`[BeamSearch] COMPLETE winner=${winningBeam._debugId} tokens=${generatedTokens.length}`);
         }
 
-        // Release the old pages held by `this` before adopting new ones
-        this.release();
-
         // Adopt the state from the winning beam
-        this.kvPageLastLen = winningBeam.kvPageLastLen;
+        this.kvPageManager.adopt(winningBeam.kvPageManager);
         this.tokenIds = [...winningBeam.tokenIds];
         this.tokenIdsPending = [...winningBeam.tokenIdsPending];
-        this.kvPages = [...winningBeam.kvPages];
-
-        if (DEBUG_CONTEXT) {
-          const adoptedPtrs = this.kvPages.map(p => `${p.ptr}(rc=${p.refCount})`).join(',');
-          console.log(`[BeamSearch] ADOPT pages=[${adoptedPtrs}] ref'ing them`);
-        }
-
-        // Increment ref count for adopted pages since `this` is now an owner
-        for (const page of this.kvPages) {
-          page.ref();
-        }
 
         if (DEBUG_CONTEXT) {
           console.log(`[BeamSearch] RELEASE all ${beams.length} beams`);

@@ -112,6 +112,14 @@ export class KvPageManager {
     }
   }
 
+  /**
+   * Import pages from external source (e.g., cache restore)
+   */
+  importPages(pages: KvPage[], lastPageLen: number): void {
+    this.pages = pages;
+    this._lastPageLen = lastPageLen;
+  }
+
   private adjust(numTokens: number): void {
     if (numTokens === 0) return;
 
