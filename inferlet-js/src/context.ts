@@ -138,20 +138,6 @@ export class Context {
     return this.kvPages.map((p) => p.ptr);
   }
 
-  // Deprecated methods for backward compatibility
-  /** @deprecated Access `model` property directly */
-  getModel(): Model { return this.model; }
-  /** @deprecated Access `queue` property directly */
-  getQueue(): Queue { return this.queue; }
-  /** @deprecated Access `tokenIds` property directly */
-  getTokenIds(): number[] { return this.tokenIds; }
-  /** @deprecated Use `text` getter instead */
-  getText(): string { return this.text; }
-  /** @deprecated Use `kvPagePtrs` getter instead */
-  getKvPagePtrs(): number[] { return this.kvPagePtrs; }
-  /** @deprecated Access `kvPageLastLen` property directly */
-  getKvPageLastLen(): number { return this.kvPageLastLen; }
-
   /**
    * Set the adapter pointer for LoRA inference
    */
@@ -474,7 +460,7 @@ export class Context {
 
     const p = this.queue.createForwardPass();
     p.inputTokens(pendingTokenIds, positionIds);
-    p.kvCachePtrs(this.getKvPagePtrs(), this.kvPageLastLen);
+    p.kvCachePtrs(this.kvPagePtrs, this.kvPageLastLen);
     p.attentionMask(mask);
 
     await p.execute();
@@ -509,7 +495,7 @@ export class Context {
 
     const p = this.queue.createForwardPass();
     p.inputTokens(pendingTokenIds, positionIds);
-    p.kvCachePtrs(this.getKvPagePtrs(), this.kvPageLastLen);
+    p.kvCachePtrs(this.kvPagePtrs, this.kvPageLastLen);
     p.attentionMask(mask);
 
     const outputIdx = pendingTokenIds.length - 1;
@@ -587,7 +573,7 @@ export class Context {
 
     const p = this.queue.createForwardPass();
     p.inputTokens(pendingTokenIds, positionIds);
-    p.kvCachePtrs(this.getKvPagePtrs(), this.kvPageLastLen);
+    p.kvCachePtrs(this.kvPagePtrs, this.kvPageLastLen);
     p.attentionMask(mask);
 
     const outputIdx = pendingTokenIds.length - 1;
