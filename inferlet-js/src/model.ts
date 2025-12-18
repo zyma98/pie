@@ -8,12 +8,10 @@ import type {
   Model as ModelResource,
   Queue as QueueResource,
   Priority,
-  SynchronizationResult,
-  DebugQueryResult,
 } from 'inferlet:core/common';
-import type { Pollable } from 'wasi:io/poll';
 import { Tokenizer } from './tokenizer.js';
 import { ForwardPass, KvPage, Resource, type Forward } from './forward.js';
+import { awaitFuture } from './async-utils.js';
 
 /**
  * Represents a command queue for a specific model instance.
@@ -54,20 +52,7 @@ export class Queue implements Forward {
    * Returns true if synchronization was successful
    */
   async synchronize(): Promise<boolean> {
-    const result: SynchronizationResult = this.#inner.synchronize();
-    const pollable: Pollable = result.pollable();
-
-    // Block until the result is ready
-    pollable.block();
-
-    // Get the result
-    const value = result.get();
-
-    if (value === undefined) {
-      throw new Error('synchronize result was undefined after pollable was ready');
-    }
-
-    return value;
+    return awaitFuture(this.#inner.synchronize(), 'synchronize result was undefined');
   }
 
   /**
@@ -81,20 +66,7 @@ export class Queue implements Forward {
    * Executes a debug command on the queue and returns the result (async)
    */
   async debugQuery(query: string): Promise<string> {
-    const result: DebugQueryResult = this.#inner.debugQuery(query);
-    const pollable: Pollable = result.pollable();
-
-    // Block until the result is ready
-    pollable.block();
-
-    // Get the result
-    const value = result.get();
-
-    if (value === undefined) {
-      throw new Error('debugQuery result was undefined after pollable was ready');
-    }
-
-    return value;
+    return awaitFuture(this.#inner.debugQuery(query), 'debugQuery result was undefined');
   }
 
   // ============================================
