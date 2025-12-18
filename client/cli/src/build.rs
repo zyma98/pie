@@ -520,3 +520,65 @@ pub async fn handle_build_command(args: BuildArgs) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    fn validate_code_str(code: &str) -> Result<()> {
+        let mut file = NamedTempFile::new()?;
+        file.write_all(code.as_bytes())?;
+        validate_user_code(file.path())
+    }
+
+    #[test]
+    fn test_rejects_export_run() {
+        let result = validate_code_str("export const run = () => {};");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("run"));
+    }
+
+    #[test]
+    fn test_allows_run_in_string() {
+        // This should NOT be rejected - it's just a string
+        let result = validate_code_str(r#"console.log("export const run = 1");"#);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_allows_run_in_comment() {
+        // This should NOT be rejected - it's just a comment
+        let result = validate_code_str("// export const run = 1\nconst x = 1;");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_rejects_unicode_escape_bypass() {
+        // Unicode escape for 'e' in export - should still be rejected
+        let result = validate_code_str(r"\u0065xport const run = () => {};");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_rejects_export_main() {
+        let result = validate_code_str("export function main() {}");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("main"));
+    }
+
+    #[test]
+    fn test_allows_main_in_object() {
+        // main as object property should be allowed
+        let result = validate_code_str("const obj = { main: () => {} };");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_allows_main_as_method() {
+        // main as class method should be allowed
+        let result = validate_code_str("class Foo { main() {} }");
+        assert!(result.is_ok());
+    }
+}
