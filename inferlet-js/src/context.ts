@@ -39,8 +39,6 @@ export interface StopConfig {
  * Options for the generate() method
  */
 export interface GenerateOptions {
-  /** Optional messages to fill before generating */
-  messages?: ChatMessage[];
   /** Sampling configuration - either a config object or a Sampler instance */
   sampling: SamplingConfig | Sampler;
   /** Stop conditions */
@@ -537,26 +535,28 @@ export class Context {
   /**
    * Generates text autoregressively until a stop condition is met.
    *
+   * Fill context with messages using fillSystem(), fillUser(), fillAssistant()
+   * before calling generate().
+   *
    * Can be called with either:
    * - New API: generate(options: GenerateOptions)
    * - Legacy API: generate(sampler: Sampler, stopCondition: StopCondition)
    *
-   * @example New API with messages
+   * @example New API with stateful context
    * ```ts
+   * ctx.fillSystem('You are helpful.');
+   * ctx.fillUser('Hello!');
+   *
    * const result = await ctx.generate({
-   *   messages: [
-   *     { role: 'system', content: 'You are helpful.' },
-   *     { role: 'user', content: 'Hello!' }
-   *   ],
-   *   sampling: { topP: 0.95, temperature: 0.6 },
+   *   sampling: Sampler.topP(0.6, 0.95),
    *   stop: { maxTokens: 256, sequences: model.eosTokens }
    * });
    * ```
    *
-   * @example New API with Sampler preset
+   * @example New API with sampling config
    * ```ts
    * const result = await ctx.generate({
-   *   sampling: Sampler.reasoning(),
+   *   sampling: { topP: 0.95, temperature: 0.6 },
    *   stop: { maxTokens: 256, sequences: model.eosTokens }
    * });
    * ```
@@ -580,23 +580,6 @@ export class Context {
     } else {
       // New API: generate(options)
       const options = optionsOrSampler;
-
-      // Fill messages if provided
-      if (options.messages) {
-        for (const msg of options.messages) {
-          switch (msg.role) {
-            case 'system':
-              this.fillSystem(msg.content);
-              break;
-            case 'user':
-              this.fillUser(msg.content);
-              break;
-            case 'assistant':
-              this.fillAssistant(msg.content);
-              break;
-          }
-        }
-      }
 
       // Convert sampling config to Sampler
       sampler = this.toSampler(options.sampling);
