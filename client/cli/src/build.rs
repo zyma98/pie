@@ -399,15 +399,61 @@ fn check_decl_for_forbidden_names(decl: &Decl) -> Result<()> {
         }
         Decl::Var(var_decl) => {
             for decl in &var_decl.decls {
-                if let Pat::Ident(ident) = &decl.name {
-                    check_forbidden_export_name(&ident.id.sym)?;
-                }
+                check_pattern_for_forbidden_names(&decl.name)?;
             }
         }
         Decl::Class(class_decl) => {
             check_forbidden_export_name(&class_decl.ident.sym)?;
         }
         _ => {}
+    }
+    Ok(())
+}
+
+/// Recursively check a pattern for forbidden names (handles destructuring)
+fn check_pattern_for_forbidden_names(pat: &Pat) -> Result<()> {
+    match pat {
+        // Simple identifier: export const run = ...
+        Pat::Ident(ident) => {
+            check_forbidden_export_name(&ident.id.sym)?;
+        }
+        // Array destructuring: export const [run] = arr
+        Pat::Array(array_pat) => {
+            for elem in &array_pat.elems {
+                if let Some(elem_pat) = elem {
+                    check_pattern_for_forbidden_names(elem_pat)?;
+                }
+            }
+        }
+        // Object destructuring: export const { run } = obj
+        Pat::Object(object_pat) => {
+            for prop in &object_pat.props {
+                match prop {
+                    swc_ecma_ast::ObjectPatProp::KeyValue(kv) => {
+                        // Check the value pattern (e.g., { foo: run })
+                        check_pattern_for_forbidden_names(&kv.value)?;
+                    }
+                    swc_ecma_ast::ObjectPatProp::Assign(assign) => {
+                        // Check the key (e.g., { run })
+                        check_forbidden_export_name(&assign.key.sym)?;
+                    }
+                    swc_ecma_ast::ObjectPatProp::Rest(rest) => {
+                        // Check rest pattern (e.g., { ...run })
+                        check_pattern_for_forbidden_names(&rest.arg)?;
+                    }
+                }
+            }
+        }
+        // Rest pattern: export const [...run] = arr
+        Pat::Rest(rest_pat) => {
+            check_pattern_for_forbidden_names(&rest_pat.arg)?;
+        }
+        // Assignment pattern: export const [run = 1] = arr
+        Pat::Assign(assign_pat) => {
+            check_pattern_for_forbidden_names(&assign_pat.left)?;
+        }
+        // Invalid or expression patterns - skip
+        Pat::Invalid(_) | Pat::Expr(_) => {}
     }
     Ok(())
 }
@@ -626,6 +672,68 @@ mod tests {
     fn test_allows_main_as_method() {
         // main as class method should be allowed
         let result = validate_code_str("class Foo { main() {} }");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_rejects_object_destructuring() {
+        // Object destructuring should be caught
+        let result = validate_code_str("export const { run } = obj;");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("run"));
+    }
+
+    #[test]
+    fn test_rejects_array_destructuring() {
+        // Array destructuring should be caught
+        let result = validate_code_str("export const [run] = arr;");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("run"));
+    }
+
+    #[test]
+    fn test_rejects_nested_object_destructuring() {
+        // Nested object destructuring: { foo: run }
+        let result = validate_code_str("export const { foo: run } = obj;");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("run"));
+    }
+
+    #[test]
+    fn test_rejects_rest_destructuring() {
+        // Rest pattern: { ...run }
+        let result = validate_code_str("export const { ...run } = obj;");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("run"));
+    }
+
+    #[test]
+    fn test_rejects_array_rest_destructuring() {
+        // Array rest pattern: [...run]
+        let result = validate_code_str("export const [...run] = arr;");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("run"));
+    }
+
+    #[test]
+    fn test_rejects_assignment_destructuring() {
+        // Assignment pattern with default: [run = 1]
+        let result = validate_code_str("export const [run = 1] = arr;");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("run"));
+    }
+
+    #[test]
+    fn test_allows_nested_destructuring_without_run() {
+        // Nested destructuring without forbidden names should be allowed
+        let result = validate_code_str("export const { foo: bar, baz } = obj;");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_allows_complex_destructuring() {
+        // Complex destructuring without forbidden names should be allowed
+        let result = validate_code_str("export const [a, { b, c: d }, ...rest] = data;");
         assert!(result.is_ok());
     }
 }
