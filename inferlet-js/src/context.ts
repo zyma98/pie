@@ -9,6 +9,7 @@ import { KvPage, ForwardPass, type Distribution } from './forward.js';
 import { Sampler, type SamplerType, type SamplingConfig } from './sampler.js';
 import { MaxLen, AnyEndsWith, type StopCondition } from './stop-condition.js';
 import { KvPageManager } from './kv-page-manager.js';
+import { ImmutableArray } from './immutable-array.js';
 
 // Debug tracing for Context
 const DEBUG_CONTEXT = false;
@@ -62,7 +63,7 @@ export class Context {
   tokenizer: Tokenizer;
   formatter: ChatFormatter;
 
-  tokenIds: number[] = [];
+  private _tokenIds: ImmutableArray<number> = ImmutableArray.empty();
   tokenIdsPending: number[] = [];
 
   tokenMaskPending: Brle[] = [];
@@ -92,6 +93,17 @@ export class Context {
     if (DEBUG_CONTEXT) {
       console.log(`[Context] CREATE id=${this._debugId}`);
     }
+  }
+
+  /**
+   * The committed token IDs (as regular array for backward compatibility)
+   */
+  get tokenIds(): number[] {
+    return this._tokenIds.toArray();
+  }
+
+  set tokenIds(value: number[]) {
+    this._tokenIds = ImmutableArray.from(value);
   }
 
   /**
@@ -136,7 +148,7 @@ export class Context {
       );
     }
 
-    ctx.tokenIds = [...prefixTokens];
+    ctx._tokenIds = ImmutableArray.from([...prefixTokens]);
     ctx.positionIds = Array.from({ length: prefixTokens.length }, (_, i) => i);
 
     // Import pages into manager
@@ -152,7 +164,7 @@ export class Context {
    * The text representation of all tokens (computed on access)
    */
   get text(): string {
-    return this.tokenizer.detokenize(new Uint32Array(this.tokenIds));
+    return this.tokenizer.detokenize(new Uint32Array(this._tokenIds.toArray()));
   }
 
   /**
@@ -196,7 +208,7 @@ export class Context {
 
     if (isEasyCase) {
       // Easy case: the last page is full, we can share everything.
-      forked.tokenIds = [...this.tokenIds];
+      forked._tokenIds = this._tokenIds.fork();
       forked.tokenIdsPending = [...this.tokenIdsPending];
       forked.kvPageManager = this.kvPageManager.fork();
       forked.positionIds = [...this.positionIds];
@@ -209,12 +221,12 @@ export class Context {
 
       const keptTokensLen = forkedKvManager.totalTokens;
 
-      forked.tokenIds = this.tokenIds.slice(0, keptTokensLen);
+      forked._tokenIds = this._tokenIds.slice(0, keptTokensLen);
       forked.positionIds = this.positionIds.slice(0, keptTokensLen);
 
       // Combine uncommitted tokens from last page with pending tokens
       forked.tokenIdsPending = [
-        ...this.tokenIds.slice(keptTokensLen),
+        ...this._tokenIds.toArray().slice(keptTokensLen),
         ...this.tokenIdsPending,
       ];
 
@@ -411,7 +423,7 @@ export class Context {
 
     await p.execute();
 
-    this.tokenIds.push(...pendingTokenIds);
+    this._tokenIds = this._tokenIds.pushAll(pendingTokenIds);
     this.positionIds.push(...positionIds);
   }
 
@@ -488,7 +500,7 @@ export class Context {
       throw new Error('No token generated');
     }
 
-    this.tokenIds.push(...pendingTokenIds);
+    this._tokenIds = this._tokenIds.pushAll(pendingTokenIds);
     this.positionIds.push(...positionIds);
 
     return sampled;
@@ -533,7 +545,7 @@ export class Context {
 
     const dist = res.distributions[0];
 
-    this.tokenIds.push(...pendingTokenIds);
+    this._tokenIds = this._tokenIds.pushAll(pendingTokenIds);
     this.positionIds.push(...positionIds);
 
     return dist;
@@ -727,7 +739,7 @@ export class Context {
 
         // Adopt the state from the winning beam
         this.kvPageManager.adopt(winningBeam.kvPageManager);
-        this.tokenIds = [...winningBeam.tokenIds];
+        this._tokenIds = winningBeam._tokenIds.fork();
         this.tokenIdsPending = [...winningBeam.tokenIdsPending];
 
         if (DEBUG_CONTEXT) {
