@@ -128,3 +128,11 @@ The generated `tsconfig.json` provides full IDE support:
 - No explicit imports needed
 
 Path mappings point to `inferlet-js/src/` for type definitions.
+
+## Testing
+
+```bash
+npm test              # All tests
+npm run test:wasm     # WASM integration tests only
+npm run test:watch    # Watch mode
+```
