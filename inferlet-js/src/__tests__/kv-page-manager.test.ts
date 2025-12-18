@@ -159,4 +159,50 @@ describe('KvPageManager', () => {
 
     expect(mockPage.release).toHaveBeenCalledTimes(1);
   });
+
+  it('should adopt pages from another manager', () => {
+    const mockPages1 = [
+      { ptr: 1, ref: vi.fn(), release: vi.fn() },
+    ];
+    const mockPages2 = [
+      { ptr: 2, ref: vi.fn(), release: vi.fn() },
+      { ptr: 3, ref: vi.fn(), release: vi.fn() },
+    ];
+
+    mockNewKvPages
+      .mockReturnValueOnce(mockPages1)
+      .mockReturnValueOnce(mockPages2);
+
+    const manager1 = new KvPageManager(mockQueue, 128);
+    manager1.grow(50);
+
+    const manager2 = new KvPageManager(mockQueue, 128);
+    manager2.grow(200);
+
+    // Adopt pages from manager2
+    manager1.adopt(manager2);
+
+    // Manager1 should have released its old page
+    expect(mockPages1[0].release).toHaveBeenCalled();
+
+    // Manager1 should now have manager2's pages with incremented refs
+    expect(manager1.pageCount).toBe(2);
+    expect(mockPages2[0].ref).toHaveBeenCalled();
+    expect(mockPages2[1].ref).toHaveBeenCalled();
+  });
+
+  it('should import pages from external source', () => {
+    const externalPages = [
+      { ptr: 10, ref: vi.fn(), release: vi.fn() },
+      { ptr: 11, ref: vi.fn(), release: vi.fn() },
+    ] as any;
+
+    const manager = new KvPageManager(mockQueue, 128);
+    manager.importPages(externalPages, 64);
+
+    expect(manager.pageCount).toBe(2);
+    expect(manager.lastPageLen).toBe(64);
+    expect(manager.totalTokens).toBe(128 + 64); // 192
+    expect(manager.ptrs).toEqual([10, 11]);
+  });
 });
