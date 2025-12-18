@@ -1,6 +1,7 @@
 // Beam Search Example - JavaScript/TypeScript Inferlet
 // Demonstrates beam search decoding for text generation
-// No boilerplate needed - just write top-level code!
+
+import { Context, getAutoModel, getArguments, send, maxLen, endsWithAny } from 'inferlet';
 
 const HELP = `
 Usage: beam-search-js [OPTIONS]
@@ -88,14 +89,12 @@ if (help) {
   ctx.fillSystem(system);
   ctx.fillUser(userPrompt);
 
-  // Create stop condition
-  const eosTokens = model.eosTokens().map((arr) => [...arr]);
-  const stopCond = maxLen(maxTokens).or(endsWithAny(eosTokens));
+  // Create stop condition (beam search still uses StopCondition API)
+  const stopCond = maxLen(maxTokens).or(endsWithAny(model.eosTokens));
 
   // Generate the response using beam search
   const result = await ctx.generateWithBeam(stopCond, beamSize);
 
   // Send the result
   send(result);
-  send('\n');
 }

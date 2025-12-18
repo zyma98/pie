@@ -1,6 +1,7 @@
 // Text Completion Example - JavaScript/TypeScript Inferlet
 // Demonstrates basic text generation using the inferlet library
-// No boilerplate needed - just write top-level code!
+
+import { Context, Sampler, getAutoModel, getArguments, send } from 'inferlet';
 
 const HELP = `
 Usage: text-completion-js [OPTIONS]
@@ -70,19 +71,16 @@ if (help) {
   // Create a context for generation
   const ctx = new Context(model);
 
-  // Use ChatFormatter for proper prompt formatting
-  ctx.fillSystem(system);
-  ctx.fillUser(userPrompt);
-
-  // Create sampler and stop condition
-  const sampler = Sampler.topP(0.6, 0.95);
-  const eosTokens = model.eosTokens().map((arr) => [...arr]);
-  const stopCond = maxLen(maxTokens).or(endsWithAny(eosTokens));
-
-  // Generate the response
-  const result = await ctx.generate(sampler, stopCond);
+  // Generate the response using the new object-based API
+  const result = await ctx.generate({
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: userPrompt }
+    ],
+    sampling: Sampler.topP(0.6, 0.95),
+    stop: { maxTokens, sequences: model.eosTokens }
+  });
 
   // Send the result
   send(result);
-  send('\n');
 }
