@@ -69,7 +69,7 @@ export class Context {
   tokenMaskPending: Brle[] = [];
   tokenMaskCurrent: Brle;
 
-  positionIds: number[] = [];
+  private _positionIds: ImmutableArray<number> = ImmutableArray.empty();
 
   private kvPageManager: KvPageManager;
   kvPageSize: number;
@@ -104,6 +104,17 @@ export class Context {
 
   set tokenIds(value: number[]) {
     this._tokenIds = ImmutableArray.from(value);
+  }
+
+  /**
+   * The position IDs (as regular array for backward compatibility)
+   */
+  get positionIds(): number[] {
+    return this._positionIds.toArray();
+  }
+
+  set positionIds(value: number[]) {
+    this._positionIds = ImmutableArray.from(value);
   }
 
   /**
@@ -149,7 +160,7 @@ export class Context {
     }
 
     ctx._tokenIds = ImmutableArray.from([...prefixTokens]);
-    ctx.positionIds = Array.from({ length: prefixTokens.length }, (_, i) => i);
+    ctx._positionIds = ImmutableArray.from(Array.from({ length: prefixTokens.length }, (_, i) => i));
 
     // Import pages into manager
     ctx.kvPageManager.importPages(kvPages, kvPageLastLen);
@@ -211,7 +222,7 @@ export class Context {
       forked._tokenIds = this._tokenIds.fork();
       forked.tokenIdsPending = [...this.tokenIdsPending];
       forked.kvPageManager = this.kvPageManager.fork();
-      forked.positionIds = [...this.positionIds];
+      forked._positionIds = this._positionIds.fork();
       forked.tokenMaskPending = this.tokenMaskPending.map((m) => m.clone());
       forked.tokenMaskCurrent = this.tokenMaskCurrent.clone();
     } else {
@@ -222,7 +233,7 @@ export class Context {
       const keptTokensLen = forkedKvManager.totalTokens;
 
       forked._tokenIds = this._tokenIds.slice(0, keptTokensLen);
-      forked.positionIds = this.positionIds.slice(0, keptTokensLen);
+      forked._positionIds = this._positionIds.slice(0, keptTokensLen);
 
       // Combine uncommitted tokens from last page with pending tokens
       forked.tokenIdsPending = [
@@ -424,7 +435,7 @@ export class Context {
     await p.execute();
 
     this._tokenIds = this._tokenIds.pushAll(pendingTokenIds);
-    this.positionIds.push(...positionIds);
+    this._positionIds = this._positionIds.pushAll(positionIds);
   }
 
   /**
@@ -501,7 +512,7 @@ export class Context {
     }
 
     this._tokenIds = this._tokenIds.pushAll(pendingTokenIds);
-    this.positionIds.push(...positionIds);
+    this._positionIds = this._positionIds.pushAll(positionIds);
 
     return sampled;
   }
@@ -546,7 +557,7 @@ export class Context {
     const dist = res.distributions[0];
 
     this._tokenIds = this._tokenIds.pushAll(pendingTokenIds);
-    this.positionIds.push(...positionIds);
+    this._positionIds = this._positionIds.pushAll(positionIds);
 
     return dist;
   }
