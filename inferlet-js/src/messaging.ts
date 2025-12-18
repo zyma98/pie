@@ -22,6 +22,14 @@ export class Blob {
   }
 
   /**
+   * Create a Blob from a WIT message.Blob resource (internal use)
+   * @internal
+   */
+  static fromWit(inner: message.Blob): Blob {
+    return new Blob(inner);
+  }
+
+  /**
    * Get the inner blob resource (for internal use)
    */
   getInner(): message.Blob {
@@ -89,7 +97,7 @@ export async function receiveBlob(): Promise<Blob> {
   if (result === undefined) {
     throw new Error('receiveBlob() returned undefined');
   }
-  return new (Blob as any)(result);
+  return Blob.fromWit(result);
 }
 
 /**
