@@ -41,11 +41,6 @@ export class Queue implements Forward {
     return this.#serviceId;
   }
 
-  // Deprecated methods for backward compatibility
-  /** @deprecated Use `inner` getter instead */
-  getInner(): QueueResource { return this.#inner; }
-  /** @deprecated Use `serviceId` getter instead */
-  getServiceId(): number { return this.#serviceId; }
 
   /**
    * Begins a synchronization process for the queue (async)
@@ -278,11 +273,6 @@ export class Queue implements Forward {
     return this.getAllExportedResources(Resource.Embed);
   }
 
-  // Deprecated methods
-  /** @deprecated Use `allExportedKvPages` getter instead */
-  getAllExportedKvPages(): [string, number][] { return this.allExportedKvPages; }
-  /** @deprecated Use `allExportedEmbeds` getter instead */
-  getAllExportedEmbeds(): [string, number][] { return this.allExportedEmbeds; }
 }
 
 /**
@@ -386,23 +376,6 @@ export class Model {
     return new Queue(queueResource, this.serviceId);
   }
 
-  // Deprecated methods for backward compatibility
-  /** @deprecated Use `name` getter instead */
-  getName(): string { return this.name; }
-  /** @deprecated Use `traits` getter instead */
-  getTraits(): string[] { return this.traits; }
-  /** @deprecated Use `description` getter instead */
-  getDescription(): string { return this.description; }
-  /** @deprecated Use `promptTemplate` getter instead */
-  getPromptTemplate(): string { return this.promptTemplate; }
-  /** @deprecated Use `stopTokens` getter instead */
-  getStopTokens(): string[] { return this.stopTokens; }
-  /** @deprecated Use `serviceId` getter instead */
-  getServiceId(): number { return this.serviceId; }
-  /** @deprecated Use `kvPageSize` getter instead */
-  getKvPageSize(): number { return this.kvPageSize; }
-  /** @deprecated Use `tokenizer` getter instead */
-  getTokenizer(): Tokenizer { return this.tokenizer; }
 }
 
 /**
