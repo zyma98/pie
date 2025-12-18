@@ -11,9 +11,6 @@ import { MaxLen, AnyEndsWith, type StopCondition } from './stop-condition.js';
 import { KvPageManager } from './kv-page-manager.js';
 import { ImmutableArray } from './immutable-array.js';
 
-// Debug tracing for Context
-const DEBUG_CONTEXT = false;
-let contextIdCounter = 0;
 
 /**
  * Message role for chat messages
@@ -79,8 +76,6 @@ export class Context {
 
   beginOfSequence: boolean = true;
 
-  private _debugId: number;
-
   constructor(model: Model) {
     this.queue = model.createQueue();
     this.kvPageSize = model.kvPageSize;
@@ -89,10 +84,6 @@ export class Context {
     this.model = model;
     this.formatter = new ChatFormatter();
     this.tokenMaskCurrent = Brle.new(0);
-    this._debugId = contextIdCounter++;
-    if (DEBUG_CONTEXT) {
-      console.log(`[Context] CREATE id=${this._debugId}`);
-    }
   }
 
   /**
@@ -202,68 +193,52 @@ export class Context {
   /**
    * Creates a safe, copy-on-write fork of the context.
    *
-   * This method creates a new context that shares the immutable history of the current
-   * one. If the last KV-cache page is not full, its tokens are moved to the
-   * `tokenIdsPending` buffer of the new context to be recomputed, ensuring state isolation.
+   * This method creates a new context that shares only FULL KV cache pages.
+   * Partial pages are dropped and their tokens moved to pending buffer for
+   * recomputation. This ensures state isolation - shared pages are read-only
+   * (full pages won't be written to), and writable pages are unique per context.
    */
   fork(): Context {
     const forked = new Context(this.model);
-    const isEasyCase = this.kvPageLastLen === this.kvPageSize;
 
-    if (DEBUG_CONTEXT) {
-      const pagePtrs = this.kvPages.map(p => p.ptr).join(',');
-      console.log(`[Context] FORK parent=${this._debugId} child=${forked._debugId} ` +
-        `kvPageLastLen=${this.kvPageLastLen} kvPageSize=${this.kvPageSize} ` +
-        `isEasyCase=${isEasyCase} pages=[${pagePtrs}]`);
+    // Always use forkPartial behavior to ensure no writable pages are shared.
+    // This drops partial pages and moves their tokens to pending for recomputation.
+    const { manager: forkedKvManager, droppedTokenCount } = this.kvPageManager.fork();
+    forked.kvPageManager = forkedKvManager;
+
+    const keptTokensLen = forkedKvManager.totalTokens;
+
+    forked._tokenIds = this._tokenIds.slice(0, keptTokensLen);
+    forked._positionIds = this._positionIds.slice(0, keptTokensLen);
+
+    // Combine uncommitted tokens from last page with pending tokens
+    forked.tokenIdsPending = [
+      ...this._tokenIds.toArray().slice(keptTokensLen),
+      ...this.tokenIdsPending,
+    ];
+
+    // Rebuild the mask for pending tokens
+    // Optimization: Build final mask first, then truncate (avoids O(n²) clone+append)
+    let maskBuilder = this.tokenMaskCurrent.clone();
+    const parentTotalMaskLen = this.tokenIds.length + this.tokenIdsPending.length;
+    maskBuilder.removeRange(keptTokensLen, parentTotalMaskLen);
+
+    const pendingCount = forked.tokenIdsPending.length;
+    const baseLen = maskBuilder.len();
+
+    // Append all positions at once
+    for (let i = 0; i < pendingCount; i++) {
+      maskBuilder.append(false);
     }
 
-    if (isEasyCase) {
-      // Easy case: the last page is full, we can share everything.
-      forked._tokenIds = this._tokenIds.fork();
-      forked.tokenIdsPending = [...this.tokenIdsPending];
-      forked.kvPageManager = this.kvPageManager.fork();
-      forked._positionIds = this._positionIds.fork();
-      forked.tokenMaskPending = this.tokenMaskPending.map((m) => m.clone());
-      forked.tokenMaskCurrent = this.tokenMaskCurrent.clone();
-    } else {
-      // Hard case: the last page is partially full and must be recomputed.
-      const { manager: forkedKvManager, droppedTokenCount } = this.kvPageManager.forkPartial();
-      forked.kvPageManager = forkedKvManager;
-
-      const keptTokensLen = forkedKvManager.totalTokens;
-
-      forked._tokenIds = this._tokenIds.slice(0, keptTokensLen);
-      forked._positionIds = this._positionIds.slice(0, keptTokensLen);
-
-      // Combine uncommitted tokens from last page with pending tokens
-      forked.tokenIdsPending = [
-        ...this._tokenIds.toArray().slice(keptTokensLen),
-        ...this.tokenIdsPending,
-      ];
-
-      // Rebuild the mask for pending tokens
-      // Optimization: Build final mask first, then truncate (avoids O(n²) clone+append)
-      let maskBuilder = this.tokenMaskCurrent.clone();
-      const parentTotalMaskLen = this.tokenIds.length + this.tokenIdsPending.length;
-      maskBuilder.removeRange(keptTokensLen, parentTotalMaskLen);
-
-      const pendingCount = forked.tokenIdsPending.length;
-      const baseLen = maskBuilder.len();
-
-      // Append all positions at once
-      for (let i = 0; i < pendingCount; i++) {
-        maskBuilder.append(false);
-      }
-
-      // Build masks by truncating from final (cheaper than repeated clone+append)
-      forked.tokenMaskPending = [];
-      for (let i = 0; i < pendingCount; i++) {
-        forked.tokenMaskPending.push(maskBuilder.truncate(baseLen + i + 1));
-      }
-
-      // tokenMaskCurrent includes both committed and pending tokens
-      forked.tokenMaskCurrent = maskBuilder;
+    // Build masks by truncating from final (cheaper than repeated clone+append)
+    forked.tokenMaskPending = [];
+    for (let i = 0; i < pendingCount; i++) {
+      forked.tokenMaskPending.push(maskBuilder.truncate(baseLen + i + 1));
     }
+
+    // tokenMaskCurrent includes both committed and pending tokens
+    forked.tokenMaskCurrent = maskBuilder;
 
     forked.adapterPtr = this.adapterPtr;
     forked.adapterRandomSeed = this.adapterRandomSeed;
@@ -278,9 +253,6 @@ export class Context {
    * Safe to call multiple times.
    */
   release(): void {
-    if (DEBUG_CONTEXT) {
-      console.log(`[Context] RELEASE id=${this._debugId}`);
-    }
     this.kvPageManager.release();
   }
 
@@ -720,22 +692,10 @@ export class Context {
     beamSize: number
   ): Promise<string> {
     type BeamState = [Context, number[], number]; // [context, generated_tokens, score]
-    let beams: BeamState[] = [[this.fork(), [], 0.0]];
-    let iteration = 0;
 
-    if (DEBUG_CONTEXT) {
-      console.log(`[BeamSearch] START parent=${this._debugId} beamSize=${beamSize}`);
-    }
+    let beams: BeamState[] = [[this.fork(), [], 0.0]];
 
     while (true) {
-      iteration++;
-      if (DEBUG_CONTEXT) {
-        const beamInfo = beams.map(([ctx, gen, score]) =>
-          `ctx=${ctx._debugId} pages=${ctx.kvPages.length} gen=${gen.length}`
-        ).join('; ');
-        console.log(`[BeamSearch] ITERATION ${iteration} beams=[${beamInfo}]`);
-      }
-
       // Check if any beam satisfies the stop condition
       const completedBeam = beams.find(([, generated]) =>
         stopCondition.check(generated)
@@ -744,21 +704,13 @@ export class Context {
       if (completedBeam) {
         const [winningBeam, generatedTokens] = completedBeam;
 
-        if (DEBUG_CONTEXT) {
-          console.log(`[BeamSearch] COMPLETE winner=${winningBeam._debugId} tokens=${generatedTokens.length}`);
-        }
-
         // Adopt the state from the winning beam
         this.kvPageManager.adopt(winningBeam.kvPageManager);
         this._tokenIds = winningBeam._tokenIds.fork();
         this._positionIds = winningBeam._positionIds.fork();
         this.tokenIdsPending = [...winningBeam.tokenIdsPending];
 
-        if (DEBUG_CONTEXT) {
-          console.log(`[BeamSearch] RELEASE all ${beams.length} beams`);
-        }
-
-        // Release all beams (their pages will be decremented, deallocated if refCount reaches 0)
+        // Release all beams
         for (const [beam] of beams) {
           beam.release();
         }
@@ -767,9 +719,6 @@ export class Context {
       }
 
       // Progress all beams in parallel
-      if (DEBUG_CONTEXT) {
-        console.log(`[BeamSearch] DECODE ${beams.length} beams`);
-      }
       const nextDists = await Promise.all(
         beams.map(([beam]) => beam.decodeStepDist())
       );
@@ -780,37 +729,28 @@ export class Context {
         const [beam, generated, score] = beams[i];
         const nextDist = nextDists[i];
 
-        if (DEBUG_CONTEXT) {
-          console.log(`[BeamSearch] EXPAND beam=${beam._debugId} into ${Math.min(beamSize, nextDist.ids.length)} children`);
-        }
-
         // Expand with top candidates
-        for (let j = 0; j < Math.min(beamSize, nextDist.ids.length); j++) {
+        const expandCount = Math.min(beamSize, nextDist.ids.length);
+        for (let j = 0; j < expandCount; j++) {
           const nextBeam = beam.fork();
-          nextBeam.fillToken(nextDist.ids[j]);
+          const tokenId = nextDist.ids[j];
+          nextBeam.fillToken(tokenId);
 
-          const nextGenerated = [...generated, nextDist.ids[j]];
+          const nextGenerated = [...generated, tokenId];
           const nextScore = score + Math.log(nextDist.probs[j]);
 
           nextBeams.push([nextBeam, nextGenerated, nextScore]);
         }
 
-        // Release the old beam after forking - its pages are now shared with children
-        if (DEBUG_CONTEXT) {
-          console.log(`[BeamSearch] RELEASE parent beam=${beam._debugId}`);
-        }
+        // Release the old beam after forking
         beam.release();
       }
 
       // Prune: Sort by score (descending) and keep top beamSize
       nextBeams.sort((a, b) => b[2] - a[2]);
 
-      // Release pruned beams before discarding them
+      // Release pruned beams
       const prunedBeams = nextBeams.slice(beamSize);
-      if (DEBUG_CONTEXT && prunedBeams.length > 0) {
-        const prunedIds = prunedBeams.map(([ctx]) => ctx._debugId).join(',');
-        console.log(`[BeamSearch] PRUNE ${prunedBeams.length} beams: [${prunedIds}]`);
-      }
       for (const [prunedCtx] of prunedBeams) {
         prunedCtx.release();
       }
