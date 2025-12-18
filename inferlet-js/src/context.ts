@@ -751,6 +751,7 @@ export class Context {
         // Adopt the state from the winning beam
         this.kvPageManager.adopt(winningBeam.kvPageManager);
         this._tokenIds = winningBeam._tokenIds.fork();
+        this._positionIds = winningBeam._positionIds.fork();
         this.tokenIdsPending = [...winningBeam.tokenIdsPending];
 
         if (DEBUG_CONTEXT) {
