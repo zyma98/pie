@@ -618,6 +618,8 @@ class FP4Moe:
         padded_hidden_size,
         padded_intermediate_size,
         num_experts,
+        gemm1_bias_padded=None,
+        gemm2_bias_padded=None,
     ):
         """Prepare quantized weights for kernel (done offline with weights).
         
@@ -629,6 +631,13 @@ class FP4Moe:
             padded_hidden_size: Padded hidden size (must be multiple of 256)
             padded_intermediate_size: Padded intermediate size (must be multiple of 256)
             num_experts: Number of experts
+            gemm1_bias_padded: Optional padded gate_up bias [num_experts, 2*padded_intermediate_size]
+            gemm2_bias_padded: Optional padded down bias [num_experts, padded_hidden_size]
+        
+        Returns:
+            Tuple of (gemm1_weights_shuffled, gemm1_scales_shuffled, 
+                      gemm2_weights_shuffled, gemm2_scales_shuffled,
+                      gemm1_bias_shuffled, gemm2_bias_shuffled)
         """
         epilogue_tile_m = 128  # FIXME: this depends on the kernel internals
 
@@ -662,8 +671,15 @@ class FP4Moe:
         # Using cached permute index calculation can speed up weights preprocessing
         gemm1_weights_fp4_shuffled = []
         gemm1_scales_fp4_shuffled = []
+        gemm1_bias_shuffled_list = []
         gemm2_weights_fp4_shuffled = []
         gemm2_scales_fp4_shuffled = []
+        gemm2_bias_shuffled_list = []
+        
+        # Number of columns in the weight matrices (for computing row permutation)
+        gemm1_ncols = padded_hidden_size // 2
+        gemm2_ncols = padded_intermediate_size // 2
+        
         for i in range(num_experts):
             # Calculate the permute indices for the following:
             # 1. Reorder rows of W1 and scales for fused gated activation
@@ -679,6 +695,13 @@ class FP4Moe:
                 .view(torch.uint8)[permute_indices.to(gemm1_weights_fp4.device)]
                 .contiguous()
             )
+            
+            # Shuffle gemm1 bias using row permutation derived from weight permutation
+            if gemm1_bias_padded is not None:
+                gemm1_bias_shuffled_list.append(
+                    gemm1_bias_padded[i][permute_indices.to(gemm1_bias_padded.device)]
+                    .contiguous()
+                )
 
             permute_sf_indices = _maybe_get_cached_w3_w1_permute_indices(
                 self._cache_permute_indices,
@@ -706,6 +729,13 @@ class FP4Moe:
                 .view(torch.uint8)[permute_indices.to(gemm2_weights_fp4.device)]
                 .contiguous()
             )
+            
+            # Shuffle gemm2 bias using row permutation derived from weight permutation
+            if gemm2_bias_padded is not None:
+                gemm2_bias_shuffled_list.append(
+                    gemm2_bias_padded[i][permute_indices.to(gemm2_bias_padded.device)]
+                    .contiguous()
+                )
 
             permute_sf_indices = get_w2_permute_indices_with_cache(
                 self._cache_permute_indices,
@@ -739,12 +769,22 @@ class FP4Moe:
             .view(torch.float8_e4m3fn)
             .reshape(num_experts, padded_hidden_size, padded_intermediate_size // 32)
         )
+        
+        # Stack bias tensors if provided
+        gemm1_bias_shuffled = None
+        gemm2_bias_shuffled = None
+        if gemm1_bias_padded is not None:
+            gemm1_bias_shuffled = torch.stack(gemm1_bias_shuffled_list)
+        if gemm2_bias_padded is not None:
+            gemm2_bias_shuffled = torch.stack(gemm2_bias_shuffled_list)
 
         return (
             gemm1_weights_fp4_shuffled,
             gemm1_scales_fp4_shuffled,
             gemm2_weights_fp4_shuffled,
             gemm2_scales_fp4_shuffled,
+            gemm1_bias_shuffled,
+            gemm2_bias_shuffled,
         )
 
     def call_moe(
@@ -1046,13 +1086,26 @@ def run_moe_test(
         _,
     ) = moe_impl.quantize_weights(gemm1_weights_padded, gemm2_weights_padded)
 
-    # 5. Prepare static weights for kernel with padded dimensions
+    # 5. Pad hidden states for kernel
+    hidden_states_padded = pad_hidden_states(hidden_states, padded_hidden_size)
+
+    # 6. Pad bias tensors for kernel (if provided)
+    gemm1_bias_padded = None
+    gemm2_bias_padded = None
+    if gemm1_bias is not None:
+        gemm1_bias_padded = pad_gate_up_bias(gemm1_bias, padded_intermediate_size)
+    if gemm2_bias is not None:
+        gemm2_bias_padded = pad_down_bias(gemm2_bias, padded_hidden_size)
+
+    # 7. Prepare static weights for kernel with padded dimensions (includes bias shuffling)
     print("Preparing padded weights for kernel...")
     (
         gemm1_weights_shuffled,
         gemm1_scales_shuffled,
         gemm2_weights_shuffled,
         gemm2_scales_shuffled,
+        gemm1_bias_shuffled,
+        gemm2_bias_shuffled,
     ) = moe_impl.prepare_static_weights_for_kernel(
         gemm1_weights_quant_padded,
         gemm2_weights_quant_padded,
@@ -1061,18 +1114,9 @@ def run_moe_test(
         padded_hidden_size,
         padded_intermediate_size,
         num_experts,
+        gemm1_bias_padded=gemm1_bias_padded,
+        gemm2_bias_padded=gemm2_bias_padded,
     )
-
-    # 6. Pad hidden states for kernel
-    hidden_states_padded = pad_hidden_states(hidden_states, padded_hidden_size)
-
-    # 7. Pad bias tensors for kernel (if provided)
-    gemm1_bias_padded = None
-    gemm2_bias_padded = None
-    if gemm1_bias is not None:
-        gemm1_bias_padded = pad_gate_up_bias(gemm1_bias, padded_intermediate_size)
-    if gemm2_bias is not None:
-        gemm2_bias_padded = pad_down_bias(gemm2_bias, padded_hidden_size)
 
     # Compute actual output using FlashInfer kernel with padded data
     print("Computing FlashInfer kernel output (padded)...")
@@ -1086,8 +1130,8 @@ def run_moe_test(
         num_experts=num_experts,
         top_k=top_k,
         intermediate_size=padded_intermediate_size,
-        gemm1_bias=gemm1_bias_padded,
-        gemm2_bias=gemm2_bias_padded,
+        gemm1_bias=gemm1_bias_shuffled,
+        gemm2_bias=gemm2_bias_shuffled,
         gemm1_alpha=gemm1_alpha,
         gemm1_beta=gemm1_beta,
         gemm1_clamp_limit=gemm1_clamp_limit,
@@ -1113,11 +1157,307 @@ def run_moe_test(
 
 
 # ====================================================================================
+# Test with Dumped Weights from Model
+# ====================================================================================
+
+
+def deinterleave_gate_up_weights(weights: torch.Tensor) -> torch.Tensor:
+    """
+    De-interleave gate_up weights from GPT OSS format to FlashInfer format.
+    
+    GPT OSS stores gate_up as interleaved: [gate[0], linear[0], gate[1], linear[1], ...]
+    FlashInfer expects non-interleaved: [linear[0], linear[1], ..., gate[0], gate[1], ...]
+    """
+    num_experts, fused_size, hidden_size = weights.shape
+    
+    # Extract interleaved parts: gate at even indices, linear at odd indices
+    gate_part = weights[:, 0::2, :]   # [num_experts, intermediate_size, hidden_size]
+    linear_part = weights[:, 1::2, :] # [num_experts, intermediate_size, hidden_size]
+    
+    # Concatenate: linear first, gate second (FlashInfer format)
+    return torch.cat([linear_part, gate_part], dim=1)
+
+
+def deinterleave_gate_up_bias(bias: torch.Tensor) -> torch.Tensor:
+    """
+    De-interleave gate_up bias from GPT OSS format to FlashInfer format.
+    """
+    num_experts, fused_size = bias.shape
+    
+    # Extract interleaved parts
+    gate_part = bias[:, 0::2]   # [num_experts, intermediate_size]
+    linear_part = bias[:, 1::2] # [num_experts, intermediate_size]
+    
+    # Concatenate: linear first, gate second (FlashInfer format)
+    return torch.cat([linear_part, gate_part], dim=1)
+
+
+def run_moe_test_with_dumped_weights(
+    dump_dir: str = "/tmp/moe_debug",
+    padding: int = 8,
+):
+    """
+    Test MxFP4 x BF16 fused MoE using weights dumped from the model.
+    
+    This loads weights from the specified directory and runs the same test
+    as run_moe_test but with actual model weights instead of random ones.
+    """
+    import os
+    
+    print(f"\n{'='*70}")
+    print(f"Testing with dumped weights from: {dump_dir}")
+    print(f"{'='*70}")
+    
+    # Load dumped data
+    hidden_states = torch.load(f"{dump_dir}/hidden_states.pt", weights_only=True)
+    router_logits = torch.load(f"{dump_dir}/router_logits.pt", weights_only=True)
+    gate_up_proj = torch.load(f"{dump_dir}/gate_up_proj.pt", weights_only=True)
+    gate_up_proj_bias = torch.load(f"{dump_dir}/gate_up_proj_bias.pt", weights_only=True)
+    down_proj = torch.load(f"{dump_dir}/down_proj.pt", weights_only=True)
+    down_proj_bias = torch.load(f"{dump_dir}/down_proj_bias.pt", weights_only=True)
+    config_info = torch.load(f"{dump_dir}/config_info.pt", weights_only=True)
+
+    num_experts = 32
+    hidden_size = 2880
+    num_tokens = 146
+    intermediate_size = 2880
+
+    # hidden_states = 2 * torch.randn(
+    #     (num_tokens, hidden_size), device="cuda", dtype=torch.bfloat16
+    # )
+    # router_logits = torch.randn((num_tokens, num_experts), device="cuda").to(
+    #     torch.bfloat16
+    # )
+    # gate_up_proj = torch.randn(
+    #     (num_experts, 2 * intermediate_size, hidden_size),
+    #     device="cuda",
+    #     dtype=torch.bfloat16,
+    # )
+    # down_proj = torch.randn(
+    #     (num_experts, hidden_size, intermediate_size),
+    #     device="cuda",
+    #     dtype=torch.bfloat16,
+    # )
+    # gate_up_proj_bias = torch.randn(
+    #         (num_experts, 2 * intermediate_size),
+    #         device="cuda",
+    #         dtype=torch.float32,
+    #     )
+    # down_proj_bias = torch.randn(
+    #     (num_experts, hidden_size),
+    #     device="cuda",
+    #     dtype=torch.float32,
+    # )
+
+    # assert num_experts == config_info["num_experts"]
+    # assert hidden_size == config_info["hidden_size"]
+    # assert intermediate_size == config_info["intermediate_size"]
+    # assert num_tokens == hidden_states.shape[0]
+    
+    # num_experts = config_info["num_experts"]
+    # hidden_size = config_info["hidden_size"]
+    # intermediate_size = config_info["intermediate_size"]
+    # num_tokens = hidden_states.shape[0]
+
+    top_k = config_info["experts_per_token"]
+    swiglu_limit = config_info["swiglu_limit"]
+    
+    print(f"  num_tokens={num_tokens}, hidden_size={hidden_size}")
+    print(f"  intermediate_size={intermediate_size}, num_experts={num_experts}")
+    print(f"  top_k={top_k}, swiglu_limit={swiglu_limit}")
+    
+    # Calculate padded sizes
+    padded_hidden_size = pad_to_multiple(hidden_size, ALIGNMENT)
+    padded_intermediate_size = pad_to_multiple(intermediate_size, ALIGNMENT)
+    print(f"  [PADDING] hidden: {hidden_size} -> {padded_hidden_size}, "
+          f"intermediate: {intermediate_size} -> {padded_intermediate_size}")
+    
+    # De-interleave weights from GPT OSS format to FlashInfer format
+    print("De-interleaving gate_up weights...")
+    gemm1_weights = deinterleave_gate_up_weights(gate_up_proj)
+    gemm1_bias = deinterleave_gate_up_bias(gate_up_proj_bias)
+    gemm2_weights = down_proj
+    gemm2_bias = down_proj_bias
+    
+    # Use router_logits as expert_logits
+    expert_logits = router_logits.to(torch.bfloat16)
+    
+    # Prepare activation parameters (GPT OSS style)
+    gemm1_alpha = torch.full((num_experts,), 1.702, device="cuda", dtype=torch.float32)
+    gemm1_beta = torch.full((num_experts,), 1.0, device="cuda", dtype=torch.float32)
+    gemm1_clamp_limit = torch.full((num_experts,), swiglu_limit, device="cuda", dtype=torch.float32)
+    
+    # Convert bias to float32 as expected by FlashInfer
+    gemm1_bias = gemm1_bias.float()
+    gemm2_bias = gemm2_bias.float()
+    
+    moe_impl = FP4Moe()
+    
+    # Get permute info
+    permute_info, scores = routing_reference_renormalize(
+        expert_logits, top_k, num_experts, padding
+    )
+    
+    # ===========================================================================
+    # PAD WEIGHTS FIRST (before quantization)
+    # ===========================================================================
+    print("Padding weights...")
+    gemm1_weights_padded = pad_gate_up_weights(
+        gemm1_weights.to(torch.bfloat16), padded_hidden_size, padded_intermediate_size
+    )
+    gemm2_weights_padded = pad_down_weights(
+        gemm2_weights.to(torch.bfloat16), padded_hidden_size, padded_intermediate_size
+    )
+    
+    # Pad hidden states
+    hidden_states_padded = pad_hidden_states(hidden_states.to(torch.bfloat16), padded_hidden_size)
+    
+    # Pad bias tensors
+    gemm1_bias_padded = pad_gate_up_bias(gemm1_bias, padded_intermediate_size)
+    gemm2_bias_padded = pad_down_bias(gemm2_bias, padded_hidden_size)
+    
+    # ===========================================================================
+    # QUANTIZE PADDED WEIGHTS
+    # ===========================================================================
+    print("Quantizing padded weights...")
+    (
+        gemm1_weights_quant_padded,
+        gemm1_scales_quant_padded,
+        gemm2_weights_quant_padded,
+        gemm2_scales_quant_padded,
+    ) = moe_impl.quantize_weights(gemm1_weights_padded, gemm2_weights_padded)
+    
+    # ===========================================================================
+    # REFERENCE: Use padded weights and dimensions
+    # ===========================================================================
+    print("Computing reference output (padded)...")
+    output_reference_padded = run_moe_reference_fp4_bf16(
+        num_tokens,
+        num_experts,
+        padded_hidden_size,
+        padded_intermediate_size,
+        top_k,
+        padding,
+        hidden_states_padded,
+        gemm1_weights_quant_padded,
+        gemm1_scales_quant_padded,
+        gemm2_weights_quant_padded,
+        gemm2_scales_quant_padded,
+        permute_info,
+        gemm1_bias=gemm1_bias_padded,
+        gemm2_bias=gemm2_bias_padded,
+        # gemm1_bias=None,
+        # gemm2_bias=None,
+        gemm1_alpha=gemm1_alpha,
+        gemm1_beta=gemm1_beta,
+        gemm1_clamp_limit=gemm1_clamp_limit,
+        # gemm1_alpha=None,
+        # gemm1_beta=None,
+        # gemm1_clamp_limit=None,
+    )
+    # Strip padding from reference output
+    output_reference = output_reference_padded[:, :hidden_size]
+    
+    # ===========================================================================
+    # KERNEL: Prepare shuffled weights (includes bias shuffling)
+    # ===========================================================================
+    print("Preparing shuffled weights for kernel...")
+    (
+        gemm1_weights_shuffled,
+        gemm1_scales_shuffled,
+        gemm2_weights_shuffled,
+        gemm2_scales_shuffled,
+        gemm1_bias_shuffled,
+        gemm2_bias_shuffled,
+    ) = moe_impl.prepare_static_weights_for_kernel(
+        gemm1_weights_quant_padded,
+        gemm2_weights_quant_padded,
+        gemm1_weights_padded,
+        gemm2_weights_padded,
+        padded_hidden_size,
+        padded_intermediate_size,
+        num_experts,
+        gemm1_bias_padded=gemm1_bias_padded,
+        gemm2_bias_padded=gemm2_bias_padded,
+    )
+    
+    print("Computing FlashInfer kernel output (padded)...")
+    output_actual_padded = moe_impl.call_moe(
+        gemm1_weights_shuffled,
+        gemm1_scales_shuffled,
+        gemm2_weights_shuffled,
+        gemm2_scales_shuffled,
+        hidden_states_padded,
+        expert_logits=expert_logits,
+        num_experts=num_experts,
+        top_k=top_k,
+        intermediate_size=padded_intermediate_size,
+        gemm1_bias=gemm1_bias_shuffled,
+        gemm2_bias=gemm2_bias_shuffled,
+        # gemm1_bias=None,
+        # gemm2_bias=None,
+        gemm1_alpha=gemm1_alpha,
+        gemm1_beta=gemm1_beta,
+        gemm1_clamp_limit=gemm1_clamp_limit,
+        # gemm1_alpha=None,
+        # gemm1_beta=None,
+        # gemm1_clamp_limit=None,
+    )
+    
+    # Strip padding from output
+    output_actual = output_actual_padded[:, :hidden_size]
+    
+    # Compare outputs
+    print("Checking accuracy...")
+    tolerances = moe_impl.get_tolerances()
+    
+    # Detailed comparison
+    diff = (output_reference - output_actual).abs()
+    max_diff = diff.max().item()
+    mean_diff = diff.mean().item()
+    close = torch.isclose(output_reference, output_actual, atol=tolerances["atol"], rtol=tolerances["rtol"])
+    match_ratio = close.float().mean().item()
+    
+    print(f"  max diff: {max_diff:.6f}")
+    print(f"  mean diff: {mean_diff:.6f}")
+    print(f"  match ratio (atol={tolerances['atol']}, rtol={tolerances['rtol']}): {match_ratio:.4f}")
+    print(f"  required: {tolerances['percent']:.4f}")
+    
+    print(f"Sample outputs (first 5 elements of first token):")
+    print(f"  reference:  {output_reference[0, :5].tolist()}")
+    print(f"  FlashInfer: {output_actual[0, :5].tolist()}")
+    
+    if match_ratio >= tolerances["percent"]:
+        print(f"✓ Test PASSED!")
+        return True
+    else:
+        print(f"✗ Test FAILED!")
+        return False
+
+
+# ====================================================================================
 # Main Entry Point
 # ====================================================================================
 
 
 if __name__ == "__main__":
+    import sys
+    
+    # Check if we should test with dumped weights
+    if len(sys.argv) > 1 and sys.argv[1] == "--dumped":
+        dump_dir = sys.argv[2] if len(sys.argv) > 2 else "/tmp/moe_debug"
+        print(f"Testing with dumped weights from: {dump_dir}")
+        try:
+            success = run_moe_test_with_dumped_weights(dump_dir)
+            if not success:
+                exit(1)
+        except Exception as e:
+            print(f"\n✗ Test FAILED: {e}")
+            import traceback
+            traceback.print_exc()
+            exit(1)
+        exit(0)
+    
     print("FlashInfer Fused MoE Sanity Check")
     print("Testing MxFP4 weights with BF16 activation")
     print("=" * 70)
