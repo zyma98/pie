@@ -429,18 +429,15 @@ def quant_mxfp4_batches(
     return result_quant_a, result_sfs
 
 
-def quantize_shuffle_moe_weights_for_kernel(
+def quantize_shuffle_gate_up_weights(
     gate_up_weights: torch.Tensor,
-    down_weights: torch.Tensor,
     padded_hidden_size: int,
     padded_intermediate_size: int,
     num_experts: int,
-    cache_permute_indices: Dict[tuple, torch.Tensor],
     gate_up_bias: torch.Tensor | None = None,
-    down_bias: torch.Tensor | None = None,
-) -> tuple:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """
-    Prepare MoE weights for FlashInfer fused MoE kernel.
+    Prepare gate_up (gemm1) weights for FlashInfer fused MoE kernel.
 
     The operations are learned from FlashInfer's unit tests.
     https://github.com/flashinfer-ai/flashinfer/blob/454e7b25d0c21da176f0ef775e3de4a12d6c7118/tests/moe/test_trtllm_gen_fused_moe.py
@@ -453,146 +450,365 @@ def quantize_shuffle_moe_weights_for_kernel(
 
     Args:
         gate_up_weights: Padded gate_up weights [num_experts, 2*padded_intermediate_size, padded_hidden_size]
-        down_weights: Padded down weights [num_experts, padded_hidden_size, padded_intermediate_size]
         padded_hidden_size: Padded hidden size (multiple of 256)
         padded_intermediate_size: Padded intermediate size (multiple of 256)
         num_experts: Number of experts
-        cache_permute_indices: Cache for permute indices
         gate_up_bias: Optional padded gate_up bias [num_experts, 2*padded_intermediate_size]
-        down_bias: Optional padded down bias [num_experts, padded_hidden_size]
 
     Returns:
-        Tuple of (gemm1_weights_shuffled, gemm1_scales_shuffled,
-                  gemm2_weights_shuffled, gemm2_scales_shuffled,
-                  gemm1_bias_shuffled, gemm2_bias_shuffled)
+        Tuple of (weights_shuffled, scales_shuffled, bias_shuffled)
     """
     epilogue_tile_m = 128
+    cache_permute_indices: Dict[tuple, torch.Tensor] = {}
 
-    # Quantize weights with swizzled layout (for dequant reference)
-    gemm1_weights_quant, _ = quant_mxfp4_batches(gate_up_weights, True)
-    gemm2_weights_quant, _ = quant_mxfp4_batches(down_weights, True)
+    # Quantize weights with swizzled layout
+    weights_quant, _ = quant_mxfp4_batches(gate_up_weights, True)
 
-    # Quantize weights with linear layout for kernels
-    _, gemm1_scales_linear = quant_mxfp4_batches(gate_up_weights, False)
-    _, gemm2_scales_linear = quant_mxfp4_batches(down_weights, False)
+    # Quantize weights with linear layout for scales
+    _, scales_linear = quant_mxfp4_batches(gate_up_weights, False)
 
     # Convert quantized weights to proper shapes
-    gemm1_weights_fp4 = gemm1_weights_quant.view(torch.uint8).reshape(
+    weights_fp4 = weights_quant.view(torch.uint8).reshape(
         num_experts, 2 * padded_intermediate_size, padded_hidden_size // 2
     )
-    gemm1_scales_linear_fp4 = gemm1_scales_linear.view(torch.uint8).reshape(
+    scales_linear_fp4 = scales_linear.view(torch.uint8).reshape(
         num_experts, 2 * padded_intermediate_size, padded_hidden_size // 32
-    )
-    gemm2_weights_fp4 = gemm2_weights_quant.view(torch.uint8).reshape(
-        num_experts, padded_hidden_size, padded_intermediate_size // 2
-    )
-    gemm2_scales_linear_fp4 = gemm2_scales_linear.view(torch.uint8).reshape(
-        num_experts, padded_hidden_size, padded_intermediate_size // 32
     )
 
     # Shuffle weights and scales for each expert
-    gemm1_weights_fp4_shuffled = []
-    gemm1_scales_fp4_shuffled = []
-    gemm1_bias_shuffled_list = []
-    gemm2_weights_fp4_shuffled = []
-    gemm2_scales_fp4_shuffled = []
-    gemm2_bias_shuffled_list = []
+    weights_fp4_shuffled = []
+    scales_fp4_shuffled = []
+    bias_shuffled_list = []
 
     for i in range(num_experts):
-        # Shuffle gemm1 weights
+        # Shuffle weights
         permute_indices = _maybe_get_cached_w3_w1_permute_indices(
             cache_permute_indices,
-            gemm1_weights_fp4[i].view(torch.uint8),
+            weights_fp4[i].view(torch.uint8),
             epilogue_tile_m,
         )
-        gemm1_weights_fp4_shuffled.append(
-            gemm1_weights_fp4[i][
-                permute_indices.to(gemm1_weights_fp4.device)
-            ].contiguous()
+        weights_fp4_shuffled.append(
+            weights_fp4[i][permute_indices.to(weights_fp4.device)].contiguous()
         )
 
-        # Shuffle gemm1 bias using row permutation derived from weight permutation
+        # Shuffle bias using row permutation derived from weight permutation
         if gate_up_bias is not None:
-            gemm1_bias_shuffled_list.append(
+            bias_shuffled_list.append(
                 gate_up_bias[i][permute_indices.to(gate_up_bias.device)].contiguous()
             )
 
-        # Shuffle gemm1 scales
+        # Shuffle scales
         permute_sf_indices = _maybe_get_cached_w3_w1_permute_indices(
             cache_permute_indices,
-            gemm1_scales_linear_fp4[i].view(torch.uint8),
+            scales_linear_fp4[i].view(torch.uint8),
             epilogue_tile_m,
             num_elts_per_sf=16,
         )
-        gemm1_scales_fp4_shuffled.append(
+        scales_fp4_shuffled.append(
             block_scale_interleave(
-                gemm1_scales_linear_fp4[i][
-                    permute_sf_indices.to(gemm1_scales_linear_fp4.device)
-                ].contiguous()
-            )
-        )
-
-        # Shuffle gemm2 weights
-        permute_indices = get_w2_permute_indices_with_cache(
-            cache_permute_indices,
-            gemm2_weights_fp4[i],
-            epilogue_tile_m,
-        )
-        gemm2_weights_fp4_shuffled.append(
-            gemm2_weights_fp4[i][
-                permute_indices.to(gemm2_weights_fp4.device)
-            ].contiguous()
-        )
-
-        # Shuffle gemm2 bias using row permutation derived from weight permutation
-        if down_bias is not None:
-            gemm2_bias_shuffled_list.append(
-                down_bias[i][permute_indices.to(down_bias.device)].contiguous()
-            )
-
-        # Shuffle gemm2 scales
-        permute_sf_indices = get_w2_permute_indices_with_cache(
-            cache_permute_indices,
-            gemm2_scales_linear_fp4[i],
-            epilogue_tile_m,
-            num_elts_per_sf=16,
-        )
-        gemm2_scales_fp4_shuffled.append(
-            block_scale_interleave(
-                gemm2_scales_linear_fp4[i][
-                    permute_sf_indices.to(gemm2_scales_linear_fp4.device)
+                scales_linear_fp4[i][
+                    permute_sf_indices.to(scales_linear_fp4.device)
                 ].contiguous()
             )
         )
 
     # Stack weights for all experts
-    gemm1_weights_shuffled = torch.stack(gemm1_weights_fp4_shuffled)
-    gemm1_scales_shuffled = (
-        torch.stack(gemm1_scales_fp4_shuffled)
+    weights_shuffled = torch.stack(weights_fp4_shuffled)
+    scales_shuffled = (
+        torch.stack(scales_fp4_shuffled)
         .view(torch.float8_e4m3fn)
         .reshape(num_experts, 2 * padded_intermediate_size, padded_hidden_size // 32)
     )
 
-    gemm2_weights_shuffled = torch.stack(gemm2_weights_fp4_shuffled)
-    gemm2_scales_shuffled = (
-        torch.stack(gemm2_scales_fp4_shuffled)
+    # Stack bias tensors if provided
+    bias_shuffled = None
+    if gate_up_bias is not None:
+        bias_shuffled = torch.stack(bias_shuffled_list)
+
+    return weights_shuffled, scales_shuffled, bias_shuffled
+
+
+def quantize_shuffle_down_weights(
+    down_weights: torch.Tensor,
+    padded_hidden_size: int,
+    padded_intermediate_size: int,
+    num_experts: int,
+    down_bias: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    """
+    Prepare down (gemm2) weights for FlashInfer fused MoE kernel.
+
+    The operations are learned from FlashInfer's unit tests.
+    https://github.com/flashinfer-ai/flashinfer/blob/454e7b25d0c21da176f0ef775e3de4a12d6c7118/tests/moe/test_trtllm_gen_fused_moe.py
+
+    This includes:
+    1. Quantizing weights to MXFP4
+    2. Reshaping to proper formats
+    3. Shuffling for transposed MMA output
+    4. Shuffling bias vectors to match weight row reordering
+
+    Args:
+        down_weights: Padded down weights [num_experts, padded_hidden_size, padded_intermediate_size]
+        padded_hidden_size: Padded hidden size (multiple of 256)
+        padded_intermediate_size: Padded intermediate size (multiple of 256)
+        num_experts: Number of experts
+        down_bias: Optional padded down bias [num_experts, padded_hidden_size]
+
+    Returns:
+        Tuple of (weights_shuffled, scales_shuffled, bias_shuffled)
+    """
+    epilogue_tile_m = 128
+    cache_permute_indices: Dict[tuple, torch.Tensor] = {}
+
+    # Quantize weights with swizzled layout
+    weights_quant, _ = quant_mxfp4_batches(down_weights, True)
+
+    # Quantize weights with linear layout for scales
+    _, scales_linear = quant_mxfp4_batches(down_weights, False)
+
+    # Convert quantized weights to proper shapes
+    weights_fp4 = weights_quant.view(torch.uint8).reshape(
+        num_experts, padded_hidden_size, padded_intermediate_size // 2
+    )
+    scales_linear_fp4 = scales_linear.view(torch.uint8).reshape(
+        num_experts, padded_hidden_size, padded_intermediate_size // 32
+    )
+
+    # Shuffle weights and scales for each expert
+    weights_fp4_shuffled = []
+    scales_fp4_shuffled = []
+    bias_shuffled_list = []
+
+    for i in range(num_experts):
+        # Shuffle weights
+        permute_indices = get_w2_permute_indices_with_cache(
+            cache_permute_indices,
+            weights_fp4[i],
+            epilogue_tile_m,
+        )
+        weights_fp4_shuffled.append(
+            weights_fp4[i][permute_indices.to(weights_fp4.device)].contiguous()
+        )
+
+        # Shuffle bias using row permutation derived from weight permutation
+        if down_bias is not None:
+            bias_shuffled_list.append(
+                down_bias[i][permute_indices.to(down_bias.device)].contiguous()
+            )
+
+        # Shuffle scales
+        permute_sf_indices = get_w2_permute_indices_with_cache(
+            cache_permute_indices,
+            scales_linear_fp4[i],
+            epilogue_tile_m,
+            num_elts_per_sf=16,
+        )
+        scales_fp4_shuffled.append(
+            block_scale_interleave(
+                scales_linear_fp4[i][
+                    permute_sf_indices.to(scales_linear_fp4.device)
+                ].contiguous()
+            )
+        )
+
+    # Stack weights for all experts
+    weights_shuffled = torch.stack(weights_fp4_shuffled)
+    scales_shuffled = (
+        torch.stack(scales_fp4_shuffled)
         .view(torch.float8_e4m3fn)
         .reshape(num_experts, padded_hidden_size, padded_intermediate_size // 32)
     )
 
     # Stack bias tensors if provided
-    gemm1_bias_shuffled = None
-    gemm2_bias_shuffled = None
-    if gate_up_bias is not None:
-        gemm1_bias_shuffled = torch.stack(gemm1_bias_shuffled_list)
+    bias_shuffled = None
     if down_bias is not None:
-        gemm2_bias_shuffled = torch.stack(gemm2_bias_shuffled_list)
+        bias_shuffled = torch.stack(bias_shuffled_list)
 
-    return (
-        gemm1_weights_shuffled,
-        gemm1_scales_shuffled,
-        gemm2_weights_shuffled,
-        gemm2_scales_shuffled,
-        gemm1_bias_shuffled,
-        gemm2_bias_shuffled,
+    return weights_shuffled, scales_shuffled, bias_shuffled
+
+
+def dequantize_from_mxfp4(
+    blocks: torch.Tensor,
+    scales: torch.Tensor,
+    fp4_values: tuple[float, ...],
+    device: str,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """
+    Convert MXFP4 format tensors (blocks and scales) to the target dtype.
+
+    Args:
+        blocks: The packed FP4 values tensor (uint8)
+        scales: The block scales tensor
+        fp4_values: Tuple of 16 FP4 lookup values
+        device: Target device string
+        dtype: Target dtype for conversion
+
+    Returns:
+        Converted tensor in the target dtype
+    """
+    scales = scales.to(torch.int32) - 127
+
+    assert (
+        blocks.shape[:-1] == scales.shape
+    ), f"{blocks.shape=} does not match {scales.shape=}"
+
+    lut = torch.tensor(fp4_values, dtype=dtype, device=device)
+
+    *prefix_shape, g, b = blocks.shape
+    rows_total = math.prod(prefix_shape) * g
+
+    blocks = blocks.reshape(rows_total, b).to(device)
+    scales = scales.reshape(rows_total, 1).to(device)
+
+    # Extract low and high 4-bit indices
+    idx_lo = (blocks & 0x0F).to(torch.long)
+    idx_hi = (blocks >> 4).to(torch.long)
+
+    # Create output tensor and populate
+    out = torch.empty(rows_total, b * 2, dtype=dtype, device=device)
+    out[:, 0::2] = lut[idx_lo]  # Low 4-bit values at even indices
+    out[:, 1::2] = lut[idx_hi]  # High 4-bit values at odd indices
+
+    torch.ldexp(out, scales, out=out)
+
+    return out.reshape(*prefix_shape, g, b * 2).view(*prefix_shape, g * b * 2)
+
+
+def prepare_gptoss_moe_gate_up(
+    blocks: torch.Tensor,
+    scales: torch.Tensor,
+    bias: torch.Tensor,
+    config: dict,
+    device: str,
+) -> dict:
+    """
+    Prepare gate_up MoE weights for FlashInfer kernel.
+
+    This includes:
+    1. Dequantizing MXFP4 to bfloat16
+    2. De-interleaving from GPT OSS format to FlashInfer format
+    3. Padding to alignment
+    4. Re-quantizing and shuffling for the kernel
+
+    Args:
+        blocks: MXFP4 blocks tensor
+        scales: MXFP4 scales tensor
+        bias: Bias tensor (bfloat16)
+        config: Configuration dict with hidden_size, intermediate_size, etc.
+        device: Target device string
+
+    Returns:
+        Dict with 'weights', 'scales', 'bias' keys containing prepared tensors
+    """
+    fp4_values = config["fp4_values"]
+    hidden_size = config["hidden_size"]
+    intermediate_size = config["intermediate_size"]
+    padded_hidden_size = config["padded_hidden_size"]
+    padded_intermediate_size = config["padded_intermediate_size"]
+    num_experts = config["num_experts"]
+
+    # Step 1: Dequantize MXFP4 to bfloat16
+    weights_bf16 = dequantize_from_mxfp4(
+        blocks, scales, fp4_values, device, torch.bfloat16
     )
+    # Reshape to [num_experts, intermediate_size * 2, hidden_size]
+    weights_bf16 = weights_bf16.reshape(num_experts, intermediate_size * 2, hidden_size)
+
+    # Step 2: De-interleave from GPT OSS format to FlashInfer format
+    # GPT OSS: interleaved [gate, linear, gate, linear, ...]
+    # FlashInfer: non-interleaved [linear..., gate...]
+    weights_deinterleaved = deinterleave_gate_up_weights(weights_bf16)
+    bias_deinterleaved = deinterleave_gate_up_bias(bias.to(device))
+
+    # Step 3: Pad to alignment
+    weights_padded = pad_gate_up_weights(
+        weights_deinterleaved,
+        padded_hidden_size,
+        padded_intermediate_size,
+    )
+    bias_padded = pad_gate_up_bias(
+        bias_deinterleaved,
+        padded_intermediate_size,
+    ).to(torch.float32)
+
+    # Step 4: Quantize and shuffle
+    weights, scales, bias_shuffled = quantize_shuffle_gate_up_weights(
+        weights_padded,
+        padded_hidden_size,
+        padded_intermediate_size,
+        num_experts,
+        gate_up_bias=bias_padded,
+    )
+
+    return {
+        "weights": weights,
+        "scales": scales,
+        "bias": bias_shuffled,
+    }
+
+
+def prepare_gptoss_moe_down(
+    blocks: torch.Tensor,
+    scales: torch.Tensor,
+    bias: torch.Tensor,
+    config: dict,
+    device: str,
+) -> dict:
+    """
+    Prepare down MoE weights for FlashInfer kernel.
+
+    This includes:
+    1. Dequantizing MXFP4 to bfloat16
+    2. Padding to alignment
+    3. Re-quantizing and shuffling for the kernel
+
+    Args:
+        blocks: MXFP4 blocks tensor
+        scales: MXFP4 scales tensor
+        bias: Bias tensor (bfloat16)
+        config: Configuration dict with hidden_size, intermediate_size, etc.
+        device: Target device string
+
+    Returns:
+        Dict with 'weights', 'scales', 'bias' keys containing prepared tensors
+    """
+    fp4_values = config["fp4_values"]
+    hidden_size = config["hidden_size"]
+    intermediate_size = config["intermediate_size"]
+    padded_hidden_size = config["padded_hidden_size"]
+    padded_intermediate_size = config["padded_intermediate_size"]
+    num_experts = config["num_experts"]
+
+    # Step 1: Dequantize MXFP4 to bfloat16
+    weights_bf16 = dequantize_from_mxfp4(
+        blocks, scales, fp4_values, device, torch.bfloat16
+    )
+    # Reshape to [num_experts, hidden_size, intermediate_size]
+    weights_bf16 = weights_bf16.reshape(num_experts, hidden_size, intermediate_size)
+
+    # Step 2: Pad to alignment
+    weights_padded = pad_down_weights(
+        weights_bf16,
+        padded_hidden_size,
+        padded_intermediate_size,
+    )
+    bias_padded = pad_down_bias(
+        bias.to(device),
+        padded_hidden_size,
+    ).to(torch.float32)
+
+    # Step 3: Quantize and shuffle
+    weights, scales, bias_shuffled = quantize_shuffle_down_weights(
+        weights_padded,
+        padded_hidden_size,
+        padded_intermediate_size,
+        num_experts,
+        down_bias=bias_padded,
+    )
+
+    return {
+        "weights": weights,
+        "scales": scales,
+        "bias": bias_shuffled,
+    }

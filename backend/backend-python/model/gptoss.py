@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict
 
 import torch
 from torch import nn
@@ -17,13 +16,6 @@ from model.gptoss_utils import (
     GptOssRotaryEmbedding,
     pad_to_multiple,
     ALIGNMENT,
-    pad_gate_up_weights,
-    pad_down_weights,
-    pad_gate_up_bias,
-    pad_down_bias,
-    quantize_shuffle_moe_weights_for_kernel,
-    deinterleave_gate_up_weights,
-    deinterleave_gate_up_bias,
     TUNE_MAX_NUM_TOKENS,
 )
 from einops import einsum, rearrange
@@ -102,11 +94,11 @@ def create_fusion_map(model: nn.Module):
 
     Returns:
         A dictionary mapping {
-            fused_tensor_name: {"sources": [source_names], "dim": cat_dim, "type": type}
+            fused_tensor_name: {"sources": [source_names], "dim": cat_dim, "op": op_type, ...}
         }.
-        For MXFP4 tensors, type is "mxfp4" and sources contains [blocks_name, scales_name].
-        For fusion tensors, type is "fusion" and sources contains the tensors to concatenate.
-        For regular tensors, type is "regular" and sources contains the single tensor name.
+        For fusion tensors, op is "fusion" and sources contains the tensors to concatenate.
+        For MoE tensors, op is "prepare_moe_gate_up" or "prepare_moe_down" which dequantizes,
+        preprocesses, and re-quantizes the weights for the FlashInfer kernel.
     """
     fusion_map = {}
     for name, module in model.named_modules():
@@ -135,26 +127,64 @@ def create_fusion_map(model: nn.Module):
                     "op": "fusion",
                 }
 
-        # --- Rule for GptOssExperts MXFP4 Weights ---
+        # --- Rule for GptOssExperts MoE Weight Preparation ---
         elif isinstance(module, GptOssExperts):
-            # Handle gate_up_proj weights (MXFP4 format)
-            target_gate_up = f"{name}.gate_up_proj"
-            blocks_gate_up = f"{name}.gate_up_proj_blocks"
-            scales_gate_up = f"{name}.gate_up_proj_scales"
-            fusion_map[target_gate_up] = {
-                "sources": [blocks_gate_up, scales_gate_up],
-                "op": "dequantize_mxfp4",
+            # Common config for MoE preparation
+            moe_config = {
+                "hidden_size": module.hidden_size,
+                "intermediate_size": module.intermediate_size,
+                "padded_hidden_size": module.padded_hidden_size,
+                "padded_intermediate_size": module.padded_intermediate_size,
+                "num_experts": module.num_experts,
                 "fp4_values": FP4_VALUES,
             }
 
-            # Handle down_proj weights (MXFP4 format)
-            target_down = f"{name}.down_proj"
+            # gate_up: MXFP4 weights + bias → prepared gemm1 weights, scales, bias
+            blocks_gate_up = f"{name}.gate_up_proj_blocks"
+            scales_gate_up = f"{name}.gate_up_proj_scales"
+            bias_gate_up = f"{name}.gate_up_proj_bias"
+
+            fusion_map[f"{name}.gemm1_weights"] = {
+                "sources": [blocks_gate_up, scales_gate_up, bias_gate_up],
+                "op": "prepare_gptoss_moe_gate_up",
+                "output_type": "weights",
+                **moe_config,
+            }
+            fusion_map[f"{name}.gemm1_scales"] = {
+                "sources": [blocks_gate_up, scales_gate_up, bias_gate_up],
+                "op": "prepare_gptoss_moe_gate_up",
+                "output_type": "scales",
+                **moe_config,
+            }
+            fusion_map[f"{name}.gemm1_bias"] = {
+                "sources": [blocks_gate_up, scales_gate_up, bias_gate_up],
+                "op": "prepare_gptoss_moe_gate_up",
+                "output_type": "bias",
+                **moe_config,
+            }
+
+            # down: MXFP4 weights + bias → prepared gemm2 weights, scales, bias
             blocks_down = f"{name}.down_proj_blocks"
             scales_down = f"{name}.down_proj_scales"
-            fusion_map[target_down] = {
-                "sources": [blocks_down, scales_down],
-                "op": "dequantize_mxfp4",
-                "fp4_values": FP4_VALUES,
+            bias_down = f"{name}.down_proj_bias"
+
+            fusion_map[f"{name}.gemm2_weights"] = {
+                "sources": [blocks_down, scales_down, bias_down],
+                "op": "prepare_gptoss_moe_down",
+                "output_type": "weights",
+                **moe_config,
+            }
+            fusion_map[f"{name}.gemm2_scales"] = {
+                "sources": [blocks_down, scales_down, bias_down],
+                "op": "prepare_gptoss_moe_down",
+                "output_type": "scales",
+                **moe_config,
+            }
+            fusion_map[f"{name}.gemm2_bias"] = {
+                "sources": [blocks_down, scales_down, bias_down],
+                "op": "prepare_gptoss_moe_down",
+                "output_type": "bias",
+                **moe_config,
             }
 
     return fusion_map
@@ -528,151 +558,106 @@ class GptOssExperts(nn.Module):
             config.intermediate_size, ALIGNMENT
         )
 
-        # Original dequantized weights (will be used to prepare kernel weights)
-        self.gate_up_proj = nn.Parameter(
+        device = torch.device(config.device)
+
+        # Pre-processed MXFP4 weights for FlashInfer kernel
+        # These are loaded already prepared (quantized, shuffled) by model_loader
+        # Using register_buffer since these are inference-only weights (uint8/float8 can't have gradients)
+        self.register_buffer(
+            "gemm1_weights",
             torch.empty(
                 (
                     config.num_experts,
-                    config.intermediate_size * 2,
-                    config.hidden_size,
+                    self.padded_intermediate_size * 2,
+                    self.padded_hidden_size // 2,
                 ),
-                device=torch.device(config.device),
-                dtype=config.dtype,
-            )
+                device=device,
+                dtype=torch.uint8,
+            ),
         )
-        self.gate_up_proj_bias = nn.Parameter(
-            torch.empty(
-                (config.num_experts, config.intermediate_size * 2),
-                device=torch.device(config.device),
-                dtype=config.dtype,
-            )
-        )
-        self.down_proj = nn.Parameter(
+        self.register_buffer(
+            "gemm1_scales",
             torch.empty(
                 (
                     config.num_experts,
-                    config.hidden_size,
-                    config.intermediate_size,
+                    self.padded_intermediate_size * 2,
+                    self.padded_hidden_size // 32,
                 ),
-                device=torch.device(config.device),
-                dtype=config.dtype,
-            )
+                device=device,
+                dtype=torch.float8_e4m3fn,
+            ),
         )
-        self.down_proj_bias = nn.Parameter(
+        self.register_buffer(
+            "gemm1_bias",
             torch.empty(
-                (config.num_experts, config.hidden_size),
-                device=torch.device(config.device),
-                dtype=config.dtype,
-            )
+                (config.num_experts, self.padded_intermediate_size * 2),
+                device=device,
+                dtype=torch.float32,
+            ),
         )
 
-        self._output1_scale_scalar = torch.full(
-            (self.num_experts,), 1.0, device=self.gate_up_proj.device
+        self.register_buffer(
+            "gemm2_weights",
+            torch.empty(
+                (
+                    config.num_experts,
+                    self.padded_hidden_size,
+                    self.padded_intermediate_size // 2,
+                ),
+                device=device,
+                dtype=torch.uint8,
+            ),
         )
+        self.register_buffer(
+            "gemm2_scales",
+            torch.empty(
+                (
+                    config.num_experts,
+                    self.padded_hidden_size,
+                    self.padded_intermediate_size // 32,
+                ),
+                device=device,
+                dtype=torch.float8_e4m3fn,
+            ),
+        )
+        self.register_buffer(
+            "gemm2_bias",
+            torch.empty(
+                (config.num_experts, self.padded_hidden_size),
+                device=device,
+                dtype=torch.float32,
+            ),
+        )
+
+        # Scale scalars for the kernel
+        self._output1_scale_scalar = torch.full((self.num_experts,), 1.0, device=device)
         self._output1_scale_gate_scalar = torch.full(
-            (self.num_experts,), 1.0, device=self.gate_up_proj.device
+            (self.num_experts,), 1.0, device=device
         )
-        self._output2_scale_scalar = torch.full(
-            (self.num_experts,), 1.0, device=self.down_proj.device
-        )
+        self._output2_scale_scalar = torch.full((self.num_experts,), 1.0, device=device)
 
-        # Prepared weights for FlashInfer kernel (lazily initialized)
-        self._weights_prepared = False
-        self._cache_permute_indices: Dict[tuple, torch.Tensor] = {}
-        self._gemm1_weights_shuffled: torch.Tensor | None = None
-        self._gemm1_scales_shuffled: torch.Tensor | None = None
-        self._gemm2_weights_shuffled: torch.Tensor | None = None
-        self._gemm2_scales_shuffled: torch.Tensor | None = None
-        self._gemm1_bias_shuffled: torch.Tensor | None = None
-        self._gemm2_bias_shuffled: torch.Tensor | None = None
-        self._gemm1_alpha: torch.Tensor | None = None
-        self._gemm1_beta: torch.Tensor | None = None
-        self._gemm1_clamp_limit: torch.Tensor | None = None
-
-    def _prepare_weights(self):
-        """
-        Prepare weights for FlashInfer fused MoE kernel.
-
-        This includes:
-        1. De-interleaving gate_up weights from GPT OSS format to FlashInfer format
-        2. Padding weights and biases to multiples of 256
-        3. Re-quantizing to MXFP4 with proper shuffling
-        """
-        if self._weights_prepared:
-            return
-
-        # Step 1: De-interleave gate_up weights and bias
-        # GPT OSS: interleaved [gate, linear, gate, linear, ...]
-        # FlashInfer: non-interleaved [linear..., gate...]
-        gate_up_deinterleaved = deinterleave_gate_up_weights(self.gate_up_proj.data)
-        gate_up_bias_deinterleaved = deinterleave_gate_up_bias(
-            self.gate_up_proj_bias.data
-        )
-
-        # Step 2: Pad weights to multiples of 256
-        gate_up_padded = pad_gate_up_weights(
-            gate_up_deinterleaved,
-            self.padded_hidden_size,
-            self.padded_intermediate_size,
-        )
-        down_padded = pad_down_weights(
-            self.down_proj.data,
-            self.padded_hidden_size,
-            self.padded_intermediate_size,
-        )
-
-        # Step 3: Pad biases
-        # FlashInfer expects bias in float32
-        gemm1_bias_padded = pad_gate_up_bias(
-            gate_up_bias_deinterleaved, self.padded_intermediate_size
-        ).to(torch.float32)
-        gemm2_bias_padded = pad_down_bias(
-            self.down_proj_bias.data, self.padded_hidden_size
-        ).to(torch.float32)
-
-        # Step 4: Quantize and shuffle weights for kernel (includes bias shuffling)
-        (
-            self._gemm1_weights_shuffled,
-            self._gemm1_scales_shuffled,
-            self._gemm2_weights_shuffled,
-            self._gemm2_scales_shuffled,
-            self._gemm1_bias_shuffled,
-            self._gemm2_bias_shuffled,
-        ) = quantize_shuffle_moe_weights_for_kernel(
-            gate_up_padded,
-            down_padded,
-            self.padded_hidden_size,
-            self.padded_intermediate_size,
-            self.num_experts,
-            self._cache_permute_indices,
-            gate_up_bias=gemm1_bias_padded,
-            down_bias=gemm2_bias_padded,
-        )
-
-        # Step 5: Prepare activation parameters for GPT OSS style SwiGLU
+        # Activation parameters for GPT OSS style SwiGLU
         # Alpha = 1.702 for sigmoid scaling
         self._gemm1_alpha = torch.full(
             (self.num_experts,),
             1.702,
-            device=self.gate_up_proj.device,
+            device=device,
             dtype=torch.float32,
         )
         # Beta = 1.0 for linear offset (x_linear + 1)
         self._gemm1_beta = torch.full(
             (self.num_experts,),
             1.0,
-            device=self.gate_up_proj.device,
+            device=device,
             dtype=torch.float32,
         )
         # Clamp limit for activation inputs
         self._gemm1_clamp_limit = torch.full(
             (self.num_experts,),
             self.swiglu_limit,
-            device=self.gate_up_proj.device,
+            device=device,
             dtype=torch.float32,
         )
-
-        self._weights_prepared = True
 
     def forward(
         self, hidden_states: torch.Tensor, expert_logits: torch.Tensor
@@ -687,15 +672,6 @@ class GptOssExperts(nn.Module):
         Returns:
             Output tensor of shape [num_tokens, hidden_size]
         """
-        # Lazily prepare weights on first forward pass
-        self._prepare_weights()
-
-        # Assert weights are prepared (for type checker)
-        assert self._gemm1_weights_shuffled is not None
-        assert self._gemm1_scales_shuffled is not None
-        assert self._gemm2_weights_shuffled is not None
-        assert self._gemm2_scales_shuffled is not None
-
         # Ensure hidden states are bfloat16
         hidden_states_bf16 = hidden_states.to(torch.bfloat16)
 
@@ -710,21 +686,21 @@ class GptOssExperts(nn.Module):
             padded_hidden[:, : self.hidden_size] = hidden_states_bf16
             hidden_states_bf16 = padded_hidden
 
-        # Call FlashInfer fused MoE kernel
+        # Call FlashInfer fused MoE kernel with pre-loaded weights
         output = ops.trtllm_fp4_block_scale_moe(
             routing_logits=expert_logits.to(torch.bfloat16),
             routing_bias=None,
             hidden_states=hidden_states_bf16,
             hidden_states_scale=None,  # BF16 doesn't need scale
-            gemm1_weights=self._gemm1_weights_shuffled,
-            gemm1_weights_scale=self._gemm1_scales_shuffled,
-            gemm1_bias=self._gemm1_bias_shuffled,
+            gemm1_weights=self.gemm1_weights,
+            gemm1_weights_scale=self.gemm1_scales,
+            gemm1_bias=self.gemm1_bias,
             gemm1_alpha=self._gemm1_alpha,
             gemm1_beta=self._gemm1_beta,
             gemm1_clamp_limit=self._gemm1_clamp_limit,
-            gemm2_weights=self._gemm2_weights_shuffled,
-            gemm2_weights_scale=self._gemm2_scales_shuffled,
-            gemm2_bias=self._gemm2_bias_shuffled,
+            gemm2_weights=self.gemm2_weights,
+            gemm2_weights_scale=self.gemm2_scales,
+            gemm2_bias=self.gemm2_bias,
             output1_scale_scalar=self._output1_scale_scalar,
             output1_scale_gate_scalar=self._output1_scale_gate_scalar,
             output2_scale_scalar=self._output2_scale_scalar,
