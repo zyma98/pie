@@ -41,6 +41,8 @@ class GptOssArch(CommonArch):
     # Model specific parameters
     initial_context_length: int
     sliding_window: int
+    swiglu_alpha: float
+    swiglu_beta: float
     swiglu_limit: float
 
     @staticmethod
@@ -70,6 +72,8 @@ class GptOssArch(CommonArch):
             arch_dict, "initial_context_length"
         )
         sliding_window = cfg.get_required_key(arch_dict, "sliding_window")
+        swiglu_alpha = cfg.get_required_key(arch_dict, "swiglu_alpha")
+        swiglu_beta = cfg.get_required_key(arch_dict, "swiglu_beta")
         swiglu_limit = cfg.get_required_key(arch_dict, "swiglu_limit")
 
         return GptOssArch(
@@ -84,6 +88,8 @@ class GptOssArch(CommonArch):
             rope_ntk_beta=rope_ntk_beta,
             initial_context_length=initial_context_length,
             sliding_window=sliding_window,
+            swiglu_alpha=swiglu_alpha,
+            swiglu_beta=swiglu_beta,
             swiglu_limit=swiglu_limit,
         )
 
@@ -549,6 +555,8 @@ class GptOssExperts(nn.Module):
         self.num_experts = config.num_experts
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
+        self.swiglu_alpha = config.swiglu_alpha
+        self.swiglu_beta = config.swiglu_beta
         self.swiglu_limit = config.swiglu_limit
         self.experts_per_token = config.experts_per_token
 
@@ -637,17 +645,15 @@ class GptOssExperts(nn.Module):
         self._output2_scale_scalar = torch.full((self.num_experts,), 1.0, device=device)
 
         # Activation parameters for GPT OSS style SwiGLU
-        # Alpha = 1.702 for sigmoid scaling
         self._gemm1_alpha = torch.full(
             (self.num_experts,),
-            1.702,
+            self.swiglu_alpha,
             device=device,
             dtype=torch.float32,
         )
-        # Beta = 1.0 for linear offset (x_linear + 1)
         self._gemm1_beta = torch.full(
             (self.num_experts,),
-            1.0,
+            self.swiglu_beta,
             device=device,
             dtype=torch.float32,
         )
