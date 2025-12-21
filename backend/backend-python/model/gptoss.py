@@ -7,18 +7,17 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 import flashinfer as ops
+from flashinfer.attention import BatchAttentionWithAttentionSinkWrapper
 from adapter_utils import AdapterSubpass
 from model.config import CommonArch, ModelConfig
 from model.gptoss_utils import (
     FP4_VALUES,
-    chunked_enumerate,
     GptOssRMSNorm,
     GptOssRotaryEmbedding,
     pad_to_multiple,
     ALIGNMENT,
     TUNE_MAX_NUM_TOKENS,
 )
-from einops import einsum, rearrange
 
 
 VERSION = "0.1.0"
@@ -197,7 +196,7 @@ def create_fusion_map(model: nn.Module):
 
 
 class GptOssAttention(nn.Module):
-    """GPT OSS attention module with attention sink."""
+    """GPT OSS attention module with attention sink using FlashInfer."""
 
     def __init__(self, config: GptOssArch, layer_idx: int, rope: GptOssRotaryEmbedding):
         """Initialize the GPT OSS attention module."""
@@ -207,17 +206,13 @@ class GptOssAttention(nn.Module):
         self.head_dim = config.head_size
         self.num_attention_heads = config.num_query_heads
         self.num_key_value_heads = config.num_key_value_heads
-        self.num_key_value_groups = self.num_attention_heads // self.num_key_value_heads
-        # Apply sliding window to even layers and full attention to odd layers
-        # This follows the GPT-OSS alternating attention pattern
-        self.sliding_window = config.sliding_window if layer_idx % 2 == 0 else 0
 
         # Define the output sizes for Q, K, and V for clarity
         self.q_size = config.num_query_heads * config.head_size
         self.k_size = config.num_key_value_heads * config.head_size
         self.v_size = config.num_key_value_heads * config.head_size
 
-        # Sink tokens parameter
+        # Sink tokens parameter for attention sink
         self.sinks = nn.Parameter(
             torch.empty(
                 config.num_query_heads,
@@ -247,214 +242,17 @@ class GptOssAttention(nn.Module):
 
         self.rope = rope
 
-    def _ceil_div(self, a: int, b: int) -> int:
-        return -(-a // b)
-
-    def _attend_one_page(
-        self,
-        query: torch.Tensor,
-        paged_keys: torch.Tensor,
-        paged_mask: torch.Tensor,
-        paged_values: torch.Tensor,
-        sum_exp: torch.Tensor,
-        sum_val: torch.Tensor,
-        max_score: torch.Tensor,
-    ):
-        page_attn_scores = einsum(query, paged_keys, "q h d, s h d -> h q s")
-        page_attn_scores = (page_attn_scores + paged_mask).to(torch.float32)
-        page_max_score = torch.max(page_attn_scores, dim=-1, keepdim=False).values
-
-        # Convert -inf elements to 0.0 in page_max_score
-        page_max_score = torch.where(
-            torch.isinf(page_max_score) & (page_max_score < 0),
-            torch.tensor(0.0, dtype=page_max_score.dtype, device=page_max_score.device),
-            page_max_score,
-        )
-
-        page_attn_scores = torch.exp(page_attn_scores - page_max_score.unsqueeze(-1))
-
-        page_sum_exp = torch.sum(page_attn_scores, dim=-1, keepdim=False)
-        page_sum_val = einsum(
-            page_attn_scores, paged_values.to(torch.float32), "h q s, s h d -> h q d"
-        )
-
-        new_max_score = torch.max(max_score, page_max_score)
-        alpha = torch.exp(max_score - new_max_score)
-        beta = torch.exp(page_max_score - new_max_score)
-
-        sum_exp = sum_exp * alpha + page_sum_exp * beta
-        sum_val = sum_val * alpha.unsqueeze(-1) + page_sum_val * beta.unsqueeze(-1)
-        max_score = new_max_score
-
-        return sum_val, sum_exp, max_score
-
-    def _paged_attention(
-        self,
-        queries: torch.Tensor,
-        qo_indptr: torch.IntTensor,
-        kv_page_indptr: torch.IntTensor,
-        kv_last_page_lens: torch.IntTensor,
-        kv_page_indices: torch.IntTensor,
-        attention_mask: torch.Tensor,
-        kv_cache_at_layer: torch.Tensor,
-    ):
-        output_embeds = torch.empty(
-            queries.shape[0],
-            self.config.hidden_size,
-            dtype=queries.dtype,
-            device=queries.device,
-        )
-        kv_page_size = kv_cache_at_layer.shape[2]
-        mask_offset = 0
-        batch_num = len(qo_indptr) - 1
-
-        for batch_idx in range(batch_num):
-            q_start = qo_indptr[batch_idx]
-            q_end = qo_indptr[batch_idx + 1]
-            query_len = int(q_end - q_start)
-
-            kv_page_start = int(kv_page_indptr[batch_idx])
-            kv_page_end = int(kv_page_indptr[batch_idx + 1])
-            kv_last_page_len = int(kv_last_page_lens[batch_idx])
-
-            seq_len = int(
-                (kv_page_end - kv_page_start - 1) * kv_page_size + kv_last_page_len
-            )
-
-            mask_len = seq_len * query_len
-            mask = attention_mask[mask_offset : mask_offset + mask_len].view(
-                query_len, seq_len
-            )
-            mask_offset += mask_len
-
-            # If this attention layer uses a sliding window, we keep only the last
-            # few pages of the KV cache and the corresponding mask.
-            if self.sliding_window != 0:
-                attn_page_cnt = 1 + self._ceil_div(
-                    self.sliding_window - kv_last_page_len, kv_page_size
-                )
-                kv_page_start = max(kv_page_start, kv_page_end - attn_page_cnt)
-
-                seq_len = int(
-                    (kv_page_end - kv_page_start - 1) * kv_page_size + kv_last_page_len
-                )
-
-                mask = mask[:, -seq_len:]
-
-            query = queries[q_start:q_end, :] * self.scaling
-
-            sum_exp = torch.zeros(
-                self.num_attention_heads,
-                query_len,
-                device=query.device,
-                dtype=torch.float32,
-            )
-            sum_val = torch.zeros(
-                self.num_attention_heads,
-                query_len,
-                self.head_dim,
-                device=query.device,
-                dtype=torch.float32,
-            )
-            max_score = torch.zeros(
-                self.num_attention_heads,
-                query_len,
-                device=query.device,
-                dtype=torch.float32,
-            )
-
-            # Attend to all but the last page, processing 32 pages at a time
-            for page_cnts, kv_page_idx_idxs in chunked_enumerate(
-                range(kv_page_start, kv_page_end - 1), 32
-            ):
-                chunk_kv_page_indices = kv_page_indices[kv_page_idx_idxs]
-
-                # Gather keys and values for all pages in the chunk at once
-                # Shape: [chunk_size, page_size, num_kv_heads, head_dim]
-                chunk_keys = kv_cache_at_layer[chunk_kv_page_indices, 0]
-                chunk_values = kv_cache_at_layer[chunk_kv_page_indices, 1]
-
-                # Reshape to concatenate pages as one page:
-                # [chunk_size * page_size, num_kv_heads, head_dim]
-                paged_keys = chunk_keys.view(
-                    -1, chunk_keys.shape[-2], chunk_keys.shape[-1]
-                )
-                paged_values = chunk_values.view(
-                    -1, chunk_values.shape[-2], chunk_values.shape[-1]
-                )
-
-                paged_keys = torch.repeat_interleave(
-                    paged_keys, self.num_key_value_groups, dim=1
-                )
-                paged_values = torch.repeat_interleave(
-                    paged_values, self.num_key_value_groups, dim=1
-                )
-
-                chunk_size = len(page_cnts)
-                mask_start = page_cnts[0] * kv_page_size
-                mask_end = mask_start + chunk_size * kv_page_size
-                paged_mask = mask[:, mask_start:mask_end].unsqueeze(0)
-
-                sum_val, sum_exp, max_score = self._attend_one_page(
-                    query,
-                    paged_keys,
-                    paged_mask,
-                    paged_values,
-                    sum_exp,
-                    sum_val,
-                    max_score,
-                )
-
-            # Attend to the last page
-            page_cnt = kv_page_end - kv_page_start - 1
-            kv_page_idx_idx = kv_page_end - 1
-
-            kv_page_idx = kv_page_indices[kv_page_idx_idx]
-            paged_keys = kv_cache_at_layer[kv_page_idx, 0][:kv_last_page_len]
-            paged_values = kv_cache_at_layer[kv_page_idx, 1][:kv_last_page_len]
-
-            paged_keys = torch.repeat_interleave(
-                paged_keys, self.num_key_value_groups, dim=1
-            )
-            paged_values = torch.repeat_interleave(
-                paged_values, self.num_key_value_groups, dim=1
-            )
-
-            paged_mask_offset = page_cnt * kv_page_size
-            paged_mask = mask[:, paged_mask_offset : paged_mask_offset + kv_page_size][
-                ..., :kv_last_page_len
-            ]
-            paged_mask = paged_mask.unsqueeze(0)
-
-            sum_val, sum_exp, max_score = self._attend_one_page(
-                query, paged_keys, paged_mask, paged_values, sum_exp, sum_val, max_score
-            )
-
-            adjusted_sinks = self.sinks.unsqueeze(-1) - max_score
-            adjusted_sinks = torch.exp(adjusted_sinks)
-            sum_exp += adjusted_sinks
-
-            attn_output = sum_val / sum_exp.unsqueeze(-1)
-            attn_output = rearrange(attn_output, "h q d -> q (h d)")
-
-            attn_output = self.o_proj(attn_output.to(queries.dtype))
-
-            output_embeds[q_start:q_end, :] = attn_output
-
-        return output_embeds
-
     def forward(
         self,
+        wrapper: BatchAttentionWithAttentionSinkWrapper,
         hidden_states: torch.Tensor,
         position_ids: torch.IntTensor,
-        qo_indptr: torch.IntTensor,
         kv_cache_at_layer: torch.Tensor,
         kv_page_indices: torch.IntTensor,
         kv_page_indptr: torch.IntTensor,
         kv_last_page_lens: torch.IntTensor,
         batch_indices: torch.IntTensor,
         batch_positions: torch.IntTensor,
-        attention_mask: torch.Tensor,
         adapter_subpass: AdapterSubpass | None,
     ) -> torch.Tensor:
         """Forward pass through the attention module."""
@@ -497,17 +295,21 @@ class GptOssAttention(nn.Module):
             kv_layout="NHD",
         )
 
-        new_attn_output = self._paged_attention(
+        # Run attention using FlashInfer with attention sink support
+        # Additional tensors/scalars (sink, sm_scale) are passed as positional args
+        # after the standard arguments, matching the order in additional_tensor_names
+        # and additional_scalar_names from BatchAttentionWithAttentionSinkWrapper
+        attn_output = wrapper.run(
             query_states,
-            qo_indptr,
-            kv_page_indptr,
-            kv_last_page_lens,
-            kv_page_indices,
-            attention_mask,
             kv_cache_at_layer[self.layer_idx],
+            self.sinks.float(),  # sink tensor (additional_tensor_names)
+            self.scaling,  # sm_scale scalar (additional_scalar_names)
         )
+        attn_output = attn_output.reshape(n, -1)
 
-        return new_attn_output
+        attn_output = self.o_proj(attn_output)
+
+        return attn_output
 
 
 class GptOssRouter(nn.Module):
@@ -785,17 +587,16 @@ class GptOssDecoderLayer(nn.Module):
 
     def forward(
         self,
+        wrapper_window: BatchAttentionWithAttentionSinkWrapper,
+        wrapper_full: BatchAttentionWithAttentionSinkWrapper,
         hidden_states: torch.Tensor,
         position_ids: torch.Tensor,
-        qo_indptr: torch.Tensor,
         kv_cache_at_layer: torch.Tensor,
         kv_page_indices: torch.Tensor,
         kv_page_indptr: torch.Tensor,
         kv_last_page_lens: torch.Tensor,
         batch_indices: torch.Tensor,
         batch_positions: torch.Tensor,
-        full_mask: torch.Tensor,
-        window_mask: torch.Tensor,
         adapter_subpass: AdapterSubpass | None,
     ) -> torch.Tensor:
         """Forward pass through the decoder layer."""
@@ -803,18 +604,21 @@ class GptOssDecoderLayer(nn.Module):
 
         hidden_states = self.input_layernorm(hidden_states)
 
+        # Select wrapper based on layer index:
+        # Even layers use sliding window attention, odd layers use full attention
+        wrapper = wrapper_window if self.layer_idx % 2 == 0 else wrapper_full
+
         # Self Attention
         hidden_states = self.self_attn(
+            wrapper=wrapper,
             hidden_states=hidden_states,
             position_ids=position_ids,
-            qo_indptr=qo_indptr,
             kv_cache_at_layer=kv_cache_at_layer,
             kv_page_indices=kv_page_indices,
             kv_page_indptr=kv_page_indptr,
             kv_last_page_lens=kv_last_page_lens,
             batch_indices=batch_indices,
             batch_positions=batch_positions,
-            attention_mask=window_mask if self.layer_idx % 2 == 0 else full_mask,
             adapter_subpass=adapter_subpass,
         )
 
@@ -857,6 +661,36 @@ class GptOssModel(nn.Module):
         )
         self.sliding_window = config.sliding_window
 
+        # Create separate workspace buffers for each FlashInfer wrapper
+        self.workspace_buffer_window = torch.empty(
+            128 * 1024 * 1024, dtype=torch.uint8, device=config.device
+        )
+        self.workspace_buffer_full = torch.empty(
+            128 * 1024 * 1024, dtype=torch.uint8, device=config.device
+        )
+
+        # Create wrapper for even layers (with sliding window attention)
+        self.wrapper_window = BatchAttentionWithAttentionSinkWrapper(
+            float_workspace_buffer=self.workspace_buffer_window,
+            kv_layout="NHD",
+            window_left=config.sliding_window - 1,
+            q_data_type=config.dtype,
+            kv_data_type=config.dtype,
+            head_dim_qk=config.head_size,
+            head_dim_vo=config.head_size,
+        )
+
+        # Create wrapper for odd layers (full attention, no sliding window)
+        self.wrapper_full = BatchAttentionWithAttentionSinkWrapper(
+            float_workspace_buffer=self.workspace_buffer_full,
+            kv_layout="NHD",
+            window_left=-1,
+            q_data_type=config.dtype,
+            kv_data_type=config.dtype,
+            head_dim_qk=config.head_size,
+            head_dim_vo=config.head_size,
+        )
+
     def forward(
         self,
         input_embeds: torch.Tensor,
@@ -872,83 +706,77 @@ class GptOssModel(nn.Module):
     ) -> torch.Tensor:
         """Forward pass through the GPT OSS model."""
 
-        # The current naive implementation does not distinguish between
+        # The current implementation does not distinguish between
         # single-token inference mode and batch inference mode
         _ = single_token_inference_mode
+        # custom_mask is not used with attention sink wrapper
+        _ = custom_mask
 
         hidden_states = input_embeds
         n, _ = hidden_states.size()
 
         page_size = kv_cache_at_layer[0].shape[2]
 
+        seq_lens = ops.get_seq_lens(kv_page_indptr, kv_last_page_lens, page_size)
+
         batch_indices, batch_positions = ops.get_batch_indices_positions(
             append_indptr=qo_indptr,
-            seq_lens=ops.get_seq_lens(kv_page_indptr, kv_last_page_lens, page_size),
+            seq_lens=seq_lens,
             nnz=n,
         )
 
-        batch_num = len(qo_indptr) - 1
+        # Plan both wrappers for this forward pass
+        # Note: BatchAttentionWithAttentionSinkWrapper.plan() uses page-based indptr
+        # (kv_page_indptr) to match the length of kv_page_indices.
+        # The test uses page_size=1 where token indptr = page indptr.
 
-        full_mask = custom_mask
-        window_mask = custom_mask.clone()
-
-        # For window attention layers, set the mask to 0 for positions that are
-        # outside the sliding window.
-        mask_offset = 0
-        for batch_idx in range(batch_num):
-            q_start = qo_indptr[batch_idx]
-            q_end = qo_indptr[batch_idx + 1]
-
-            kv_page_start = kv_page_indptr[batch_idx]
-            kv_page_end = kv_page_indptr[batch_idx + 1]
-
-            query_len = int(q_end - q_start)
-            seq_len = int(
-                (kv_page_end - kv_page_start - 1) * page_size
-                + kv_last_page_lens[batch_idx]
-            )
-            mask_len = seq_len * query_len
-
-            mask = window_mask[mask_offset : mask_offset + mask_len]
-            mask_offset += mask_len
-
-            mask = mask.view(query_len, seq_len)
-
-            pos_id = position_ids[q_start:q_end]
-            for q_idx in range(query_len):
-                mask[
-                    q_idx, : max(0, int(pos_id[q_idx]) - (self.sliding_window - 1))
-                ] = 0
-
-        full_mask = torch.where(
-            full_mask,
-            torch.tensor(0.0, dtype=input_embeds.dtype, device=input_embeds.device),
-            torch.tensor(
-                float("-inf"), dtype=input_embeds.dtype, device=input_embeds.device
-            ),
+        # Wrapper for windowed attention (even layers)
+        self.wrapper_window.plan(
+            qo_indptr,
+            kv_page_indptr,
+            kv_page_indices,
+            kv_last_page_lens,
+            self.config.num_query_heads,
+            self.config.num_key_value_heads,
+            self.config.head_size,
+            page_size,
+            causal=True,
+            window_left=self.sliding_window - 1,
+            q_data_type=self.config.dtype,
+            kv_data_type=self.config.dtype,
+            non_blocking=True,
         )
-        window_mask = torch.where(
-            window_mask,
-            torch.tensor(0.0, dtype=input_embeds.dtype, device=input_embeds.device),
-            torch.tensor(
-                float("-inf"), dtype=input_embeds.dtype, device=input_embeds.device
-            ),
+
+        # Wrapper for full attention (odd layers)
+        self.wrapper_full.plan(
+            qo_indptr,
+            kv_page_indptr,
+            kv_page_indices,
+            kv_last_page_lens,
+            self.config.num_query_heads,
+            self.config.num_key_value_heads,
+            self.config.head_size,
+            page_size,
+            causal=True,
+            window_left=-1,
+            q_data_type=self.config.dtype,
+            kv_data_type=self.config.dtype,
+            non_blocking=True,
         )
 
         for decoder_layer in self.layers:
 
             layer_outputs = decoder_layer(
+                wrapper_window=self.wrapper_window,
+                wrapper_full=self.wrapper_full,
                 hidden_states=hidden_states,
                 position_ids=position_ids,
-                qo_indptr=qo_indptr,
                 kv_cache_at_layer=kv_cache_at_layer,
                 kv_page_indices=kv_page_indices,
                 kv_page_indptr=kv_page_indptr,
                 kv_last_page_lens=kv_last_page_lens,
                 batch_indices=batch_indices,
                 batch_positions=batch_positions,
-                full_mask=full_mask,
-                window_mask=window_mask,
                 adapter_subpass=adapter_subpass,
             )
 
