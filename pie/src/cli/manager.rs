@@ -177,28 +177,12 @@ pub async fn start_engine_and_backend(
 
             let mut cmd = TokioCommand::new(exec_path);
 
-            if backend_type == "python" {
-                // The new Python backend uses IPC for binding and `host`/`port` to connect to the controller.
-                cmd.arg("--host")
-                    .arg(&client_config.host)
-                    .arg("--port")
-                    .arg(client_config.port.to_string())
-                    .arg("--internal_auth_token")
-                    .arg(&client_config.internal_auth_token.as_ref().unwrap());
-            } else {
-                // Legacy / other backends might still need to bind to a TCP port
-                let random_port: u16 = rand::rng().random_range(49152..=65535);
-                cmd.arg("--host")
-                    .arg("localhost")
-                    .arg("--port")
-                    .arg(random_port.to_string())
-                    .arg("--controller_host")
-                    .arg(&client_config.host)
-                    .arg("--controller_port")
-                    .arg(client_config.port.to_string())
-                    .arg("--internal_auth_token")
-                    .arg(&client_config.internal_auth_token.as_ref().unwrap());
-            }
+            cmd.arg("--host")
+                .arg(&client_config.host)
+                .arg("--port")
+                .arg(client_config.port.to_string())
+                .arg("--internal_auth_token")
+                .arg(&client_config.internal_auth_token.as_ref().unwrap());
 
             for (key, value) in backend_table {
                 // Skip keys we've already handled or that identify the backend

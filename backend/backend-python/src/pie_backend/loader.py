@@ -553,9 +553,6 @@ class ModelLoader:
         model_info_path = (
             Path(self.config.cache_dir) / "models" / self.config.model / f"{self.config.model}.toml"
         )
-        if not model_info_path.exists():
-            # Fallback to cache_dir root
-            model_info_path = Path(self.config.cache_dir) / "models" / f"{self.config.model}.toml"
 
         if not model_info_path.exists():
             raise ValueError(
