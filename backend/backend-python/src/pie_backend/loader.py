@@ -328,7 +328,7 @@ class Schema:
                     reader, config, defn.source, defn.source.patterns
                 )
                 store.put(defn.name, tensor)
-        
+        #print("Loaded", len(store), flush=True)
         return store
     
     def _load_single(
@@ -338,6 +338,7 @@ class Schema:
         source: Source,
         physical_names: list[str],
     ) -> torch.Tensor:
+        #print("Loading", physical_names)
         """Load a single (possibly fused/gathered) tensor with transforms applied."""
         # Read tensors
         tensors = [reader(name) for name in physical_names]
@@ -551,13 +552,13 @@ class ModelLoader:
         """
         # Try model subdirectory first
         model_info_path = (
-            Path(self.config.cache_dir) / "models" / self.config.model / f"{self.config.model}.toml"
+            Path(self.config.cache_dir) / "models" / f"{self.config.model}.toml"
         )
 
         if not model_info_path.exists():
             raise ValueError(
                 f'Metadata file for model "{self.config.model}" not found. '
-                f"Expected: {self.config.cache_dir}/{self.config.model}/{self.config.model}.toml"
+                f"Expected: {self.config.cache_dir}/models/{self.config.model}.toml"
             )
 
         with open(model_info_path, "rb") as f:

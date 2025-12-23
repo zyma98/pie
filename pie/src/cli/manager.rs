@@ -176,7 +176,7 @@ pub async fn start_engine_and_backend(
                 .context("`exec_path` is missing or not a string.")?;
 
             let mut cmd = TokioCommand::new(exec_path);
-
+            cmd.env("PYTHONUNBUFFERED", "1");
             cmd.arg("--host")
                 .arg(&client_config.host)
                 .arg("--port")

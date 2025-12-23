@@ -64,7 +64,10 @@ class Runtime:
 
         # Load model weights using ModelLoader
         loader = ModelLoader(config)
+        print("Loading model weights")
         weights, normalized_arch, self.info = loader.load()
+
+        print("Loaded model weights")
 
         # Store architecture type
         self.type = self.info["architecture"]["type"]
@@ -192,8 +195,8 @@ class Runtime:
     def get_tokenizer(self) -> dict:
         """Get tokenizer configuration with merge table."""
         tokenizer_info = self.info.get("tokenizer", {})
-        model_dir = Path(self.config.cache_dir) / self.config.model
-
+        model_dir = Path(self.config.cache_dir) / "models" / self.config.model
+        #print("model_dir", model_dir)
         # Get vocab file path
         vocab_filename = tokenizer_info.get("vocab") or tokenizer_info.get(
             "vocabulary_file"
@@ -255,7 +258,7 @@ class Runtime:
         metadata = self.get_metadata()
         template = self.get_chat_template()
         tokenizer = self.get_tokenizer()
-
+        
         responses = []
         for _ in reqs:
             resp = message.HandshakeResponse(
@@ -398,7 +401,7 @@ class Runtime:
             List of ForwardPassResponse for each request in the batch
         """
         batch = self.batch_builder.build()
-        device = self.config.device[self.config.rank]
+        device = self.config.device#[self.config.rank]
 
         if not batch.token_ids:
             return []

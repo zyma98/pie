@@ -312,7 +312,7 @@ class ResponsePackager:
         self.batch = batch
         
         # Resolve device and dtype from runtime.config
-        self.device = runtime.config.device[runtime.config.rank]
+        self.device = runtime.config.device#[runtime.config.rank]
         self.dtype = runtime.config.activation_dtype
         self.logits_dtype = getattr(runtime, "logits_dtype", self.dtype)
 

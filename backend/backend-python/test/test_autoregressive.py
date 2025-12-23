@@ -69,7 +69,7 @@ def run_autoregressive_test(
     runtime = Runtime(config)
     print(f"    Runtime loaded: {runtime.model_spec.num_layers} layers")
     
-    device = config.device[0]
+    device = config.device#[0]
     dtype = config.dtype
     
     # Format prompt with chat template if requested
@@ -206,7 +206,7 @@ def test_forward_pass_components():
     print("\n[1] Loading Runtime...")
     config = RuntimeConfig.from_args(model="llama-3.2-1b-instruct")
     runtime = Runtime(config)
-    device = config.device[0]
+    device = config.device#[0]
     
     # Test handshake
     print("\n[2] Testing handshake...")
