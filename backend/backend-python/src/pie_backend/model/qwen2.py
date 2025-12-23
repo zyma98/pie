@@ -278,8 +278,7 @@ class ForwardPass:
         # 2. Gate+Up Projection (Column Parallel)
         gate_up = fun.linear(
             normed_input,
-            weight=self.weights.get(f"layers.{layer_idx}.proj_gate_up"),
-            bias=None,
+            self.weights.get(f"layers.{layer_idx}.proj_gate_up"),
         )
 
         # Split gate and up
@@ -291,8 +290,7 @@ class ForwardPass:
         # 4. Down Projection (Row Parallel)
         down = fun.linear(
             hidden,
-            weight=self.weights.get(f"layers.{layer_idx}.proj_down"),
-            bias=None,
+            self.weights.get(f"layers.{layer_idx}.proj_down"),
         )
         del hidden, gate, up, gate_up
 
@@ -344,8 +342,8 @@ class ForwardPass:
         # Input is replicated, weight is sharded -> output is sharded
         qkv_proj = fun.linear(
             normed_input,
-            weight=self.weights.get(f"layers.{layer_idx}.proj_qkv.weight"),
-            bias=self.weights.get(f"layers.{layer_idx}.proj_qkv.bias") if self.model_config.use_qkv_bias else None,
+            self.weights.get(f"layers.{layer_idx}.proj_qkv.weight"),
+            self.weights.get(f"layers.{layer_idx}.proj_qkv.bias") if self.model_config.use_qkv_bias else None,
         )
 
         # q, k, v are all LOCAL shards
@@ -410,8 +408,7 @@ class ForwardPass:
         # Input is sharded, weight is sharded -> output is partial
         attn_proj = fun.linear(
             attn_output,
-            weight=self.weights.get(f"layers.{layer_idx}.proj_o"),
-            bias=None,
+            self.weights.get(f"layers.{layer_idx}.proj_o"),
         )
         del attn_output
 

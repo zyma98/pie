@@ -10,6 +10,7 @@ import threading
 import time
 import msgspec
 import zmq
+import traceback
 from websockets.sync.client import connect
 
 from .message import (
@@ -296,6 +297,7 @@ def worker_thread(
                 )
     except Exception as exc:  # pylint: disable=broad-exception-caught
         print(f"Unhandled error occurred in the worker thread: {exc}")
+        traceback.print_exc()
         shutdown_event.set()
 
 

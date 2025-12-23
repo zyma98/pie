@@ -58,6 +58,10 @@ def main(
     if isinstance(device, list):
         device = device[0] if device else None
 
+
+    # testing quantization
+    weight_dtype = "int8"
+
     config = RuntimeConfig.from_args(
         model=model,
         cache_dir=cache_dir,

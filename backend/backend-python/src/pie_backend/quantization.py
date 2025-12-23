@@ -91,6 +91,8 @@ def quantize_int8(
     x: torch.Tensor,
     config: Int8WeightOnlyConfig,
 ) -> torch.Tensor:
+
+
     if config.group_size is None:
         group_size = x.shape[-1]
     else:
