@@ -22,12 +22,12 @@ dependencies = [
     "psutil>=7.1.3",
     "safetensors>=0.6.2",
     "torchao>=0.14.1",
-    "fbgemm-gpu-genai>=1.4.2",
 ]
 
 [project.optional-dependencies]
 cuda = [
     "flashinfer-python>=0.3.1",
+    "fbgemm-gpu-genai>=1.4.2",
 ]
 metal = [
     "pyobjc-core>=10.0,<11.0",
