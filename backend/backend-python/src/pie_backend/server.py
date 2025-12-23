@@ -10,6 +10,7 @@ import threading
 import time
 import msgspec
 import zmq
+import torch
 import traceback
 from websockets.sync.client import connect
 
@@ -248,7 +249,7 @@ class HandlerId(enum.Enum):
     UPLOAD_HANDLER = 7
     DOWNLOAD_HANDLER = 8
 
-
+@torch.inference_mode()
 def worker_thread(
     work_request_queue: queue.Queue, 
     response_queue: queue.Queue, 

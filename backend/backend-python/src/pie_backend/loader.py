@@ -293,6 +293,7 @@ class Schema:
         self._definitions.append(Definition(name=name, source=source))
         return self
     
+    
     def load(
         self,
         reader: ReaderFn,
@@ -330,6 +331,7 @@ class Schema:
                 store.put(defn.name, tensor)
         #print("Loaded", len(store), flush=True)
         return store
+    
     
     def _load_single(
         self,

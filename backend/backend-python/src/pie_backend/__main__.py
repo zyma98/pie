@@ -60,7 +60,7 @@ def main(
 
 
     # testing quantization
-    weight_dtype = "int8"
+    weight_dtype = "float8"
 
     config = RuntimeConfig.from_args(
         model=model,
