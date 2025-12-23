@@ -2,32 +2,312 @@
 Model loading for PIE backend.
 
 This module handles the messy file I/O, ztensor vs safetensors,
-TOML parsing, and model initialization.
+TOML parsing, and weight schema loading.
+
+WeightSchema provides a declarative API for defining how model weights
+are loaded, fused, sharded, and transformed.
+
+Example:
+    schema = (
+        Schema("llama3")
+        .define("token_embeds",
+            Source("model.embed_tokens.weight")
+            .shard("row"))
+        .define("layers.*.attn.qkv",
+            Source.fuse([
+                "model.layers.*.self_attn.q_proj.weight",
+                "model.layers.*.self_attn.k_proj.weight",
+                "model.layers.*.self_attn.v_proj.weight",
+            ], dim=0)
+            .shard("column")
+            .quantize())
+    )
+
+    weights = schema.load(reader, config, num_layers=32)
 """
 
 from __future__ import annotations
 
 import tomllib
 from contextlib import ExitStack
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 import torch
 from tqdm import tqdm
 import ztensor
 import safetensors
 
-from .model import llama3, Config as ModelConfig
-
 if TYPE_CHECKING:
     from .config import RuntimeConfig
 
 
+# =============================================================================
+# WEIGHT SCHEMA CLASSES
+# =============================================================================
+
+ReaderFn = Callable[[str], torch.Tensor]
+
+
+@dataclass
+class Source:
+    """
+    Defines a source tensor or fusion of multiple source tensors.
+    
+    Use method chaining to apply transforms:
+        Source("weight.name").shard("row").quantize()
+    """
+    
+    _patterns: list[str]
+    _fuse_dim: int | None = None
+    _sharding: str | None = None  # None, 'column', or 'row'
+    _should_quantize: bool = False
+    _expected_shapes: list[tuple[int, ...] | None] | None = None
+    
+    def __init__(self, pattern: str):
+        """Create a source from a single tensor pattern."""
+        self._patterns = [pattern]
+        self._fuse_dim = None
+        self._sharding = None
+        self._should_quantize = False
+        self._expected_shapes = None
+    
+    @classmethod
+    def fuse(cls, patterns: list[str], dim: int = 0) -> Source:
+        """
+        Create a fused source from multiple tensor patterns.
+        
+        Args:
+            patterns: List of tensor name patterns to fuse
+            dim: Dimension along which to concatenate (default: 0)
+        
+        Returns:
+            A new Source configured for fusion
+        """
+        source = cls.__new__(cls)
+        source._patterns = patterns
+        source._fuse_dim = dim
+        source._sharding = None
+        source._should_quantize = False
+        source._expected_shapes = None
+        return source
+    
+    def shard(self, strategy: str) -> Source:
+        """Set sharding strategy: 'column' or 'row'."""
+        if strategy not in ('column', 'row'):
+            raise ValueError(f"Invalid sharding strategy: {strategy}. Use 'column' or 'row'.")
+        self._sharding = strategy
+        return self
+    
+    def quantize(self) -> Source:
+        """Enable quantization for this weight."""
+        self._should_quantize = True
+        return self
+    
+    def expect_shapes(self, shapes: list[tuple[int, ...] | None]) -> Source:
+        """Set expected shapes for validation (optional)."""
+        self._expected_shapes = shapes
+        return self
+    
+    @property
+    def is_fused(self) -> bool:
+        return self._fuse_dim is not None
+    
+    @property
+    def patterns(self) -> list[str]:
+        return self._patterns
+    
+    @property
+    def fuse_dim(self) -> int | None:
+        return self._fuse_dim
+    
+    @property
+    def sharding(self) -> str | None:
+        return self._sharding
+    
+    @property
+    def should_quantize(self) -> bool:
+        return self._should_quantize
+
+
+@dataclass
+class Definition:
+    """A named weight definition: logical name -> Source with transforms."""
+    
+    name: str  # Logical name, may contain '*' for layer patterns
+    source: Source
+    
+    def has_layer_pattern(self) -> bool:
+        """Check if this definition uses layer patterns (*)."""
+        return "*" in self.name
+    
+    def expand_for_layer(self, layer_idx: int) -> str:
+        """Expand the logical name for a specific layer."""
+        return self.name.replace("*", str(layer_idx))
+    
+    def expand_source_for_layer(self, layer_idx: int) -> list[str]:
+        """Expand source patterns for a specific layer."""
+        return [p.replace("*", str(layer_idx)) for p in self.source.patterns]
+
+
+class WeightStore:
+    """Container for loaded weights, accessible by logical name."""
+    
+    def __init__(self):
+        self._weights: dict[str, torch.Tensor] = {}
+    
+    def put(self, name: str, tensor: torch.Tensor) -> None:
+        """Store a tensor by logical name."""
+        self._weights[name] = tensor
+    
+    def get(self, name: str) -> torch.Tensor:
+        """Retrieve a tensor by logical name."""
+        if name not in self._weights:
+            raise KeyError(f"Weight '{name}' not found in store")
+        return self._weights[name]
+    
+    def get_list(self, pattern: str, count: int) -> list[torch.Tensor]:
+        """
+        Retrieve a list of tensors matching a pattern.
+        
+        Args:
+            pattern: Pattern with '*' placeholder (e.g., "layers.*.proj_qkv")
+            count: Number of items to retrieve
+        
+        Returns:
+            List of tensors for indices 0..count-1
+        """
+        return [self.get(pattern.replace("*", str(i))) for i in range(count)]
+    
+    def keys(self) -> list[str]:
+        """List all stored weight names."""
+        return list(self._weights.keys())
+    
+    def __contains__(self, name: str) -> bool:
+        return name in self._weights
+    
+    def __len__(self) -> int:
+        return len(self._weights)
+
+
+class Schema:
+    """
+    Schema definition for weight loading.
+    
+    Use method chaining to define weights:
+        schema = Schema("model_name").define("name", Source(...))
+    """
+    
+    def __init__(self, name: str):
+        self.name = name
+        self._definitions: list[Definition] = []
+    
+    def define(self, name: str, source: Source) -> Schema:
+        """
+        Define a logical weight with its source.
+        
+        Args:
+            name: Logical name (may contain '*' for per-layer weights)
+            source: Source configuration
+        
+        Returns:
+            self for method chaining
+        """
+        self._definitions.append(Definition(name=name, source=source))
+        return self
+    
+    def load(
+        self,
+        reader: ReaderFn,
+        config: "RuntimeConfig",
+        num_layers: int = 0,
+    ) -> WeightStore:
+        """
+        Load all weights according to the schema.
+        
+        Args:
+            reader: Function to read tensors by name
+            config: Runtime configuration (device, sharding, quantization)
+            num_layers: Number of layers (for expanding '*' patterns)
+        
+        Returns:
+            WeightStore with all loaded weights
+        """
+        store = WeightStore()
+        
+        for defn in self._definitions:
+            if defn.has_layer_pattern():
+                # Expand for each layer
+                for layer_idx in range(num_layers):
+                    logical_name = defn.expand_for_layer(layer_idx)
+                    physical_names = defn.expand_source_for_layer(layer_idx)
+                    tensor = self._load_single(
+                        reader, config, defn.source, physical_names
+                    )
+                    store.put(logical_name, tensor)
+            else:
+                # Single tensor (not per-layer)
+                tensor = self._load_single(
+                    reader, config, defn.source, defn.source.patterns
+                )
+                store.put(defn.name, tensor)
+        
+        return store
+    
+    def _load_single(
+        self,
+        reader: ReaderFn,
+        config: "RuntimeConfig",
+        source: Source,
+        physical_names: list[str],
+    ) -> torch.Tensor:
+        """Load a single (possibly fused) tensor with transforms applied."""
+        # Read tensors
+        tensors = [reader(name) for name in physical_names]
+        
+        # Fuse if needed
+        if source.is_fused:
+            tensor = torch.cat(tensors, dim=source.fuse_dim)
+        else:
+            tensor = tensors[0]
+        
+        # Apply sharding (only if world_size > 1)
+        if config.world_size > 1 and source.sharding is not None:
+            dim = 1 if source.sharding == 'row' else 0
+            
+            # Validate dimension is divisible by world_size
+            if tensor.shape[dim] % config.world_size != 0:
+                raise ValueError(
+                    f"Cannot shard tensor of shape {tuple(tensor.shape)} along dim={dim}: "
+                    f"dimension size {tensor.shape[dim]} is not divisible by world_size={config.world_size}"
+                )
+            
+            tensor = torch.chunk(tensor.contiguous(), config.world_size, dim=dim)[config.rank]
+        
+        # Apply quantization (lazy import to avoid dependency issues)
+        if source.should_quantize and config.quantization is not None:
+            from .quantization import quantize
+            tensor = quantize(tensor, config.quantization)
+        
+        # Move to device
+        tensor = tensor.to(config.device)
+        
+        return tensor
+
+
+# =============================================================================
+# MODEL LOADER
+# =============================================================================
+
+
 class ModelLoader:
     """
-    Handles model loading, weight I/O, and initialization.
+    Handles model loading, TOML parsing, and weight I/O.
     
     This separates the loading concerns from the runtime orchestration.
+    The loader returns a WeightStore and model config - the runtime
+    is responsible for creating the ForwardPass and KV cache.
     """
 
     def __init__(self, config: "RuntimeConfig"):
@@ -40,12 +320,12 @@ class ModelLoader:
         self.config = config
         self.info: dict = {}
 
-    def load(self) -> tuple[llama3.ForwardPass, list[torch.Tensor], llama3.Spec, dict]:
+    def load(self) -> tuple[WeightStore, dict, dict]:
         """
-        Load the model and return all components.
+        Load the model weights and return components.
         
         Returns:
-            Tuple of (forward_pass, kv_cache, model_spec, model_info)
+            Tuple of (weights, normalized_arch, model_info)
         """
         # Load model info from TOML
         self.info = self._load_toml()
@@ -54,134 +334,36 @@ class ModelLoader:
         # Normalize architecture fields
         normalized_arch = self._normalize_arch_fields(self.info["architecture"])
 
-        # Load parameters and create forward pass
+        # Get schema for architecture type
         match arch_type:
             case "llama3" | "l4ma":
-                engine, kv_cache, model_spec = self._load_llama3(normalized_arch)
+                from .model import llama3
+                schema = llama3.LLAMA3_SCHEMA
+                num_layers = int(normalized_arch["num_layers"])
             case _:
                 raise ValueError(f"Unsupported architecture type: {arch_type}")
 
-        return engine, kv_cache, model_spec, self.info
+        # Load weights using schema
+        weights = self.load_weights(schema, num_layers)
 
-    def _load_toml(self) -> dict:
+        return weights, normalized_arch, self.info
+
+    def load_weights(self, schema: Schema, num_layers: int) -> WeightStore:
         """
-        Load model metadata from TOML file.
-        
-        Returns:
-            Parsed TOML dictionary
-        """
-        # Try model subdirectory first
-        model_info_path = (
-            Path(self.config.cache_dir) / self.config.model / f"{self.config.model}.toml"
-        )
-        if not model_info_path.exists():
-            # Fallback to cache_dir root
-            model_info_path = Path(self.config.cache_dir) / f"{self.config.model}.toml"
-
-        if not model_info_path.exists():
-            raise ValueError(
-                f'Metadata file for model "{self.config.model}" not found. '
-                f"Expected: {self.config.cache_dir}/{self.config.model}/{self.config.model}.toml"
-            )
-
-        with open(model_info_path, "rb") as f:
-            return tomllib.load(f)
-
-    def _normalize_arch_fields(self, arch: dict) -> dict:
-        """
-        Normalize YAML/TOML field names to match Spec.from_dict expectations.
+        Load weights using the provided schema.
         
         Args:
-            arch: Raw architecture dictionary from TOML
+            schema: Weight schema defining the tensor mapping
+            num_layers: Number of layers for expanding '*' patterns
             
         Returns:
-            Normalized architecture dictionary
-        """
-        normalized = dict(arch)
-
-        # Map YAML field names -> expected names
-        field_map = {
-            "head_dim": "head_size",
-            "num_heads": "num_query_heads",
-            "num_heads_kv": "num_key_value_heads",
-            "high_freq_factor": "high_frequency_factor",
-            "low_freq_factor": "low_frequency_factor",
-        }
-
-        # Normalize top-level fields
-        for old, new in field_map.items():
-            if old in normalized and new not in normalized:
-                normalized[new] = normalized.pop(old)
-
-        # Normalize rope subfields
-        if "rope" in normalized:
-            rope = dict(normalized["rope"])
-            for old, new in field_map.items():
-                if old in rope and new not in rope:
-                    rope[new] = rope.pop(old)
-            # Add rope.factor default if missing
-            if "factor" not in rope:
-                rope["factor"] = 1.0
-            normalized["rope"] = rope
-
-        # Add missing fields with defaults
-        if "rms_norm_eps" not in normalized:
-            normalized["rms_norm_eps"] = 1e-5
-
-        # Get vocab_size from tokenizer section if not in architecture
-        if "vocab_size" not in normalized and "tokenizer" in self.info:
-            tokenizer = self.info["tokenizer"]
-            if "vocab_size" in tokenizer:
-                normalized["vocab_size"] = tokenizer["vocab_size"]
-
-        return normalized
-
-    def _create_model_config(self, arch: dict) -> ModelConfig:
-        """
-        Create a model.Config object from RuntimeConfig and architecture.
-        
-        Args:
-            arch: Normalized architecture dictionary
-            
-        Returns:
-            Model configuration object
-        """
-        return ModelConfig(
-            devices=self.config.device,
-            rank=0,  # Single-rank for now
-            activation_dtype=self.config.activation_dtype,
-            weight_dtype=self.config.weight_dtype,
-            kv_page_size=self.config.kv_page_size,
-            max_dist_size=self.config.max_dist_size,
-            max_num_embeds=self.config.max_num_embeds,
-            max_batch_tokens=self.config.max_batch_tokens,
-            max_num_adapters=self.config.max_num_adapters,
-            max_adapter_rank=self.config.max_adapter_rank,
-            max_num_kv_pages=self.config.max_num_kv_pages,
-            mem_utilization=self.config.mem_utilization,
-        )
-
-    def _load_llama3(
-        self, normalized_arch: dict
-    ) -> tuple[llama3.ForwardPass, list[torch.Tensor], llama3.Spec]:
-        """
-        Load Llama3-style model.
-        
-        Args:
-            normalized_arch: Normalized architecture dictionary
-            
-        Returns:
-            Tuple of (forward_pass, kv_cache, model_spec)
+            WeightStore with all loaded weights
         """
         # Determine path to model weight files
         model_dir = Path(self.config.cache_dir) / self.config.model
         if not model_dir.exists():
             # Fallback: weights might be in cache_dir directly
             model_dir = Path(self.config.cache_dir)
-
-        # Create model spec and config
-        model_spec = llama3.Spec.from_dict(normalized_arch)
-        model_config = self._create_model_config(normalized_arch)
 
         # Load weights
         with ExitStack() as stack:
@@ -233,20 +415,83 @@ class ModelLoader:
                 return t
 
             # Load weights using schema
-            weights = llama3.load_weights(
-                model_spec,
-                model_config,
-                reader,
+            weights = schema.load(
+                reader=reader,
+                config=self.config,
+                num_layers=num_layers,
             )
 
-            # Create forward pass with weights
-            forward_pass = llama3.ForwardPass(
-                model_spec,
-                model_config,
-                weights,
+        return weights
+
+    def _load_toml(self) -> dict:
+        """
+        Load model metadata from TOML file.
+        
+        Returns:
+            Parsed TOML dictionary
+        """
+        # Try model subdirectory first
+        model_info_path = (
+            Path(self.config.cache_dir) / self.config.model / f"{self.config.model}.toml"
+        )
+        if not model_info_path.exists():
+            # Fallback to cache_dir root
+            model_info_path = Path(self.config.cache_dir) / f"{self.config.model}.toml"
+
+        if not model_info_path.exists():
+            raise ValueError(
+                f'Metadata file for model "{self.config.model}" not found. '
+                f"Expected: {self.config.cache_dir}/{self.config.model}/{self.config.model}.toml"
             )
 
-            # Create KV cache
-            kv_cache = llama3.create_kv_cache(model_spec, model_config)
+        with open(model_info_path, "rb") as f:
+            return tomllib.load(f)
 
-        return forward_pass, kv_cache, model_spec
+    def _normalize_arch_fields(self, arch: dict) -> dict:
+        """
+        Normalize YAML/TOML field names to match ModelConfig.from_dict expectations.
+        
+        Args:
+            arch: Raw architecture dictionary from TOML
+            
+        Returns:
+            Normalized architecture dictionary
+        """
+        normalized = dict(arch)
+
+        # Map YAML field names -> expected names
+        field_map = {
+            "head_dim": "head_size",
+            "num_heads": "num_query_heads",
+            "num_heads_kv": "num_key_value_heads",
+            "high_freq_factor": "high_frequency_factor",
+            "low_freq_factor": "low_frequency_factor",
+        }
+
+        # Normalize top-level fields
+        for old, new in field_map.items():
+            if old in normalized and new not in normalized:
+                normalized[new] = normalized.pop(old)
+
+        # Normalize rope subfields
+        if "rope" in normalized:
+            rope = dict(normalized["rope"])
+            for old, new in field_map.items():
+                if old in rope and new not in rope:
+                    rope[new] = rope.pop(old)
+            # Add rope.factor default if missing
+            if "factor" not in rope:
+                rope["factor"] = 1.0
+            normalized["rope"] = rope
+
+        # Add missing fields with defaults
+        if "rms_norm_eps" not in normalized:
+            normalized["rms_norm_eps"] = 1e-5
+
+        # Get vocab_size from tokenizer section if not in architecture
+        if "vocab_size" not in normalized and "tokenizer" in self.info:
+            tokenizer = self.info["tokenizer"]
+            if "vocab_size" in tokenizer:
+                normalized["vocab_size"] = tokenizer["vocab_size"]
+
+        return normalized

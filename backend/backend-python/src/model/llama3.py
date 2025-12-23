@@ -8,12 +8,12 @@ import torch.nn.functional as fun
 import torch.distributed as dist
 
 
-from . import Spec as SpecBase, Config
-
+from . import ModelConfig as ModelConfigBase
+from ..config import RuntimeConfig
 from ..adapter import AdapterSubpass
 from ..quantization import quantize
 from ..utils import is_apple_silicon, get_available_memory
-from ..weight import Schema, Source, LoadConfig, WeightStore
+from ..loader import Schema, Source, WeightStore
 
 if is_apple_silicon():
     import flashinfer_metal as ops  # type: ignore[import-not-found]
@@ -21,56 +21,6 @@ else:
     import flashinfer as ops  # type: ignore[import-not-found,no-redef]
 
 
-def _shard(x, config: Config, row_parallel: bool = False) -> torch.Tensor:
-    # shard
-    # dim=0 -> column-parallel
-    # dim=1 -> row-parallel
-
-    dim = 1 if row_parallel else 0
-
-    if config.world_size > 1:
-        x = torch.chunk(x.contiguous(), config.world_size, dim=dim)[config.rank]
-
-    return x
-
-
-def _shard_and_quantize(
-    x: torch.Tensor, config: Config, row_parallel: bool = False
-) -> torch.Tensor:
-
-    dim = 1 if row_parallel else 0
-
-    if config.world_size > 1:
-        x = torch.chunk(x.contiguous(), config.world_size, dim=dim)[config.rank]
-
-    if config.quantization is not None:
-        x = quantize(x, config.quantization)
-
-    return x
-
-
-def _eval_max_num_kv_pages(
-    spec: Spec,
-    config: Config,
-) -> int:
-
-    available_bytes = get_available_memory(
-        devices=config.devices,
-        rank=config.rank,
-    )
-    usable_bytes = available_bytes * config.mem_utilization
-    element_size_bytes = torch.empty((), dtype=config.activation_dtype).element_size()
-    total_bytes_per_page = (
-        element_size_bytes
-        * 2
-        * config.kv_page_size
-        * spec.num_kv_heads
-        * spec.dim_head
-        * spec.num_layers
-    )
-
-    max_num_pages = int(usable_bytes // total_bytes_per_page)
-    return max_num_pages
 
 
 # =============================================================================
@@ -143,8 +93,15 @@ LLAMA3_SCHEMA = (
     )
 )
 
+
 @dataclass
-class Spec(SpecBase):
+class ModelConfig(ModelConfigBase):
+    """
+    Llama3-specific model architecture configuration.
+    
+    Inherits from the abstract ModelConfig base class and defines
+    all architecture-specific parameters for Llama3 models.
+    """
 
     num_layers: int
     num_q_heads: int
@@ -163,8 +120,8 @@ class Spec(SpecBase):
     rope_theta: float
 
     @staticmethod
-    def from_dict(spec: dict) -> Spec:
-        return Spec(
+    def from_dict(spec: dict) -> "ModelConfig":
+        return ModelConfig(
             num_layers=int(spec["num_layers"]),
             num_q_heads=int(spec["num_query_heads"]),
             num_kv_heads=int(spec["num_key_value_heads"]),
@@ -179,28 +136,48 @@ class Spec(SpecBase):
             rope_theta=float(spec["rope"]["theta"]),
         )
 
+    def eval_max_num_kv_pages(self, runtime_config: RuntimeConfig) -> int:
+        """Evaluate the maximum number of KV pages based on available memory."""
+        available_bytes = get_available_memory(
+            devices=runtime_config.devices,
+            rank=runtime_config.rank,
+        )
+        usable_bytes = available_bytes * runtime_config.mem_utilization
+        element_size_bytes = torch.empty((), dtype=runtime_config.activation_dtype).element_size()
+        total_bytes_per_page = (
+            element_size_bytes
+            * 2
+            * runtime_config.kv_page_size
+            * self.num_kv_heads
+            * self.dim_head
+            * self.num_layers
+        )
+
+        max_num_pages = int(usable_bytes // total_bytes_per_page)
+        return max_num_pages
+
 
 class ForwardPass:
     """
     Llama3 forward pass implementation.
     
-    Stores model spec, config, and weights internally.
+    Stores model config, runtime config, and weights internally.
     """
 
     def __init__(
         self,
-        spec: Spec,
-        config: Config,
+        model_config: ModelConfig,
+        runtime_config: RuntimeConfig,
         weights: WeightStore,
     ):
         """Initialize the forward pass with weights and attention wrappers."""
-        self.spec = spec
-        self.config = config
+        self.model_config = model_config
+        self.runtime_config = runtime_config
         self.weights = weights
         
         # Create workspace buffer for attention operations
         workspace_buffer = torch.empty(
-            128 * 1024 * 1024, dtype=torch.uint8, device=config.device
+            128 * 1024 * 1024, dtype=torch.uint8, device=runtime_config.device
         )
         self.wrapper_decode = ops.BatchDecodeWithPagedKVCacheWrapper(
             workspace_buffer, "NHD"
@@ -218,9 +195,9 @@ class ForwardPass:
         # Apply final layer norm
         normed = fun.rms_norm(
             hidden_states,
-            normalized_shape=[self.spec.dim_hidden],
+            normalized_shape=[self.model_config.dim_hidden],
             weight=self.weights.get("norm_last"),
-            eps=self.spec.rms_norm_eps,
+            eps=self.model_config.rms_norm_eps,
         )
         # Project to vocab (weight-tied with embedding)
         return fun.linear(normed, self.weights.get("embed_token"))
@@ -231,7 +208,7 @@ class ForwardPass:
         pre-norm and residual connection.
         """
         # --- Calculate local TP sizes ---
-        local_mlp_size = self.spec.dim_mlp // self.config.world_size
+        local_mlp_size = self.model_config.dim_mlp // self.runtime_config.world_size
 
         # Save input for residual connection
         residual = hidden_states
@@ -239,9 +216,9 @@ class ForwardPass:
         # 1. MLP RMSNorm
         normed_input = fun.rms_norm(
             hidden_states,
-            normalized_shape=[self.spec.dim_hidden],
+            normalized_shape=[self.model_config.dim_hidden],
             weight=self.weights.get(f"layers.{layer_idx}.norm_mlp"),
-            eps=self.spec.rms_norm_eps,
+            eps=self.model_config.rms_norm_eps,
         )
 
         # 2. Gate+Up Projection (Column Parallel)
@@ -266,7 +243,7 @@ class ForwardPass:
         del hidden, gate, up, gate_up
 
         # ALL-REDUCE: Sum partial outputs from all ranks (only if TP > 1)
-        if self.config.world_size > 1:
+        if self.runtime_config.world_size > 1:
             dist.all_reduce(down)
 
         # 5. Residual Connection
@@ -291,10 +268,10 @@ class ForwardPass:
         pre-norm and residual connection.
         """
         # --- Calculate local TP sizes ---
-        local_num_query_heads = self.spec.num_q_heads // self.config.world_size
-        local_num_key_value_heads = self.spec.num_kv_heads // self.config.world_size
-        local_q_size = local_num_query_heads * self.spec.dim_head
-        local_kv_size = local_num_key_value_heads * self.spec.dim_head
+        local_num_query_heads = self.model_config.num_q_heads // self.runtime_config.world_size
+        local_num_key_value_heads = self.model_config.num_kv_heads // self.runtime_config.world_size
+        local_q_size = local_num_query_heads * self.model_config.dim_head
+        local_kv_size = local_num_key_value_heads * self.model_config.dim_head
 
         n = hidden_states.size(0)
 
@@ -304,9 +281,9 @@ class ForwardPass:
         # 1. Input RMSNorm (replicated input -> replicated output) 
         normed_input = fun.rms_norm(
             hidden_states,
-            normalized_shape=[self.spec.dim_hidden],
+            normalized_shape=[self.model_config.dim_hidden],
             weight=self.weights.get(f"layers.{layer_idx}.norm_attn"),
-            eps=self.spec.rms_norm_eps,
+            eps=self.model_config.rms_norm_eps,
         )
 
         # 2. QKV Projection (Column Parallel)
@@ -340,19 +317,19 @@ class ForwardPass:
         del normed_input
 
         # 4. Reshape QKV (local shapes) ------------------> input scatter
-        q = q.view(n, local_num_query_heads, self.spec.dim_head)
-        k = k.view(n, local_num_key_value_heads, self.spec.dim_head)
-        v = v.view(n, local_num_key_value_heads, self.spec.dim_head)
+        q = q.view(n, local_num_query_heads, self.model_config.dim_head)
+        k = k.view(n, local_num_key_value_heads, self.model_config.dim_head)
+        v = v.view(n, local_num_key_value_heads, self.model_config.dim_head)
 
         # 5. Apply RoPE (in-place on local shards)
         ops.apply_llama31_rope_pos_ids_inplace(
             q=q,
             k=k,
             pos_ids=position_ids,
-            rope_scale=self.spec.rope_factor,
-            rope_theta=self.spec.rope_theta,
-            low_freq_factor=self.spec.rope_low_frequency_factor,
-            high_freq_factor=self.spec.rope_high_frequency_factor,
+            rope_scale=self.model_config.rope_factor,
+            rope_theta=self.model_config.rope_theta,
+            low_freq_factor=self.model_config.rope_low_frequency_factor,
+            high_freq_factor=self.model_config.rope_high_frequency_factor,
         )
 
         # gather where?
@@ -390,7 +367,7 @@ class ForwardPass:
         del attn_output
 
         # ALL-REDUCE: Sum partial outputs from all ranks (only if TP > 1)
-        if self.config.world_size > 1:
+        if self.runtime_config.world_size > 1:
             dist.all_reduce(attn_proj)
 
         # 9. First Residual Connection
@@ -417,8 +394,8 @@ class ForwardPass:
 
         # --- Calculate local TP sizes ---
         # <-- These are still needed here for planning the wrapper
-        local_num_query_heads = self.spec.num_q_heads // self.config.world_size
-        local_num_key_value_heads = self.spec.num_kv_heads // self.config.world_size
+        local_num_query_heads = self.model_config.num_q_heads // self.runtime_config.world_size
+        local_num_key_value_heads = self.model_config.num_kv_heads // self.runtime_config.world_size
 
         hidden_states = input_embeds
         n, _ = hidden_states.size()
@@ -446,7 +423,7 @@ class ForwardPass:
                 last_page_len=kv_last_page_lens,
                 num_qo_heads=local_num_query_heads,  # Use local head count
                 num_kv_heads=local_num_key_value_heads,  # Use local head count
-                head_dim=self.spec.dim_head,
+                head_dim=self.model_config.dim_head,
                 page_size=page_size,
                 pos_encoding_mode="NONE",
                 q_data_type=input_embeds.dtype,
@@ -460,13 +437,13 @@ class ForwardPass:
                 paged_kv_last_page_len=kv_last_page_lens,
                 num_qo_heads=local_num_query_heads,  # Use local head count
                 num_kv_heads=local_num_key_value_heads,  # Use local head count
-                head_dim_qk=self.spec.dim_head,
+                head_dim_qk=self.model_config.dim_head,
                 page_size=page_size,
                 custom_mask=custom_mask,
                 q_data_type=input_embeds.dtype,
             )
 
-        for layer_idx in range(self.spec.num_layers):
+        for layer_idx in range(self.model_config.num_layers):
             # 1. Attention Block (includes pre-norm and residual)
             hidden_states = self.attention(
                 hidden_states=hidden_states,
@@ -492,44 +469,25 @@ class ForwardPass:
         return hidden_states
 
 
-def load_weights(
-    spec: Spec,
-    config: Config,
-    reader: Callable[..., torch.Tensor],
-) -> WeightStore:
-    """Load Llama3 weights using the schema."""
-    load_config = LoadConfig(
-        device=config.device,
-        world_size=config.world_size,
-        rank=config.rank,
-        quantization=config.quantization,
-    )
-    return LLAMA3_SCHEMA.load(
-        reader=reader,
-        config=load_config,
-        num_layers=spec.num_layers,
-    )
-
-
-def create_kv_cache(spec: Spec, config: Config) -> list[torch.Tensor]:
+def create_kv_cache(model_config: ModelConfig, runtime_config: RuntimeConfig) -> list[torch.Tensor]:
     """Create KV cache tensors for all layers."""
-    local_num_kv_heads = spec.num_kv_heads // config.world_size
+    local_num_kv_heads = model_config.num_kv_heads // runtime_config.world_size
     
-    # Update config.max_num_kv_pages if not set
-    if config.max_num_kv_pages is None:
-        config.max_num_kv_pages = _eval_max_num_kv_pages(spec, config)
+    # Update runtime_config.max_num_kv_pages if not set
+    if runtime_config.max_num_kv_pages is None:
+        runtime_config.max_num_kv_pages = model_config.eval_max_num_kv_pages(runtime_config)
     
     return [
         torch.zeros(
             (
-                config.max_num_kv_pages,
+                runtime_config.max_num_kv_pages,
                 2,
-                config.kv_page_size,
+                runtime_config.kv_page_size,
                 local_num_kv_heads,
-                spec.dim_head,
+                model_config.dim_head,
             ),
-            dtype=config.activation_dtype,
-            device=config.device,
+            dtype=runtime_config.activation_dtype,
+            device=runtime_config.device,
         )
-        for _ in range(spec.num_layers)
+        for _ in range(model_config.num_layers)
     ]

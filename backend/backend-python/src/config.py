@@ -10,13 +10,24 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 
 import torch
+from torchao.quantization import (
+    Int4WeightOnlyConfig,
+    Int8WeightOnlyConfig,
+    Float8WeightOnlyConfig,
+)
 
 from .utils import resolve_cache_dir
 
 
 @dataclass
 class RuntimeConfig:
-    """Configuration for the PIE inference runtime."""
+    """
+    Configuration for the PIE inference runtime.
+    
+    This class consolidates the old model.Config and RuntimeConfig,
+    providing both runtime settings (model, cache_dir) and device/dtype
+    configuration used by model forward passes.
+    """
 
     model: str
     cache_dir: str
@@ -29,10 +40,45 @@ class RuntimeConfig:
     max_num_kv_pages: int | None
     mem_utilization: float
 
-    device: list[torch.device]
+    # Device and dtype config (formerly in model.Config)
+    devices: list[torch.device]  # Renamed from device for clarity
     rank: int
     activation_dtype: torch.dtype
     weight_dtype: str | None  # None means same as activation_dtype (no quantization)
+
+    # =========================================================================
+    # Convenience Properties (formerly in model.Config)
+    # =========================================================================
+
+    @property
+    def device(self) -> torch.device:
+        """Get the device for the current rank."""
+        return self.devices[self.rank]
+
+    @property
+    def world_size(self) -> int:
+        """Get the number of devices (tensor parallel world size)."""
+        return len(self.devices)
+
+    @property
+    def needs_quantization(self) -> bool:
+        """True if weight_dtype differs from activation_dtype (quantization needed)."""
+        return self.weight_dtype is not None
+
+    @property
+    def quantization(self) -> Int4WeightOnlyConfig | Int8WeightOnlyConfig | Float8WeightOnlyConfig | None:
+        """Derive quantization config from weight_dtype."""
+        if self.weight_dtype is None:
+            return None
+        match self.weight_dtype:
+            case "int4":
+                return Int4WeightOnlyConfig()
+            case "int8":
+                return Int8WeightOnlyConfig()
+            case "float8":
+                return Float8WeightOnlyConfig()
+            case _:
+                raise ValueError(f"Unknown weight_dtype: {self.weight_dtype}")
 
     @classmethod
     def from_args(
@@ -114,7 +160,7 @@ class RuntimeConfig:
             max_adapter_rank=max_adapter_rank,
             max_num_kv_pages=max_num_kv_pages,
             mem_utilization=mem_utilization,
-            device=[resolved_device],
+            devices=[resolved_device],
             rank=0,
             activation_dtype=resolved_activation_dtype,
             weight_dtype=weight_dtype,

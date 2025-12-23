@@ -18,7 +18,7 @@ import numpy as np
 import torch
 
 from .config import RuntimeConfig
-from .batching import BatchBuilder, BatchState
+from .batching import BatchBuilder, BatchState, ResponsePackager
 from .loader import ModelLoader
 from .adapter import AdapterSubpass
 from .model import llama3
@@ -40,7 +40,7 @@ class Runtime:
     
     # Model components (renamed from forward_pass to engine to avoid collision)
     engine: llama3.ForwardPass
-    model_spec: llama3.Spec
+    model_config: llama3.ModelConfig
     kv_cache_at_layer: list[torch.Tensor]
     
     # Adapter state
@@ -62,12 +62,32 @@ class Runtime:
         self.adapters = {}
         self.batch = None
 
-        # Load model using ModelLoader
+        # Load model weights using ModelLoader
         loader = ModelLoader(config)
-        self.engine, self.kv_cache_at_layer, self.model_spec, self.info = loader.load()
+        weights, normalized_arch, self.info = loader.load()
 
         # Store architecture type
         self.type = self.info["architecture"]["type"]
+
+        # Create model-specific components based on architecture
+        match self.type:
+            case "llama3" | "l4ma":
+                # Create model config
+                self.model_config = llama3.ModelConfig.from_dict(normalized_arch)
+                
+                # Create forward pass with weights
+                self.engine = llama3.ForwardPass(
+                    self.model_config,
+                    config,
+                    weights,
+                )
+                
+                # Create KV cache
+                self.kv_cache_at_layer = llama3.create_kv_cache(
+                    self.model_config, config
+                )
+            case _:
+                raise ValueError(f"Unsupported architecture type: {self.type}")
 
         # Initialize batch builder
         self.batch_builder = BatchBuilder(
@@ -95,7 +115,7 @@ class Runtime:
                     (
                         self.config.max_num_adapters,
                         self.config.max_adapter_rank * 3,
-                        self.model_spec.dim_hidden,
+                        self.model_config.dim_hidden,
                     ),
                     dtype=self.config.activation_dtype,
                     device=device,
@@ -103,10 +123,10 @@ class Runtime:
                 torch.zeros(
                     (
                         self.config.max_num_adapters,
-                        self.model_spec.dim_head
+                        self.model_config.dim_head
                         * (
-                            self.model_spec.num_q_heads
-                            + self.model_spec.num_kv_heads * 2
+                            self.model_config.num_q_heads
+                            + self.model_config.num_kv_heads * 2
                         ),
                         self.config.max_adapter_rank,
                     ),
@@ -114,7 +134,7 @@ class Runtime:
                     device=device,
                 ),
             )
-            for _ in range(self.model_spec.num_layers)
+            for _ in range(self.model_config.num_layers)
         ]
 
     # ========================================================================
