@@ -115,7 +115,7 @@ Build the **CLIs** and the example inferlets.
 
    Substitute `$REPO` to the actual repository root and run
    ```bash
-   pie config init python $REPO/engine/backend-python/src/pie_backend/server.py
+   pie config init
    ```
 
 2. **Download the model:**

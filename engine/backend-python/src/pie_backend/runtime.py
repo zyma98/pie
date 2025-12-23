@@ -91,6 +91,9 @@ class Runtime:
                 self.kv_cache_at_layer = llama3.create_kv_cache(
                     self.model_config, config
                 )
+                
+                # Evaluate and store max_num_kv_pages in config
+                config.max_num_kv_pages = self.model_config.eval_max_num_kv_pages(config)
 
             case "qwen2":
                 # Create model config
@@ -107,6 +110,9 @@ class Runtime:
                 self.kv_cache_at_layer = qwen2.create_kv_cache(
                     self.model_config, config
                 )
+
+                # Evaluate and store max_num_kv_pages in config
+                config.max_num_kv_pages = self.model_config.eval_max_num_kv_pages(config)
             case "qwen3":
                 # Create model config
                 self.model_config = qwen3.ModelConfig.from_dict(normalized_arch)
@@ -122,6 +128,9 @@ class Runtime:
                 self.kv_cache_at_layer = qwen3.create_kv_cache(
                     self.model_config, config
                 )
+
+                # Evaluate and store max_num_kv_pages in config
+                config.max_num_kv_pages = self.model_config.eval_max_num_kv_pages(config)
             case _:
                 raise ValueError(f"Unsupported architecture type: {self.type}")
 
