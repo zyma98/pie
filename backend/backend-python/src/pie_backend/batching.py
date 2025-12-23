@@ -280,11 +280,10 @@ def _decode_brle(brle_buffer: list[int]) -> np.ndarray:
         value = not value  # Flip value for the next run
     return decoded_array
 
-
 class ResponsePackager:
     """
     Packages model outputs into responses for each original request.
-    
+
     This class handles the post-inference stages:
     - Embedding storage
     - Logits computation via LM head
@@ -297,52 +296,20 @@ class ResponsePackager:
     def __init__(self, runtime: Any, batch: BatchState):
         """
         Initialize the response packager.
-        
-        Args:
-            runtime: The Runtime instance providing model and device access.
-                     Expected attributes:
-                     - config.device[config.rank]: torch.device
-                     - config.activation_dtype: torch.dtype
-                     - engine.lm_head(x): logits projection
-                     - embeds: dict for embedding storage (optional)
-                     - ops.sampling: sampling operations (optional, uses fallback)
-            batch: The BatchState containing request metadata and sampler configs
         """
         self.runtime = runtime
         self.batch = batch
         
         # Resolve device and dtype from runtime.config
-        self.device = runtime.config.device#[runtime.config.rank]
+        self.device = runtime.config.device
         self.dtype = runtime.config.activation_dtype
-        self.logits_dtype = getattr(runtime, "logits_dtype", self.dtype)
 
     def finalize(self) -> dict[str, Any]:
         """
         Finalize batch preparation, creating tensors and the adapter subpass.
-        
-        This method prepares the input dictionary for the model forward pass.
-        
-        Returns:
-            Dictionary containing all tensors needed for inference
         """
         device = self.device
         batch = self.batch
-
-        # Setup adapter subpass if needed
-        adapter_subpass = None
-        if batch.adapter_subpass_needed:
-            from .adapters import ensure_adapter_available
-            adapter_subpass_class = ensure_adapter_available()
-            seeds_tensor = torch.as_tensor(
-                batch.adapter_seeds, device=device, dtype=torch.long
-            )
-            adapter_subpass = adapter_subpass_class(
-                adapter_at_layer=self.runtime.adapter_at_layer,
-                adapter_indices=batch.adapter_indices,
-                adapter_extras=self.runtime.adapters,
-                rand_seeds=seeds_tensor,
-                qo_indptr=batch.qo_indptr,
-            )
 
         # Create batched attention mask
         batched_attention_mask = (
@@ -355,8 +322,8 @@ class ResponsePackager:
         token_ids_tensor = torch.as_tensor(
             batch.token_ids, device=device, dtype=torch.int32
         )
-        embed_tokens = self.runtime.lm.model.embed_tokens  # type: ignore[attr-defined]
-        input_embeds = embed_tokens(token_ids_tensor)  # type: ignore[operator]
+        embed_tokens = self.runtime.engine.embed_tokens 
+        input_embeds = embed_tokens(token_ids_tensor)
 
         return {
             "input_embeds": input_embeds,
@@ -379,7 +346,7 @@ class ResponsePackager:
                 batched_attention_mask, device=device, dtype=torch.bool
             ),
             "single_token_inference_mode": batch.single_token_mode,
-            "adapter_subpass": adapter_subpass,
+            "adapter_subpass": None,
         }
 
     def package_responses(
@@ -387,20 +354,6 @@ class ResponsePackager:
     ) -> list[message.ForwardPassResponse]:
         """
         Package the model outputs into responses for each original request.
-        
-        This method performs:
-        1. Embedding storage for specified indices
-        2. Logits computation via LM head
-        3. Temperature scaling
-        4. Softmax probability computation
-        5. Grouped sampling operations
-        6. Response distribution back to original requests
-        
-        Args:
-            output_embeds: Output embeddings from the model forward pass
-            
-        Returns:
-            List of ForwardPassResponse objects, one per original request
         """
         batch = self.batch
         device = self.device
@@ -422,28 +375,18 @@ class ResponsePackager:
 
         # Stage 2: Compute logits via LM head
         logits_input = output_embeds[batch.indices_for_logits]
-        if logits_input.dtype != self.logits_dtype:
-            logits_input = logits_input.to(self.logits_dtype)
-
         logits = self.runtime.engine.lm_head(logits_input)
 
-        # Promote logits to handler dtype for numerically stable softmax
-        if logits.dtype != self.logits_dtype:
-            logits = logits.to(dtype=self.logits_dtype)
-
-        # Stage 3: Apply temperature scaling
+        # Stage 3: Apply temperature scaling    
         temperatures = torch.tensor(
             [p["temperature"] for p in batch.sampler_params],
             device=device,
-            dtype=self.logits_dtype,
+            dtype=self.dtype,
         ).unsqueeze(1)
         scaled_logits = logits / torch.clamp(temperatures, min=1e-6)
 
         # Stage 4: Compute probabilities
         probs = torch.softmax(scaled_logits, dim=-1)
-
-        if not torch.isfinite(probs).all():
-            raise RuntimeError("Non-finite probabilities produced by LM head")
 
         # Stage 5: Group requests by sampler type for efficient batch processing
         sampler_groups: dict[int, list[int]] = {}
@@ -467,12 +410,12 @@ class ResponsePackager:
             group_probs = probs.index_select(0, indices_tensor)
 
             if sampler_idx == 0:
-                # Distribution mode: return top-k token IDs and probabilities
+                # Distribution mode
                 self._process_distributions(
                     indices, group_probs, final_dists
                 )
             else:
-                # Sampling mode: sample tokens using the specified sampler
+                # Sampling mode
                 sampled = self._execute_sampler(
                     sampler_idx, indices, group_probs
                 )
@@ -481,7 +424,10 @@ class ResponsePackager:
                 final_tokens_tensor.scatter_(0, indices_tensor, sampled)
 
         # Stage 7: Distribute results back to individual responses
-        return self._build_responses(final_dists, final_tokens_tensor)
+        # Optimization: Move entire tensor to CPU list once to avoid repeated .item() syncs
+        final_tokens_list = final_tokens_tensor.tolist()
+        
+        return self._build_responses(final_dists, final_tokens_list)
 
     def _process_distributions(
         self,
@@ -491,11 +437,6 @@ class ResponsePackager:
     ) -> None:
         """
         Process distribution requests, computing top-k values and indices.
-        
-        Args:
-            indices: Indices of requests in this group
-            group_probs: Probabilities for this group
-            final_dists: Output list to populate with (token_ids, probs) tuples
         """
         batch = self.batch
         group_top_k = [batch.sampler_params[i]["top_k"] for i in indices]
@@ -503,10 +444,17 @@ class ResponsePackager:
 
         if max_k > 0:
             topk_vals, topk_inds = torch.topk(group_probs, k=max_k, sorted=True)
+            
+            # Optimization: Move the entire chunk to CPU at once
+            # This avoids sliced .tolist() calls inside the loop which are slower
+            topk_vals_list = topk_vals.tolist()
+            topk_inds_list = topk_inds.tolist()
+            
             for i, original_idx in enumerate(indices):
                 k = batch.sampler_params[original_idx]["top_k"]
-                ids = topk_inds[i, :k].tolist()
-                vals = topk_vals[i, :k].tolist()
+                # Pure Python list slicing (very fast)
+                ids = topk_inds_list[i][:k]
+                vals = topk_vals_list[i][:k]
                 final_dists[original_idx] = (ids, vals)
 
     def _execute_sampler(
@@ -517,33 +465,14 @@ class ResponsePackager:
     ) -> torch.Tensor:
         """
         Execute the appropriate sampling operation.
-        
-        Sampler indices:
-            1: sampling_from_probs (basic sampling)
-            2: top_p_sampling_from_probs
-            3: top_k_sampling_from_probs
-            4: min_p_sampling_from_probs
-            5: top_k_top_p_sampling_from_probs (combined)
-        
-        Args:
-            sampler_idx: Index identifying the sampler type
-            indices: Indices of requests in this group
-            group_probs: Probabilities for this group
-            
-        Returns:
-            Tensor of sampled token indices
         """
-        
-        
         batch = self.batch
         device = self.device
 
         if sampler_idx == 1:
-            # Basic sampling from probabilities
             return sampling_from_probs(group_probs)
 
         elif sampler_idx == 2:
-            # Top-p (nucleus) sampling
             top_p_vals = torch.tensor(
                 [batch.sampler_params[i]["top_p"] for i in indices],
                 device=device,
@@ -552,7 +481,6 @@ class ResponsePackager:
             return top_p_sampling_from_probs(group_probs, top_p=top_p_vals)
 
         elif sampler_idx == 3:
-            # Top-k sampling
             top_k_vals = torch.tensor(
                 [batch.sampler_params[i]["top_k"] for i in indices],
                 device=device,
@@ -561,7 +489,6 @@ class ResponsePackager:
             return top_k_sampling_from_probs(group_probs, top_k=top_k_vals)
 
         elif sampler_idx == 4:
-            # Min-p sampling
             min_p_vals = torch.tensor(
                 [batch.sampler_params[i]["min_p"] for i in indices],
                 device=device,
@@ -570,7 +497,6 @@ class ResponsePackager:
             return min_p_sampling_from_probs(group_probs, min_p=min_p_vals)
 
         elif sampler_idx == 5:
-            # Combined top-k + top-p sampling
             top_k_vals = torch.tensor(
                 [batch.sampler_params[i]["top_k"] for i in indices],
                 device=device,
@@ -591,17 +517,10 @@ class ResponsePackager:
     def _build_responses(
         self,
         final_dists: list[tuple[list[int], list[float]] | None],
-        final_tokens_tensor: torch.Tensor,
+        final_tokens_list: list[int],
     ) -> list[message.ForwardPassResponse]:
         """
         Build response objects by distributing results back to original requests.
-        
-        Args:
-            final_dists: List of distribution results (token_ids, probs) or None
-            final_tokens_tensor: Tensor of sampled tokens
-            
-        Returns:
-            List of ForwardPassResponse objects
         """
         batch = self.batch
         responses = []
@@ -620,7 +539,8 @@ class ResponsePackager:
                         request_dists.append(final_dists[i])
                 else:
                     # Sampling request
-                    request_tokens.append(final_tokens_tensor[i].item())
+                    # Optimization: Accessing pre-converted list avoids .item() sync
+                    request_tokens.append(final_tokens_list[i])
 
             responses.append(
                 message.ForwardPassResponse(dists=request_dists, tokens=request_tokens)

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 from pathlib import Path
+import time
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -400,147 +401,45 @@ class Runtime:
         Returns:
             List of ForwardPassResponse for each request in the batch
         """
+        t_start = time.perf_counter()  
         batch = self.batch_builder.build()
+        t_build = time.perf_counter()
         device = self.config.device#[self.config.rank]
 
-        if not batch.token_ids:
-            return []
-
-        # 1. Prepare adapter subpass if needed
-        adapter_subpass = None
-        if batch.adapter_subpass_needed:
-            seeds_tensor = torch.as_tensor(
-                batch.adapter_seeds, device=device, dtype=torch.long
-            )
-            adapter_subpass = AdapterSubpass(
-                adapter_at_layer=self.adapter_at_layer,
-                adapter_indices=batch.adapter_indices,
-                adapter_extras=self.adapters,
-                rand_seeds=seeds_tensor,
-                qo_indptr=batch.qo_indptr,
-            )
-
-        # 2. Prepare attention mask
-        batched_attention_mask = (
-            np.concatenate(batch.attention_masks)
-            if batch.attention_masks
-            else np.array([], dtype=np.bool_)
-        )
-
-        # 3. Prepare input tensors
-        token_ids_tensor = torch.as_tensor(
-            batch.token_ids, device=device, dtype=torch.int32
-        )
-        input_embeds = self.engine.embed_tokens(token_ids=token_ids_tensor)
-
-        # 4. Run transformer forward pass
-        hidden_states = self.engine.transform(
-            input_embeds=input_embeds,
-            position_ids=torch.as_tensor(
-                batch.position_ids, device=device, dtype=torch.int32
-            ),
-            qo_indptr=torch.as_tensor(batch.qo_indptr, device=device, dtype=torch.int32),
-            kv_cache_at_layer=self.kv_cache_at_layer,
-            kv_page_indices=torch.as_tensor(
-                batch.kv_page_indices, device=device, dtype=torch.int32
-            ),
-            kv_page_indptr=torch.as_tensor(
-                batch.kv_page_indptr, device=device, dtype=torch.int32
-            ),
-            kv_last_page_lens=torch.as_tensor(
-                batch.kv_last_page_lens, device=device, dtype=torch.int32
-            ),
-            custom_mask=torch.as_tensor(
-                batched_attention_mask, device=device, dtype=torch.bool
-            ),
-            single_token_inference_mode=batch.single_token_mode,
-            adapter_subpass=adapter_subpass,
-        )
-
-        # 5. Compute logits and sample
-        return self._sample_and_format_response(hidden_states, batch, device)
-
-    def _sample_and_format_response(
-        self,
-        hidden_states: torch.Tensor,
-        batch: BatchState,
-        device: torch.device,
-    ) -> list[message.ForwardPassResponse]:
-        """
-        Sample from logits and format responses.
+        packager = ResponsePackager(self, batch)
         
-        Args:
-            hidden_states: Output from transformer
-            batch: The batch state with request info
-            device: Target device
-            
-        Returns:
-            List of ForwardPassResponse for each request
-        """
-        # Get logits for positions that need them
-        if batch.indices_for_logits:
-            logits_indices = torch.as_tensor(
-                batch.indices_for_logits, device=device, dtype=torch.long
-            )
-            selected_hidden = hidden_states[logits_indices]
-            logits = self.engine.lm_head(selected_hidden)
-        else:
-            logits = None
+        # 1. Prepare inputs using packager
+        inputs = packager.finalize()
+        t_inputs = time.perf_counter()
 
-        if logits is None:
-            # No logits requested, return empty responses
-            return [
-                message.ForwardPassResponse(tokens=[], dists=[])
-                for _ in batch.requests
-            ]
+        if inputs["input_embeds"] is None:
+             return []
 
-        # Apply temperature scaling
-        temperatures = torch.tensor(
-            [p["temperature"] for p in batch.sampler_params],
-            device=device,
-            dtype=logits.dtype,
-        ).unsqueeze(1)
-        scaled_logits = logits / temperatures.clamp(min=1e-6)
+        # 2. Run transformer forward pass
+        hidden_states = self.engine.transform(
+            input_embeds=inputs["input_embeds"],
+            position_ids=inputs["position_ids"],
+            qo_indptr=inputs["qo_indptr"],
+            kv_cache_at_layer=self.kv_cache_at_layer,
+            kv_page_indices=inputs["kv_page_indices"],
+            kv_page_indptr=inputs["kv_page_indptr"],
+            kv_last_page_lens=inputs["kv_last_page_lens"],
+            custom_mask=inputs["custom_mask"],
+            single_token_inference_mode=inputs["single_token_inference_mode"],
+            adapter_subpass=inputs["adapter_subpass"],
+        )
+        t_forward = time.perf_counter()
 
-        # Group requests by sampler type
-        sampler_groups: dict[int, list[int]] = {}
-        for i, sampler_idx in enumerate(batch.sampler_types):
-            if sampler_idx not in sampler_groups:
-                sampler_groups[sampler_idx] = []
-            sampler_groups[sampler_idx].append(i)
+        # 3. Package responses
+        responses = packager.package_responses(hidden_states)
+        t_package = time.perf_counter()
 
-        # Sample tokens
-        probs = torch.softmax(scaled_logits, dim=-1)
-        sampled_tokens = torch.multinomial(probs, num_samples=1).squeeze(-1)
-
-        # Build responses for each request
-        responses: list[message.ForwardPassResponse] = []
-        cursor = 0
-
-        for req in batch.requests:
-            output_token_indices = req.output_token_indices or []
-            num_outputs = len(output_token_indices)
-            request_dists: list[tuple[list[int], list[float]]] = []
-            request_tokens: list[int] = []
-
-            # Iterate through the slice of results belonging to this request
-            for i in range(cursor, cursor + num_outputs):
-                if i < len(batch.sampler_types):
-                    if batch.sampler_types[i] == 0:
-                        # Distribution request - return top-k
-                        top_k = batch.sampler_params[i].get("top_k", 10)
-                        token_probs = probs[i]
-                        top_probs, top_indices = torch.topk(token_probs, k=min(top_k, token_probs.shape[0]))
-                        request_dists.append(
-                            (top_indices.cpu().tolist(), top_probs.cpu().tolist())
-                        )
-                    else:
-                        # Sampling request
-                        request_tokens.append(sampled_tokens[i].item())
-
-            responses.append(
-                message.ForwardPassResponse(dists=request_dists, tokens=request_tokens)
-            )
-            cursor += num_outputs
+        print(f"Batch execution: {(t_package - t_start) * 1000:.2f} ms")
+        print(f"  - Build: {(t_build - t_start) * 1000:.2f} ms")
+        print(f"  - Inputs: {(t_inputs - t_build) * 1000:.2f} ms")
+        print(f"  - Forward: {(t_forward - t_inputs) * 1000:.2f} ms")
+        print(f"  - Package: {(t_package - t_forward) * 1000:.2f} ms")
 
         return responses
+
+

@@ -32,15 +32,15 @@ import tomllib
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Any
+from typing import Callable, Any
 
 import torch
 from tqdm import tqdm
 import ztensor
 import safetensors
 
-if TYPE_CHECKING:
-    from .config import RuntimeConfig
+from .quantization import quantize
+from .config import RuntimeConfig
 
 
 # =============================================================================
@@ -393,7 +393,7 @@ class Schema:
         
         # Apply quantization (lazy import to avoid dependency issues)
         if source.should_quantize and config.quantization is not None:
-            from .quantization import quantize
+            
             tensor = quantize(tensor, config.quantization)
         
         # Move to device
