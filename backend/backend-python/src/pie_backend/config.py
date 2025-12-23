@@ -37,8 +37,7 @@ class RuntimeConfig:
     max_batch_tokens: int | None
     max_num_adapters: int
     max_adapter_rank: int
-    max_num_kv_pages: int | None
-    mem_utilization: float
+    gpu_mem_utilization: float
 
     # Device and dtype config (formerly in model.Config)
     devices: list[torch.device]  # Renamed from device for clarity
@@ -91,9 +90,11 @@ class RuntimeConfig:
         max_batch_tokens: int = 10240,
         max_num_adapters: int = 48,
         max_adapter_rank: int = 8,
-        max_num_kv_pages: int | None = None,
-        gpu_mem_headroom: float | None = None,
+        gpu_mem_utilization: float = 0.9,
         device: str | None = None,
+        devices: list[str] | None = None,
+        rank: int = 0,
+        world_size: int = 1,
         activation_dtype: str = "bfloat16",
         weight_dtype: str | None = None,
         enable_profiling: bool = False,
@@ -110,9 +111,11 @@ class RuntimeConfig:
             max_batch_tokens: Maximum tokens per batch
             max_num_adapters: Maximum number of adapters
             max_adapter_rank: Maximum adapter rank
-            max_num_kv_pages: Maximum KV pages (computed from memory if None)
-            gpu_mem_headroom: GPU memory headroom fraction
-            device: Device string (auto-detected if None)
+            gpu_mem_utilization: GPU memory utilization (0.0 - 1.0).
+            device: Single device string (backward compatibility)
+            devices: List of device strings (preferred for multi-GPU)
+            rank: Rank of the current process
+            world_size: Total number of processes
             activation_dtype: Activation tensor dtype
             weight_dtype: Weight quantization type ("int4", "int8", "float8", or None)
             enable_profiling: Enable profiling (currently unused)
@@ -123,16 +126,31 @@ class RuntimeConfig:
         # Resolution
         resolved_cache_dir = resolve_cache_dir(cache_dir)
 
-        # Resolve device
-        if device is None:
-            if torch.cuda.is_available():
-                resolved_device = torch.device("cuda:0")
-            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                resolved_device = torch.device("mps")
-            else:
-                resolved_device = torch.device("cpu")
+        # Resolve devices
+        resolved_devices: list[torch.device] = []
+        
+        if devices is not None:
+             resolved_devices = [torch.device(d) for d in devices]
+        elif device is not None:
+             resolved_devices = [torch.device(device)]
         else:
-            resolved_device = torch.device(device)
+            # Auto-detect if no devices provided
+            if torch.cuda.is_available():
+                resolved_devices = [torch.device("cuda:0")]
+            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                resolved_devices = [torch.device("mps")]
+            else:
+                resolved_devices = [torch.device("cpu")]
+        
+        # Adjust world_size if needed
+        if world_size > 1 and len(resolved_devices) != world_size:
+            # If we have a mismatch (e.g. only 1 device passed but world_size=2), 
+            # we should probably trust the devices list if it's explicit, 
+            # or fill with duplicates if it's single?
+            # For correctness in get_available_memory, we want distinct devices if possible.
+            # But if we assume 1 process per device, init_process will pass the full list.
+            # So if len != world_size, it's a potential config error or single-device emulation.
+            pass 
 
         # Resolve activation dtype
         resolved_activation_dtype = getattr(torch, activation_dtype, torch.bfloat16)
@@ -145,9 +163,6 @@ class RuntimeConfig:
                 f"Expected one of: 'int4', 'int8', 'float8', or None."
             )
 
-        # Calculate mem_utilization from gpu_mem_headroom if provided
-        mem_utilization = 1.0 - gpu_mem_headroom if gpu_mem_headroom else 0.9
-
         # Create the config instance
         return cls(
             model=model,
@@ -158,10 +173,9 @@ class RuntimeConfig:
             max_batch_tokens=max_batch_tokens,
             max_num_adapters=max_num_adapters,
             max_adapter_rank=max_adapter_rank,
-            max_num_kv_pages=max_num_kv_pages,
-            mem_utilization=mem_utilization,
-            devices=[resolved_device],
-            rank=0,
+            gpu_mem_utilization=gpu_mem_utilization,
+            devices=resolved_devices,
+            rank=rank,
             activation_dtype=resolved_activation_dtype,
             weight_dtype=weight_dtype,
         )

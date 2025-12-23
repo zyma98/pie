@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
+import torch.distributed as dist
 
 from .config import RuntimeConfig
 from .batching import BatchBuilder, Batch
@@ -396,25 +397,48 @@ class Runtime:
     # ========================================================================
 
     @torch.inference_mode()
-    def _execute_batch(self) -> list[message.ForwardPassResponse]:
+    def worker_loop(self):
         """
-        Execute the accumulated batch and return responses.
+        Worker loop for ranks > 0.
+        Waits for inputs from rank 0 and executes the model.
+        """
+        print(f"Worker {self.config.rank} started")
+        device = self.config.device
+        
+        while True:
+            # Wait for inputs
+            objects = [None, None]
+            dist.broadcast_object_list(objects, src=0)
+            inputs, sampling_metadata = objects
+            
+            if inputs == "STOP":
+                break
+                
+            if inputs is None:
+                continue
+
+            # Move inputs to device
+            inputs = {
+                k: (v.to(device) if isinstance(v, torch.Tensor) else v)
+                for k, v in inputs.items()
+            }
+            sampling_metadata = {
+                k: (v.to(device) if isinstance(v, torch.Tensor) else v)
+                for k, v in sampling_metadata.items()
+            }
+            
+            # Execute step
+            self._run_step(inputs, sampling_metadata)
+            
+        print(f"Worker {self.config.rank} finished")
+
+    def _run_step(self, inputs: dict, sampling_metadata: dict) -> list:
+        """
+        Execute a single inference step (Embed -> Transform -> Sample).
         
         Returns:
-            List of ForwardPassResponse for each request in the batch
+            Sampling results (only valid on Rank 0 usually, but we return whatever comes out)
         """
-        t_start = time.perf_counter()  
-        batch = self.batch_builder.build()
-        t_build = time.perf_counter()
-        device = self.config.device#[self.config.rank]
-
-        # 1. Prepare inputs using batch method
-        inputs = batch.get_model_inputs(device)
-        t_inputs = time.perf_counter()
-
-        if not inputs["token_ids"]:
-             return []
-
         # 2. Embed inputs
         input_embeds = self.engine.embed_inputs(inputs)
         
@@ -431,23 +455,66 @@ class Runtime:
             single_token_inference_mode=inputs["single_token_inference_mode"],
             adapter_subpass=inputs["adapter_subpass"],
         )
-        t_forward = time.perf_counter()
-
+        
         # 4. Sampling Pass
-        sampling_metadata = batch.get_sampling_metadata(device, self.config.activation_dtype)
+        # Pass hidden_states (replicated or sharded? Transform returns replicated in current llama3.py)
         sampling_results = self.engine.sample(hidden_states, sampling_metadata)
-        t_sampling = time.perf_counter()
+        
+        return sampling_results
 
-        # 4. Package responses
+    @torch.inference_mode()
+    def _execute_batch(self) -> list[message.ForwardPassResponse]:
+        """
+        Execute the accumulated batch and return responses.
+        
+        Returns:
+            List of ForwardPassResponse for each request in the batch
+        """
+        t_start = time.perf_counter()  
+        batch = self.batch_builder.build()
+        t_build = time.perf_counter()
+        device = self.config.device#[self.config.rank]
+
+        # 1. Prepare inputs using batch method
+        inputs = batch.get_model_inputs(device)
+        t_inputs = time.perf_counter()
+
+        # Handle empty batch
+        if not inputs["token_ids"]:
+             if self.config.world_size > 1:
+                  dist.broadcast_object_list([None, None], src=0)
+             return []
+
+        # Prepare sampling metadata
+        sampling_metadata = batch.get_sampling_metadata(device, self.config.activation_dtype)
+
+        # Broadcast if needed
+        if self.config.world_size > 1:
+            # Move to CPU for safe pickling/broadcasting
+            cpu_inputs = {
+                k: (v.cpu() if isinstance(v, torch.Tensor) else v)
+                for k, v in inputs.items()
+            }
+            cpu_sampling_metadata = {
+                k: (v.cpu() if isinstance(v, torch.Tensor) else v) 
+                for k, v in sampling_metadata.items()
+            }
+            dist.broadcast_object_list([cpu_inputs, cpu_sampling_metadata], src=0)
+
+        # Execute step
+        sampling_results = self._run_step(inputs, sampling_metadata)
+        
+        t_forward_sample = time.perf_counter() # merged timing for simplicity
+
+        # Package responses
         responses = batch.create_responses(sampling_results)
         t_package = time.perf_counter()
 
         print(f"Batch execution: {(t_package - t_start) * 1000:.2f} ms")
         print(f"  - Build: {(t_build - t_start) * 1000:.2f} ms")
         print(f"  - Inputs: {(t_inputs - t_build) * 1000:.2f} ms")
-        print(f"  - Forward: {(t_forward - t_inputs) * 1000:.2f} ms")
-        print(f"  - Sampling: {(t_sampling - t_forward) * 1000:.2f} ms")
-        print(f"  - Package: {(t_package - t_sampling) * 1000:.2f} ms")
+        print(f"  - Forward+Sample: {(t_forward_sample - t_inputs) * 1000:.2f} ms")
+        print(f"  - Package: {(t_package - t_forward_sample) * 1000:.2f} ms")
 
         return responses
 

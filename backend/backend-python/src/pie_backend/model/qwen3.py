@@ -153,7 +153,7 @@ class ModelConfig(ModelConfigBase):
             devices=runtime_config.devices,
             rank=runtime_config.rank,
         )
-        usable_bytes = available_bytes * runtime_config.mem_utilization
+        usable_bytes = available_bytes * runtime_config.gpu_mem_utilization
         element_size_bytes = torch.empty((), dtype=runtime_config.activation_dtype).element_size()
         total_bytes_per_page = (
             element_size_bytes
@@ -260,7 +260,16 @@ class ForwardPass:
             eps=self.model_config.rms_norm_eps,
         )
         # Project to vocab (weight-tied with embedding)
-        return fun.linear(normed, self.weights.get("embed_token"))
+        # Project to vocab (weight-tied with embedding)
+        logits = fun.linear(normed, self.weights.get("embed_token"))
+
+        # ALL-GATHER: Combine partial logits from all ranks (only if TP > 1)
+        if self.runtime_config.world_size > 1:
+            gathered_logits = [torch.empty_like(logits) for _ in range(self.runtime_config.world_size)]
+            dist.all_gather(gathered_logits, logits)
+            logits = torch.cat(gathered_logits, dim=-1)
+
+        return logits
 
     def mlp(self, hidden_states: torch.Tensor, layer_idx: int) -> torch.Tensor:
         """
@@ -546,14 +555,12 @@ def create_kv_cache(model_config: ModelConfig, runtime_config: RuntimeConfig) ->
     """Create KV cache tensors for all layers."""
     local_num_kv_heads = model_config.num_kv_heads // runtime_config.world_size
     
-    # Update runtime_config.max_num_kv_pages if not set
-    if runtime_config.max_num_kv_pages is None:
-        runtime_config.max_num_kv_pages = model_config.eval_max_num_kv_pages(runtime_config)
+    max_num_kv_pages = model_config.eval_max_num_kv_pages(runtime_config)
     
     return [
         torch.zeros(
             (
-                runtime_config.max_num_kv_pages,
+                max_num_kv_pages,
                 2,
                 runtime_config.kv_page_size,
                 local_num_kv_heads,

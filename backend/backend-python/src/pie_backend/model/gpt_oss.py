@@ -308,7 +308,7 @@ class ModelConfig(ModelConfigBase):
             devices=runtime_config.devices,
             rank=runtime_config.rank,
         )
-        usable_bytes = available_bytes * runtime_config.mem_utilization
+        usable_bytes = available_bytes * runtime_config.gpu_mem_utilization
         element_size_bytes = torch.empty((), dtype=runtime_config.activation_dtype).element_size()
         total_bytes_per_page = (
             element_size_bytes
@@ -738,13 +738,13 @@ class ForwardPass:
 
 def create_kv_cache(model_config: ModelConfig, runtime_config: RuntimeConfig) -> list[torch.Tensor]:
     """Create KV cache tensors for all layers."""
-    if runtime_config.max_num_kv_pages is None:
-        runtime_config.max_num_kv_pages = model_config.eval_max_num_kv_pages(runtime_config)
+    
+    max_num_kv_pages = model_config.eval_max_num_kv_pages(runtime_config)
     
     return [
         torch.zeros(
             (
-                runtime_config.max_num_kv_pages,
+                max_num_kv_pages,
                 2,
                 runtime_config.kv_page_size,
                 model_config.num_kv_heads,
