@@ -26,8 +26,7 @@ pip install -e ".[metal]"
 backend-python/
 ├── pyproject.toml       # Project configuration
 ├── src/
-│   ├── runtime.py       # Runtime module
-│   ├── server.py        # Server module
-│   └── flashinfer_metal/
-│       └── kernels/     # Metal kernel files
+│   └── pie_backend/
+│       ├── runtime.py   # Runtime module
+│       └── server.py    # Server module
 ```

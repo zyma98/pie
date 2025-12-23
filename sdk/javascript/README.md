@@ -4,7 +4,7 @@ JavaScript/TypeScript library for writing Pie inferlets.
 
 ## Quick Start with Examples
 
-See `example-apps-js/` for complete examples:
+See `../inferlet-examples/` for complete examples:
 
 - **text-completion-js** - Basic text generation with sampling
 - **beam-search-js** - Beam search decoding
@@ -12,7 +12,7 @@ See `example-apps-js/` for complete examples:
 Build and run an example:
 
 ```bash
-cd example-apps-js/text-completion-js
+cd ../inferlet-examples/text-completion-js
 pie-cli build . -o text-completion.wasm
 pie-cli submit text-completion.wasm -- --prompt "Hello"
 ```
