@@ -18,7 +18,7 @@ def main(
     max_adapter_rank: int = 8,
     max_num_kv_pages: int | None = None,
     gpu_mem_headroom: float | None = None,
-    device: str | None = None,
+    device: list[str] | str | None = None,
     activation_dtype: str = "bfloat16",
     weight_dtype: str | None = None,
     enable_profiling: bool = False,
@@ -44,7 +44,9 @@ def main(
         max_batch_tokens: Maximum number of tokens in a batch.
         max_num_adapters: Maximum number of adapters that can be loaded.
         max_adapter_rank: Maximum rank for any loaded adapter.
-        device: The device to run the model on (e.g., 'mps', 'cuda:0', 'cpu').
+        device: The device(s) to run the model on (e.g., 'mps', 'cuda:0', 'cpu',
+                or ['cuda:0', 'cuda:1'] for future multi-GPU support).
+                If a list is provided, only the first device is used for now.
         activation_dtype: The data type for activations (e.g., 'bfloat16', 'float16').
         weight_dtype: The data type for weights. If different from activation_dtype,
                       weights will be quantized. Options: 'int4', 'int8', 'float8'.
@@ -52,6 +54,9 @@ def main(
         enable_profiling: Enable unified profiler (timing + tensor tracking) (default: False).
         test: Run embedded test client after server starts (default: False).
     """
+    # For now, take the first device if a list is provided (future multi-GPU support)
+    if isinstance(device, list):
+        device = device[0] if device else None
 
     config = RuntimeConfig.from_args(
         model=model,

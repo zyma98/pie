@@ -107,7 +107,7 @@ class Runtime:
 
     def _init_adapter_states(self) -> None:
         """Initialize adapter memory tensors."""
-        device = self.config.device[0]
+        device = self.config.device
 
         self.adapter_at_layer = [
             (
