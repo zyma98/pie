@@ -80,5 +80,10 @@ def main(
     start_server(host=host, port=port, auth_token=internal_auth_token, service=service, run_tests=test)
 
 
-if __name__ == "__main__":
+
+def entrypoint():
     fire.Fire(main)
+
+
+if __name__ == "__main__":
+    entrypoint()

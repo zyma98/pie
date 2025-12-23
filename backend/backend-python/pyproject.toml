@@ -36,7 +36,7 @@ metal = [
 ]
 
 [project.scripts]
-pie-backend = "pie_backend.__main__:main"
+pie-backend = "pie_backend.__main__:entrypoint"
 
 [tool.setuptools]
 package-dir = { "" = "src" }

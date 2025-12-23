@@ -343,19 +343,16 @@ pub async fn terminate_engine_and_backend(
     for mut child in backend_processes {
         if let Some(pid) = child.id() {
             let pid = nix::unistd::Pid::from_raw(pid as i32);
-            println!("🔄 Terminating backend uv process with PID: {}", pid);
+            println!("🔄 Terminating backend process with PID: {}", pid);
 
-            // Send SIGTERM to the `uv` process. It will forward the signal to the backend process.
             if let Err(e) = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM) {
-                eprintln!("  Failed to send SIGTERM to uv process {}: {}", pid, e);
+                eprintln!("  Failed to send SIGTERM to backend process {}: {}", pid, e);
             }
 
-            // Wait for the `uv` process to exit. By the time it exits, the backend process will
-            // have been terminated.
             let exit_status = child.wait().await;
 
             if let Err(e) = exit_status {
-                eprintln!("  Error while waiting for uv process to exit: {}", e);
+                eprintln!("  Error while waiting for backend process to exit: {}", e);
             }
         }
     }
