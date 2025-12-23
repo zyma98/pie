@@ -1,6 +1,5 @@
-use inferlet::interface::{Adapter, Evolve};
 use inferlet::wstd::time::Duration;
-use inferlet::{self, Args, Result, bail};
+use inferlet::{self, Adapter, Args, Evolve, Result, bail};
 
 #[inferlet::main]
 async fn main(mut args: Args) -> Result<()> {

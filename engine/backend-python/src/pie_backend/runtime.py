@@ -146,12 +146,6 @@ class Runtime:
         self._init_adapter_states()
 
 
-    # For backward compatibility, expose forward_pass as alias to engine
-    @property
-    def forward_pass(self) -> llama3.ForwardPass:
-        """Backward compatibility alias for self.engine."""
-        return self.engine
-
     def _init_adapter_states(self) -> None:
         """Initialize adapter memory tensors."""
         device = self.config.device

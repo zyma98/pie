@@ -1,7 +1,6 @@
-use inferlet::interface::Adapter;
 use inferlet::wstd::time::Duration;
 use inferlet::{
-    self, Args, Blob, Result, get_auto_model, interface::Evolve, store_exists, store_set,
+    self, Adapter, Args, Blob, Evolve, Result, get_auto_model, store_exists, store_set,
 };
 
 #[inferlet::main]

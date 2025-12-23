@@ -1,8 +1,6 @@
 use futures::future::join_all;
-use inferlet::bindings::pie::inferlet::core::store_delete;
 use inferlet::stop_condition::{StopCondition, ends_with_any, max_len};
-use inferlet::interface::Adapter;
-use inferlet::{self, Args, Result, Sampler, bail, store_get, store_set};
+use inferlet::{self, Adapter, Args, Result, Sampler, bail, store_delete, store_get, store_set};
 use serde::Deserialize;
 use std::future::Future;
 use std::pin::Pin;
