@@ -4,15 +4,33 @@ Sanity check script for FlashInfer fused MoE with MXFP4 weights and BF16 activat
 This script tests our understanding of the FlashInfer `trtllm_fp4_block_scale_moe` function
 by comparing its output against a reference dequantized implementation.
 
-Based on the official FlashInfer tests:
+Based on the official FlashInfer unit tests:
 https://github.com/flashinfer-ai/flashinfer/blob/0e68a2febc58df99429f652769c5c485ca67fc39/tests/moe/test_trtllm_gen_fused_moe.py
+
+The main difference is that we added padding to the weights and added test cases that include
+gemm biases, which also need to be shuffled in the same pattern as the weight matrix rows.
+
+═══════════════════════════════════════════════════════════════════════════════
+                                   LICENSE
+═══════════════════════════════════════════════════════════════════════════════
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 """
 
 from __future__ import annotations
 
 from typing import Dict
 
-import pytest
 import torch
 from torch.nn import functional as F
 
@@ -20,12 +38,8 @@ from flashinfer import (
     e2m1_and_ufp8sf_scale_to_float,
     fp4_quantize,
 )
-from flashinfer.autotuner import autotune
 from flashinfer.fp4_quantization import block_scale_interleave
-from flashinfer.fused_moe import (
-    WeightLayout,
-    trtllm_fp4_block_scale_moe,
-)
+from flashinfer.fused_moe import trtllm_fp4_block_scale_moe
 from flashinfer.fused_moe.core import (
     get_w2_permute_indices_with_cache,
     _maybe_get_cached_w3_w1_permute_indices,
@@ -36,6 +50,9 @@ TUNE_MAX_NUM_TOKENS = 4096
 
 # Alignment requirement for trtllm_fp4_block_scale_moe
 ALIGNMENT = 256
+
+# Cache for permute indices used during swizzling
+CACHE_PERMUTE_INDICES: Dict[tuple, torch.Tensor] = {}
 
 
 # ====================================================================================
@@ -56,18 +73,18 @@ def pad_hidden_states(
 ) -> torch.Tensor:
     """
     Pad hidden states from [num_tokens, hidden_size] to [num_tokens, padded_hidden_size].
-    
+
     Args:
         hidden_states: Input tensor of shape [num_tokens, hidden_size]
         padded_hidden_size: Target hidden size (must be >= original hidden_size)
-    
+
     Returns:
         Padded tensor of shape [num_tokens, padded_hidden_size]
     """
     num_tokens, hidden_size = hidden_states.shape
     if hidden_size == padded_hidden_size:
         return hidden_states
-    
+
     padded = torch.zeros(
         (num_tokens, padded_hidden_size),
         dtype=hidden_states.dtype,
@@ -85,28 +102,35 @@ def pad_gate_up_weights(
     """
     Pad gate_up fused weights from [num_experts, 2*intermediate_size, hidden_size]
     to [num_experts, 2*padded_intermediate_size, padded_hidden_size].
-    
+
     IMPORTANT: The first half is the linear part, the second half is the gate part.
     We need to pad each part separately, NOT pad all at the end of the fused matrix.
-    
+
     Args:
         weights: Input tensor of shape [num_experts, 2*intermediate_size, hidden_size]
         padded_hidden_size: Target hidden size
         padded_intermediate_size: Target intermediate size
-    
+
     Returns:
         Padded tensor of shape [num_experts, 2*padded_intermediate_size, padded_hidden_size]
     """
     num_experts, fused_size, hidden_size = weights.shape
     intermediate_size = fused_size // 2
-    
-    if hidden_size == padded_hidden_size and intermediate_size == padded_intermediate_size:
+
+    if (
+        hidden_size == padded_hidden_size
+        and intermediate_size == padded_intermediate_size
+    ):
         return weights
-    
+
     # Split into linear and gate parts
-    linear_part = weights[:, :intermediate_size, :]  # [num_experts, intermediate_size, hidden_size]
-    gate_part = weights[:, intermediate_size:, :]    # [num_experts, intermediate_size, hidden_size]
-    
+    linear_part = weights[
+        :, :intermediate_size, :
+    ]  # [num_experts, intermediate_size, hidden_size]
+    gate_part = weights[
+        :, intermediate_size:, :
+    ]  # [num_experts, intermediate_size, hidden_size]
+
     # Pad each part separately
     padded_linear = torch.zeros(
         (num_experts, padded_intermediate_size, padded_hidden_size),
@@ -114,14 +138,14 @@ def pad_gate_up_weights(
         device=weights.device,
     )
     padded_linear[:, :intermediate_size, :hidden_size] = linear_part
-    
+
     padded_gate = torch.zeros(
         (num_experts, padded_intermediate_size, padded_hidden_size),
         dtype=weights.dtype,
         device=weights.device,
     )
     padded_gate[:, :intermediate_size, :hidden_size] = gate_part
-    
+
     # Concatenate back: [linear_padded | gate_padded]
     return torch.cat([padded_linear, padded_gate], dim=1)
 
@@ -134,20 +158,23 @@ def pad_down_weights(
     """
     Pad down projection weights from [num_experts, hidden_size, intermediate_size]
     to [num_experts, padded_hidden_size, padded_intermediate_size].
-    
+
     Args:
         weights: Input tensor of shape [num_experts, hidden_size, intermediate_size]
         padded_hidden_size: Target hidden size
         padded_intermediate_size: Target intermediate size
-    
+
     Returns:
         Padded tensor of shape [num_experts, padded_hidden_size, padded_intermediate_size]
     """
     num_experts, hidden_size, intermediate_size = weights.shape
-    
-    if hidden_size == padded_hidden_size and intermediate_size == padded_intermediate_size:
+
+    if (
+        hidden_size == padded_hidden_size
+        and intermediate_size == padded_intermediate_size
+    ):
         return weights
-    
+
     padded = torch.zeros(
         (num_experts, padded_hidden_size, padded_intermediate_size),
         dtype=weights.dtype,
@@ -164,26 +191,26 @@ def pad_gate_up_bias(
     """
     Pad gate_up bias from [num_experts, 2*intermediate_size]
     to [num_experts, 2*padded_intermediate_size].
-    
+
     IMPORTANT: Same as gate_up weights, pad each part separately.
-    
+
     Args:
         bias: Input tensor of shape [num_experts, 2*intermediate_size]
         padded_intermediate_size: Target intermediate size
-    
+
     Returns:
         Padded tensor of shape [num_experts, 2*padded_intermediate_size]
     """
     num_experts, fused_size = bias.shape
     intermediate_size = fused_size // 2
-    
+
     if intermediate_size == padded_intermediate_size:
         return bias
-    
+
     # Split into linear and gate parts
     linear_part = bias[:, :intermediate_size]  # [num_experts, intermediate_size]
-    gate_part = bias[:, intermediate_size:]    # [num_experts, intermediate_size]
-    
+    gate_part = bias[:, intermediate_size:]  # [num_experts, intermediate_size]
+
     # Pad each part separately
     padded_linear = torch.zeros(
         (num_experts, padded_intermediate_size),
@@ -191,14 +218,14 @@ def pad_gate_up_bias(
         device=bias.device,
     )
     padded_linear[:, :intermediate_size] = linear_part
-    
+
     padded_gate = torch.zeros(
         (num_experts, padded_intermediate_size),
         dtype=bias.dtype,
         device=bias.device,
     )
     padded_gate[:, :intermediate_size] = gate_part
-    
+
     # Concatenate back: [linear_padded | gate_padded]
     return torch.cat([padded_linear, padded_gate], dim=1)
 
@@ -210,19 +237,19 @@ def pad_down_bias(
     """
     Pad down projection bias from [num_experts, hidden_size]
     to [num_experts, padded_hidden_size].
-    
+
     Args:
         bias: Input tensor of shape [num_experts, hidden_size]
         padded_hidden_size: Target hidden size
-    
+
     Returns:
         Padded tensor of shape [num_experts, padded_hidden_size]
     """
     num_experts, hidden_size = bias.shape
-    
+
     if hidden_size == padded_hidden_size:
         return bias
-    
+
     padded = torch.zeros(
         (num_experts, padded_hidden_size),
         dtype=bias.dtype,
@@ -296,7 +323,7 @@ def dequant_mxfp4_batches(
 # ====================================================================================
 
 
-def routing_reference(expertLogits, topK, padding):
+def routing_reference(expertLogits, topK):
     """Reference routing implementation for permutation calculation."""
     originalDevice = expertLogits.device
     expertLogits = expertLogits.cpu()
@@ -318,13 +345,9 @@ def routing_reference(expertLogits, topK, padding):
 
     paddedTokensPerExpertPrefixSum = torch.zeros(numExperts + 1, dtype=torch.int64)
     for ii in range(numExperts):
-
-        def divUpMul(a, b):
-            return (a + b - 1) // b * b
-
-        paddedTokensPerExpertPrefixSum[ii + 1] = paddedTokensPerExpertPrefixSum[
-            ii
-        ] + divUpMul(numTokensPerExpert[ii], padding)
+        paddedTokensPerExpertPrefixSum[ii + 1] = (
+            paddedTokensPerExpertPrefixSum[ii] + numTokensPerExpert[ii]
+        )
     permutedBufferSize = paddedTokensPerExpertPrefixSum[numExperts]
 
     expandedTokenIdxToPermutedIdx = -torch.ones(numTokens * topK, dtype=torch.int64)
@@ -358,7 +381,7 @@ def routing_reference(expertLogits, topK, padding):
     }
 
 
-def routing_reference_renormalize(expert_logits, top_k, num_experts, padding):
+def routing_reference_renormalize(expert_logits, top_k, num_experts):
     """TopK -> Softmax routing reference."""
     topk_values, topk_idx = torch.topk(expert_logits, k=top_k, dim=-1)
     topk_values = torch.nn.functional.softmax(topk_values.float(), dim=-1)
@@ -370,7 +393,7 @@ def routing_reference_renormalize(expert_logits, top_k, num_experts, padding):
     for i in range(topk_idx.shape[0]):
         for j in range(topk_idx.shape[1]):
             scores[i, topk_idx[i, j]] = topk_values[i, j]
-    permute_info = routing_reference(scores, top_k, padding)
+    permute_info = routing_reference(scores, top_k)
     return permute_info, scores
 
 
@@ -385,7 +408,6 @@ def run_moe_dequant(
     hidden_size,
     intermediate_size,
     top_k,
-    padding,
     hidden_states,
     gemm1_weights,
     gemm2_weights,
@@ -399,9 +421,7 @@ def run_moe_dequant(
     """Common dequantized MoE reference implementation."""
     # Permute
     total_num_padded_tokens = permute_info["permutedBufferSize"]
-    expanded_idx_to_permuted_idx = permute_info[
-        "expandedTokenIdxToPermutedIdx"
-    ].cpu()
+    expanded_idx_to_permuted_idx = permute_info["expandedTokenIdxToPermutedIdx"].cpu()
     num_tokens_per_expert = permute_info["numTokensPerExpert"].cpu()
     permute_output = torch.full(
         (total_num_padded_tokens, hidden_size), float("nan"), device="cuda"
@@ -430,7 +450,6 @@ def run_moe_dequant(
             my_c = my_c + gemm1_bias[expert_idx]
         gemm1_output[i : i + my_num_tokens] = my_c
         i += my_num_tokens
-        i = (i + padding - 1) // padding * padding
 
     # Activation
     activation_output = torch.full(
@@ -472,7 +491,6 @@ def run_moe_dequant(
 
         activation_output[i : i + my_num_tokens] = gated_output * linear_output
         i += my_num_tokens
-        i = (i + padding - 1) // padding * padding
 
     # For MxFP4xBf16, just convert activation to bf16 and back
     activation_output = activation_output.to(torch.bfloat16).to(torch.float)
@@ -494,7 +512,6 @@ def run_moe_dequant(
             my_c = my_c + gemm2_bias[expert_idx]
         gemm2_output[i : i + my_num_tokens] = my_c
         i += my_num_tokens
-        i = (i + padding - 1) // padding * padding
 
     # Finalize
     expert_weight = permute_info["topKLogits"].to(torch.float)
@@ -507,9 +524,7 @@ def run_moe_dequant(
             expanded_idx = i * top_k + top_k_idx
             permuted_idx = expanded_idx_to_permuted_idx[expanded_idx]
             original_vector = gemm2_output[permuted_idx]
-            weight = (
-                expert_weight[i, top_k_idx]
-            )
+            weight = expert_weight[i, top_k_idx]
             acc += original_vector * weight
         finalize_output[i] = acc
     return finalize_output
@@ -521,12 +536,9 @@ def run_moe_reference_fp4_bf16(
     hidden_size,
     intermediate_size,
     top_k,
-    padding,
     hidden_states,
     gemm1_weights,
-    gemm1_scales,
     gemm2_weights,
-    gemm2_scales,
     permute_info,
     gemm1_bias=None,
     gemm2_bias=None,
@@ -539,15 +551,19 @@ def run_moe_reference_fp4_bf16(
     # Hidden states are already BF16, just convert to float for reference
     hidden_states_dequant = hidden_states.to(torch.bfloat16).to(torch.float)
 
+    # Quantize and dequantize weights to simulate FP4 quantization error
+    gemm1_weights_quant, gemm1_scales = quant_mxfp4_batches(gemm1_weights, True)
+    gemm2_weights_quant, gemm2_scales = quant_mxfp4_batches(gemm2_weights, True)
+
     gemm1_weights_dequant = dequant_mxfp4_batches(
-        gemm1_weights,
+        gemm1_weights_quant,
         gemm1_scales,
         torch.full((num_experts,), 1.0, device="cuda"),
         is_sf_swizzled_layout=True,
     ).cuda()
 
     gemm2_weights_dequant = dequant_mxfp4_batches(
-        gemm2_weights,
+        gemm2_weights_quant,
         gemm2_scales,
         torch.full((num_experts,), 1.0, device="cuda"),
         is_sf_swizzled_layout=True,
@@ -559,7 +575,6 @@ def run_moe_reference_fp4_bf16(
         hidden_size,
         intermediate_size,
         top_k,
-        padding,
         hidden_states_dequant,
         gemm1_weights_dequant,
         gemm2_weights_dequant,
@@ -577,237 +592,174 @@ def run_moe_reference_fp4_bf16(
 # ====================================================================================
 
 
-class FP4Moe:
+def prepare_static_weights_for_kernel(
+    gemm1_weights_padded,
+    gemm2_weights_padded,
+    padded_hidden_size,
+    padded_intermediate_size,
+    num_experts,
+    gemm1_bias_padded=None,
+    gemm2_bias_padded=None,
+):
+    """Prepare quantized weights for kernel (done offline with weights).
+
+    Args:
+        gemm1_weights_padded: Original padded gate_up weights (for scale calculation)
+        gemm2_weights_padded: Original padded down weights (for scale calculation)
+        padded_hidden_size: Padded hidden size (must be multiple of 256)
+        padded_intermediate_size: Padded intermediate size (must be multiple of 256)
+        num_experts: Number of experts
+        gemm1_bias_padded: Optional padded gate_up bias [num_experts, 2*padded_intermediate_size]
+        gemm2_bias_padded: Optional padded down bias [num_experts, padded_hidden_size]
+
+    Returns:
+        Tuple of (gemm1_weights_shuffled, gemm1_scales_shuffled,
+                    gemm2_weights_shuffled, gemm2_scales_shuffled,
+                    gemm1_bias_shuffled, gemm2_bias_shuffled)
     """
-    FP4 MxFP4 MoE implementation with block scaling and BF16 activation.
-    """
+    epilogue_tile_m = 128
 
-    def __init__(self):
-        self._cache_permute_indices: Dict[tuple, torch.Tensor] = {}
+    # Quantize padded weights
+    gemm1_weights_quant_padded, _ = quant_mxfp4_batches(gemm1_weights_padded, True)
+    gemm2_weights_quant_padded, _ = quant_mxfp4_batches(gemm2_weights_padded, True)
 
-    def quantize_weights(self, gemm1_weights, gemm2_weights):
-        """Quantize weights to FP4 format.
-        
-        Returns:
-            Tuple of (gemm1_weights_fp4, gemm1_scales, gemm2_weights_fp4, gemm2_scales)
-        """
+    # Quantize weights with linear layout for kernels
+    _, gemm1_scales_linear_fp4_bytes = quant_mxfp4_batches(gemm1_weights_padded, False)
+    _, gemm2_scales_linear_fp4_bytes = quant_mxfp4_batches(gemm2_weights_padded, False)
 
-        # Quantize the weights for FC1
-        gemm1_weights_fp4_bytes, gemm1_scales_fp4_bytes = (
-            quant_mxfp4_batches(gemm1_weights, True)
+    # Convert quantized weights to proper formats
+    gemm1_weights_fp4 = gemm1_weights_quant_padded.view(torch.float8_e4m3fn).reshape(
+        num_experts, 2 * padded_intermediate_size, padded_hidden_size // 2
+    )  # packed fp4
+    gemm1_scales_linear_fp4 = gemm1_scales_linear_fp4_bytes.view(
+        torch.float8_e4m3fn
+    ).reshape(
+        num_experts, 2 * padded_intermediate_size, padded_hidden_size // 32
+    )  # fp8 scaling factors
+
+    gemm2_weights_fp4 = gemm2_weights_quant_padded.view(torch.float8_e4m3fn).reshape(
+        num_experts, padded_hidden_size, padded_intermediate_size // 2
+    )  # packed fp4
+    gemm2_scales_linear_fp4 = gemm2_scales_linear_fp4_bytes.view(
+        torch.float8_e4m3fn
+    ).reshape(
+        num_experts, padded_hidden_size, padded_intermediate_size // 32
+    )  # fp8 scaling factors
+
+    # Using cached permute index calculation can speed up weights preprocessing
+    gemm1_weights_fp4_shuffled = []
+    gemm1_scales_fp4_shuffled = []
+    gemm1_bias_shuffled_list = []
+    gemm2_weights_fp4_shuffled = []
+    gemm2_scales_fp4_shuffled = []
+    gemm2_bias_shuffled_list = []
+
+    for i in range(num_experts):
+        # Calculate the permute indices for the following:
+        # 1. Reorder rows of W1 and scales for fused gated activation
+        # 2. Shuffle weights and scaling factors for transposed mma output
+        # for both w3_w1 and w2 weights and scale factors
+        permute_indices = _maybe_get_cached_w3_w1_permute_indices(
+            CACHE_PERMUTE_INDICES,
+            gemm1_weights_fp4[i].view(torch.uint8),
+            epilogue_tile_m,
+        )
+        gemm1_weights_fp4_shuffled.append(
+            gemm1_weights_fp4[i]
+            .view(torch.uint8)[permute_indices.to(gemm1_weights_fp4.device)]
+            .contiguous()
         )
 
-        # Quantize the weights for FC2
-        gemm2_weights_fp4_bytes, gemm2_scales_fp4_bytes = (
-            quant_mxfp4_batches(gemm2_weights, True)
-        )
-
-        return (
-            gemm1_weights_fp4_bytes,
-            gemm1_scales_fp4_bytes,
-            gemm2_weights_fp4_bytes,
-            gemm2_scales_fp4_bytes,
-        )
-
-    def prepare_static_weights_for_kernel(
-        self,
-        gemm1_weights_quant_padded,
-        gemm2_weights_quant_padded,
-        gemm1_weights_padded,
-        gemm2_weights_padded,
-        padded_hidden_size,
-        padded_intermediate_size,
-        num_experts,
-    ):
-        """Prepare quantized weights for kernel (done offline with weights).
-        
-        Args:
-            gemm1_weights_quant_padded: Quantized gate_up weights (already padded)
-            gemm2_weights_quant_padded: Quantized down weights (already padded)
-            gemm1_weights_padded: Original padded gate_up weights (for scale calculation)
-            gemm2_weights_padded: Original padded down weights (for scale calculation)
-            padded_hidden_size: Padded hidden size (must be multiple of 256)
-            padded_intermediate_size: Padded intermediate size (must be multiple of 256)
-            num_experts: Number of experts
-        """
-        epilogue_tile_m = 128  # FIXME: this depends on the kernel internals
-
-        # Quantize weights with linear layout for kernels
-        _, gemm1_scales_linear_fp4_bytes = quant_mxfp4_batches(
-            gemm1_weights_padded, False
-        )
-        _, gemm2_scales_linear_fp4_bytes = quant_mxfp4_batches(
-            gemm2_weights_padded, False
-        )
-
-        # Convert quantized weights to proper formats
-        gemm1_weights_fp4 = gemm1_weights_quant_padded.view(torch.float8_e4m3fn).reshape(
-            num_experts, 2 * padded_intermediate_size, padded_hidden_size // 2
-        )  # packed fp4
-        gemm1_scales_linear_fp4 = gemm1_scales_linear_fp4_bytes.view(
-            torch.float8_e4m3fn
-        ).reshape(
-            num_experts, 2 * padded_intermediate_size, padded_hidden_size // 32
-        )  # fp8 scaling factors
-
-        gemm2_weights_fp4 = gemm2_weights_quant_padded.view(torch.float8_e4m3fn).reshape(
-            num_experts, padded_hidden_size, padded_intermediate_size // 2
-        )  # packed fp4
-        gemm2_scales_linear_fp4 = gemm2_scales_linear_fp4_bytes.view(
-            torch.float8_e4m3fn
-        ).reshape(
-            num_experts, padded_hidden_size, padded_intermediate_size // 32
-        )  # fp8 scaling factors
-
-        # Using cached permute index calculation can speed up weights preprocessing
-        gemm1_weights_fp4_shuffled = []
-        gemm1_scales_fp4_shuffled = []
-        gemm2_weights_fp4_shuffled = []
-        gemm2_scales_fp4_shuffled = []
-        for i in range(num_experts):
-            # Calculate the permute indices for the following:
-            # 1. Reorder rows of W1 and scales for fused gated activation
-            # 2. Shuffle weights and scaling factors for transposed mma output
-            # for both w3_w1 and w2 weights and scale factors
-            permute_indices = _maybe_get_cached_w3_w1_permute_indices(
-                self._cache_permute_indices,
-                gemm1_weights_fp4[i].view(torch.uint8),
-                epilogue_tile_m,
+        # Shuffle gemm1 bias using row permutation derived from weight permutation
+        if gemm1_bias_padded is not None:
+            gemm1_bias_shuffled_list.append(
+                gemm1_bias_padded[i][
+                    permute_indices.to(gemm1_bias_padded.device)
+                ].contiguous()
             )
-            gemm1_weights_fp4_shuffled.append(
-                gemm1_weights_fp4[i]
-                .view(torch.uint8)[permute_indices.to(gemm1_weights_fp4.device)]
+
+        permute_sf_indices = _maybe_get_cached_w3_w1_permute_indices(
+            CACHE_PERMUTE_INDICES,
+            gemm1_scales_linear_fp4[i].view(torch.uint8),
+            epilogue_tile_m,
+            num_elts_per_sf=16,
+        )
+        gemm1_scales_fp4_shuffled.append(
+            block_scale_interleave(
+                gemm1_scales_linear_fp4[i]
+                .view(torch.uint8)[
+                    permute_sf_indices.to(gemm1_scales_linear_fp4.device)
+                ]
                 .contiguous()
             )
+        )
 
-            permute_sf_indices = _maybe_get_cached_w3_w1_permute_indices(
-                self._cache_permute_indices,
-                gemm1_scales_linear_fp4[i].view(torch.uint8),
-                epilogue_tile_m,
-                num_elts_per_sf=16,
-            )
-            gemm1_scales_fp4_shuffled.append(
-                block_scale_interleave(
-                    gemm1_scales_linear_fp4[i]
-                    .view(torch.uint8)[
-                        permute_sf_indices.to(gemm1_scales_linear_fp4.device)
-                    ]
-                    .contiguous()
-                )
+        permute_indices = get_w2_permute_indices_with_cache(
+            CACHE_PERMUTE_INDICES,
+            gemm2_weights_fp4[i].view(torch.uint8),
+            epilogue_tile_m,
+        )
+        gemm2_weights_fp4_shuffled.append(
+            gemm2_weights_fp4[i]
+            .view(torch.uint8)[permute_indices.to(gemm2_weights_fp4.device)]
+            .contiguous()
+        )
+
+        # Shuffle gemm2 bias using row permutation derived from weight permutation
+        if gemm2_bias_padded is not None:
+            gemm2_bias_shuffled_list.append(
+                gemm2_bias_padded[i][
+                    permute_indices.to(gemm2_bias_padded.device)
+                ].contiguous()
             )
 
-            permute_indices = get_w2_permute_indices_with_cache(
-                self._cache_permute_indices,
-                gemm2_weights_fp4[i].view(torch.uint8),
-                epilogue_tile_m,
-            )
-            gemm2_weights_fp4_shuffled.append(
-                gemm2_weights_fp4[i]
-                .view(torch.uint8)[permute_indices.to(gemm2_weights_fp4.device)]
+        permute_sf_indices = get_w2_permute_indices_with_cache(
+            CACHE_PERMUTE_INDICES,
+            gemm2_scales_linear_fp4[i].view(torch.uint8),
+            epilogue_tile_m,
+            num_elts_per_sf=16,
+        )
+        gemm2_scales_fp4_shuffled.append(
+            block_scale_interleave(
+                gemm2_scales_linear_fp4[i]
+                .view(torch.uint8)[
+                    permute_sf_indices.to(gemm2_scales_linear_fp4.device)
+                ]
                 .contiguous()
             )
-
-            permute_sf_indices = get_w2_permute_indices_with_cache(
-                self._cache_permute_indices,
-                gemm2_scales_linear_fp4[i].view(torch.uint8),
-                epilogue_tile_m,
-                num_elts_per_sf=16,
-            )
-            gemm2_scales_fp4_shuffled.append(
-                block_scale_interleave(
-                    gemm2_scales_linear_fp4[i]
-                    .view(torch.uint8)[
-                        permute_sf_indices.to(gemm2_scales_linear_fp4.device)
-                    ]
-                    .contiguous()
-                )
-            )
-
-        # Stack weights for all experts
-        gemm1_weights_fp4_shuffled = torch.stack(gemm1_weights_fp4_shuffled)
-        gemm1_scales_fp4_shuffled = (
-            torch.stack(gemm1_scales_fp4_shuffled)
-            .view(torch.float8_e4m3fn)
-            .reshape(
-                num_experts, 2 * padded_intermediate_size, padded_hidden_size // 32
-            )
         )
 
-        gemm2_weights_fp4_shuffled = torch.stack(gemm2_weights_fp4_shuffled)
-        gemm2_scales_fp4_shuffled = (
-            torch.stack(gemm2_scales_fp4_shuffled)
-            .view(torch.float8_e4m3fn)
-            .reshape(num_experts, padded_hidden_size, padded_intermediate_size // 32)
-        )
+    # Stack weights for all experts
+    gemm1_weights_fp4_shuffled = torch.stack(gemm1_weights_fp4_shuffled)
+    gemm1_scales_fp4_shuffled = (
+        torch.stack(gemm1_scales_fp4_shuffled)
+        .view(torch.float8_e4m3fn)
+        .reshape(num_experts, 2 * padded_intermediate_size, padded_hidden_size // 32)
+    )
 
-        return (
-            gemm1_weights_fp4_shuffled,
-            gemm1_scales_fp4_shuffled,
-            gemm2_weights_fp4_shuffled,
-            gemm2_scales_fp4_shuffled,
-        )
+    gemm2_weights_fp4_shuffled = torch.stack(gemm2_weights_fp4_shuffled)
+    gemm2_scales_fp4_shuffled = (
+        torch.stack(gemm2_scales_fp4_shuffled)
+        .view(torch.float8_e4m3fn)
+        .reshape(num_experts, padded_hidden_size, padded_intermediate_size // 32)
+    )
 
-    def call_moe(
-        self,
-        gemm1_weights_shuffled,
-        gemm1_scales_shuffled,
-        gemm2_weights_shuffled,
-        gemm2_scales_shuffled,
-        hidden_states_orig,
-        expert_logits,
-        num_experts,
-        top_k,
-        intermediate_size,
-        gemm1_bias=None,
-        gemm2_bias=None,
-        gemm1_alpha=None,
-        gemm1_beta=None,
-        gemm1_clamp_limit=None,
-    ):
-        """Call the FlashInfer fused MoE kernel."""
-        # BF16 hidden states
-        hidden_states_bf16 = hidden_states_orig.to(torch.bfloat16)
+    # Stack bias tensors if provided
+    gemm1_bias_shuffled = None
+    gemm2_bias_shuffled = None
+    if gemm1_bias_padded is not None:
+        gemm1_bias_shuffled = torch.stack(gemm1_bias_shuffled_list)
+    if gemm2_bias_padded is not None:
+        gemm2_bias_shuffled = torch.stack(gemm2_bias_shuffled_list)
 
-        with autotune(True):
-            output = trtllm_fp4_block_scale_moe(
-                routing_logits=expert_logits,
-                routing_bias=None,
-                hidden_states=hidden_states_bf16,
-                hidden_states_scale=None,  # BF16 doesn't need scale
-                gemm1_weights=gemm1_weights_shuffled,
-                gemm1_weights_scale=gemm1_scales_shuffled,
-                gemm1_bias=gemm1_bias,
-                gemm1_alpha=gemm1_alpha,
-                gemm1_beta=gemm1_beta,
-                gemm1_clamp_limit=gemm1_clamp_limit,
-                gemm2_weights=gemm2_weights_shuffled,
-                gemm2_weights_scale=gemm2_scales_shuffled,
-                gemm2_bias=gemm2_bias,
-                output1_scale_scalar=torch.full((num_experts,), 1.0, device="cuda"),
-                output1_scale_gate_scalar=torch.full((num_experts,), 1.0, device="cuda"),
-                output2_scale_scalar=torch.full((num_experts,), 1.0, device="cuda"),
-                num_experts=num_experts,
-                top_k=top_k,
-                n_group=None,
-                topk_group=None,
-                intermediate_size=intermediate_size,
-                local_expert_offset=0,
-                local_num_experts=num_experts,
-                routed_scaling_factor=None,
-                tile_tokens_dim=None,
-                routing_method_type=1, # 1: Renormalize (TopK -> Softmax)
-                gated_act_type=0, # 0: SwiGlu 
-                do_finalize=True,
-                tune_max_num_tokens=TUNE_MAX_NUM_TOKENS,
-            )
-        # Handle different return types (tuple, list, or tensor)
-        if isinstance(output, (tuple, list)):
-            return output[0].to(torch.float)
-        return output.to(torch.float)
-
-    def get_tolerances(self):
-        """Get FP4-specific accuracy tolerances."""
-        return {"atol": 0.1, "rtol": 0.85, "percent": 0.925}
+    return (
+        gemm1_weights_fp4_shuffled,
+        gemm1_scales_fp4_shuffled,
+        gemm2_weights_fp4_shuffled,
+        gemm2_scales_fp4_shuffled,
+        gemm1_bias_shuffled,
+        gemm2_bias_shuffled,
+    )
 
 
 # ====================================================================================
@@ -843,12 +795,11 @@ def check_accuracy(a, b, atol, rtol, percent):
 
 
 def run_moe_test(
-    num_tokens: int = 128,
-    hidden_size: int = 1024,
-    intermediate_size: int = 1024,
-    num_experts: int = 128,
-    top_k: int = 8,
-    padding: int = 8,
+    num_tokens: int,
+    hidden_size: int,
+    intermediate_size: int,
+    num_experts: int,
+    top_k: int,
     use_gemm_bias: bool = False,
     gemm1_alpha_value: float | None = None,
     gemm1_beta_value: float | None = None,
@@ -859,7 +810,7 @@ def run_moe_test(
 
     This test handles padding for trtllm_fp4_block_scale_moe which requires
     hidden_size and intermediate_size to be multiples of 256.
-    
+
     - Reference implementation uses original (unpadded) dimensions
     - FlashInfer kernel uses padded dimensions
     - Output is stripped of padding before comparison
@@ -870,7 +821,6 @@ def run_moe_test(
         intermediate_size: Intermediate (FFN) dimension size (will be padded to multiple of 256 for kernel)
         num_experts: Number of experts in MoE
         top_k: Number of experts selected per token
-        padding: Padding for expert token counts
         use_gemm_bias: Whether to use bias for GEMM1 and GEMM2
         gemm1_alpha_value: If provided, sets the swiglu alpha for all experts (float32)
         gemm1_beta_value: If provided, sets the linear offset (e.g., +1 in GPT OSS)
@@ -880,7 +830,6 @@ def run_moe_test(
     padded_hidden_size = pad_to_multiple(hidden_size, ALIGNMENT)
     padded_intermediate_size = pad_to_multiple(intermediate_size, ALIGNMENT)
 
-
     print(f"\n{'='*70}")
     print(f"Testing MxFP4 x BF16 Fused MoE")
     print(f"  num_tokens={num_tokens}, hidden_size={hidden_size}")
@@ -888,17 +837,19 @@ def run_moe_test(
     print(f"  top_k={top_k}")
     print(f"  use_gemm_bias={use_gemm_bias}, alpha={gemm1_alpha_value}")
     print(f"  beta={gemm1_beta_value}, clamp_limit={gemm1_clamp_limit_value}")
-    print(f"  [PADDING] hidden: {hidden_size} -> {padded_hidden_size}, "
-            f"intermediate: {intermediate_size} -> {padded_intermediate_size}")
+    print(
+        f"  [PADDING] hidden: {hidden_size} -> {padded_hidden_size}, "
+        f"intermediate: {intermediate_size} -> {padded_intermediate_size}"
+    )
     print(f"{'='*70}")
 
     torch.cuda.synchronize()
     torch.random.manual_seed(0)
 
-    moe_impl = FP4Moe()
-
     # Validation checks
-    assert top_k <= num_experts, f"top_k ({top_k}) must be <= num_experts ({num_experts})"
+    assert (
+        top_k <= num_experts
+    ), f"top_k ({top_k}) must be <= num_experts ({num_experts})"
     assert top_k <= 10, "top_k must be <= 10"
 
     # Create test data with ORIGINAL (unpadded) dimensions
@@ -941,7 +892,6 @@ def run_moe_test(
     # Create alpha tensor if enabled
     # Shape: [num_experts], dtype: float32
     # Alpha scales the input to sigmoid in SwiGLU: x * sigmoid(alpha * x)
-    # Standard SwiGLU uses alpha=1.0, GPT OSS uses alpha=1.702
     if gemm1_alpha_value is not None:
         gemm1_alpha = torch.full(
             (num_experts,),
@@ -955,7 +905,6 @@ def run_moe_test(
     # Create beta tensor if enabled
     # Shape: [num_experts], dtype: float32
     # Beta is the offset added to the linear part: out_glu * (x_linear + beta)
-    # GPT OSS uses beta=1.0
     if gemm1_beta_value is not None:
         gemm1_beta = torch.full(
             (num_experts,),
@@ -979,40 +928,27 @@ def run_moe_test(
     else:
         gemm1_clamp_limit = None
 
-    permute_info, scores = routing_reference_renormalize(
-        expert_logits, top_k, num_experts, padding
+    permute_info, _ = routing_reference_renormalize(
+        expert_logits,
+        top_k,
+        num_experts,
     )
 
     # ===========================================================================
     # REFERENCE: Use original (unpadded) weights and activations
     # ===========================================================================
 
-    # 1. Quantize original weights for reference
-    print("Quantizing weights for reference...")
-    (
-        gemm1_weights_quant,
-        gemm1_scales_quant,
-        gemm2_weights_quant,
-        gemm2_scales_quant,
-    ) = moe_impl.quantize_weights(gemm1_weights, gemm2_weights)
-
-    # 2. Convert hidden states to BF16
-    hidden_states_bf16 = hidden_states.to(torch.bfloat16)
-
     # Compute reference output with original dimensions
-    print("Computing reference output (unpadded)...")
+    print("Computing reference output ...")
     output_reference = run_moe_reference_fp4_bf16(
         num_tokens,
         num_experts,
         hidden_size,
         intermediate_size,
         top_k,
-        padding,
-        hidden_states_bf16,
-        gemm1_weights_quant,
-        gemm1_scales_quant,
-        gemm2_weights_quant,
-        gemm2_scales_quant,
+        hidden_states.to(torch.bfloat16),
+        gemm1_weights,
+        gemm2_weights,
         permute_info,
         gemm1_bias=gemm1_bias,
         gemm2_bias=gemm2_bias,
@@ -1037,14 +973,13 @@ def run_moe_test(
         gemm2_weights, padded_hidden_size, padded_intermediate_size
     )
 
-    # 4. Quantize padded weights for kernel
-    print("Quantizing padded weights for kernel...")
-    (
-        gemm1_weights_quant_padded,
-        _,
-        gemm2_weights_quant_padded,
-        _,
-    ) = moe_impl.quantize_weights(gemm1_weights_padded, gemm2_weights_padded)
+    # 4. Pad bias tensors for kernel (if provided)
+    gemm1_bias_padded = None
+    gemm2_bias_padded = None
+    if gemm1_bias is not None:
+        gemm1_bias_padded = pad_gate_up_bias(gemm1_bias, padded_intermediate_size)
+    if gemm2_bias is not None:
+        gemm2_bias_padded = pad_down_bias(gemm2_bias, padded_hidden_size)
 
     # 5. Prepare static weights for kernel with padded dimensions
     print("Preparing padded weights for kernel...")
@@ -1053,45 +988,59 @@ def run_moe_test(
         gemm1_scales_shuffled,
         gemm2_weights_shuffled,
         gemm2_scales_shuffled,
-    ) = moe_impl.prepare_static_weights_for_kernel(
-        gemm1_weights_quant_padded,
-        gemm2_weights_quant_padded,
+        gemm1_bias_shuffled,
+        gemm2_bias_shuffled,
+    ) = prepare_static_weights_for_kernel(
         gemm1_weights_padded,
         gemm2_weights_padded,
         padded_hidden_size,
         padded_intermediate_size,
         num_experts,
+        gemm1_bias_padded,
+        gemm2_bias_padded,
     )
 
-    # 6. Pad hidden states for kernel
+    # 7. Pad hidden states for kernel
     hidden_states_padded = pad_hidden_states(hidden_states, padded_hidden_size)
 
-    # 7. Pad bias tensors for kernel (if provided)
-    gemm1_bias_padded = None
-    gemm2_bias_padded = None
-    if gemm1_bias is not None:
-        gemm1_bias_padded = pad_gate_up_bias(gemm1_bias, padded_intermediate_size)
-    if gemm2_bias is not None:
-        gemm2_bias_padded = pad_down_bias(gemm2_bias, padded_hidden_size)
-
     # Compute actual output using FlashInfer kernel with padded data
-    print("Computing FlashInfer kernel output (padded)...")
-    output_actual_padded = moe_impl.call_moe(
-        gemm1_weights_shuffled,
-        gemm1_scales_shuffled,
-        gemm2_weights_shuffled,
-        gemm2_scales_shuffled,
-        hidden_states_padded,
-        expert_logits=expert_logits,
-        num_experts=num_experts,
-        top_k=top_k,
-        intermediate_size=padded_intermediate_size,
-        gemm1_bias=gemm1_bias_padded,
-        gemm2_bias=gemm2_bias_padded,
+    print("Computing FlashInfer kernel output...")
+
+    # BF16 hidden states
+    hidden_states_bf16 = hidden_states_padded.to(torch.bfloat16)
+
+    output = trtllm_fp4_block_scale_moe(
+        routing_logits=expert_logits,
+        routing_bias=None,
+        hidden_states=hidden_states_bf16,
+        hidden_states_scale=None,  # BF16 doesn't need scale
+        gemm1_weights=gemm1_weights_shuffled,
+        gemm1_weights_scale=gemm1_scales_shuffled,
+        gemm1_bias=gemm1_bias_shuffled,
         gemm1_alpha=gemm1_alpha,
         gemm1_beta=gemm1_beta,
         gemm1_clamp_limit=gemm1_clamp_limit,
+        gemm2_weights=gemm2_weights_shuffled,
+        gemm2_weights_scale=gemm2_scales_shuffled,
+        gemm2_bias=gemm2_bias_shuffled,
+        output1_scale_scalar=torch.full((num_experts,), 1.0, device="cuda"),
+        output1_scale_gate_scalar=torch.full((num_experts,), 1.0, device="cuda"),
+        output2_scale_scalar=torch.full((num_experts,), 1.0, device="cuda"),
+        num_experts=num_experts,
+        top_k=top_k,
+        n_group=None,
+        topk_group=None,
+        intermediate_size=padded_intermediate_size,
+        local_expert_offset=0,
+        local_num_experts=num_experts,
+        routed_scaling_factor=None,
+        tile_tokens_dim=None,
+        routing_method_type=1,  # 1: Renormalize (TopK -> Softmax)
+        gated_act_type=0,  # 0: SwiGlu
+        do_finalize=True,
     )
+
+    output_actual_padded = output[0].to(torch.float)
 
     # 8. Strip padding from kernel output
     # Output shape is [num_tokens, padded_hidden_size], we need [num_tokens, hidden_size]
@@ -1099,17 +1048,9 @@ def run_moe_test(
 
     # Compare outputs
     print("Checking accuracy...")
-    tolerances = moe_impl.get_tolerances()
-    check_accuracy(
-        output_reference,
-        output_actual,
-        atol=tolerances["atol"],
-        rtol=tolerances["rtol"],
-        percent=tolerances["percent"],
-    )
+    check_accuracy(output_reference, output_actual, atol=0.1, rtol=0.85, percent=0.99)
 
     print(f"✓ Test PASSED!")
-    return True
 
 
 # ====================================================================================
@@ -1123,14 +1064,13 @@ if __name__ == "__main__":
     print("=" * 70)
 
     try:
-        # Test 1: Basic Renormalize routing (Qwen3-style) - no bias
+        # Test 1: Basic Renormalize routing - no bias
         run_moe_test(
             num_tokens=128,
             hidden_size=1024,
             intermediate_size=1024,
             num_experts=128,
             top_k=8,
-            padding=8,
             use_gemm_bias=False,
         )
 
@@ -1141,7 +1081,6 @@ if __name__ == "__main__":
             intermediate_size=768,
             num_experts=128,
             top_k=8,
-            padding=8,
             use_gemm_bias=False,
         )
 
@@ -1152,7 +1091,6 @@ if __name__ == "__main__":
             intermediate_size=1024,
             num_experts=128,
             top_k=8,
-            padding=8,
             use_gemm_bias=True,
         )
 
@@ -1163,7 +1101,6 @@ if __name__ == "__main__":
             intermediate_size=768,
             num_experts=128,
             top_k=8,
-            padding=8,
             use_gemm_bias=True,
         )
 
@@ -1174,7 +1111,6 @@ if __name__ == "__main__":
             intermediate_size=1024,
             num_experts=128,
             top_k=8,
-            padding=8,
             use_gemm_bias=False,
             gemm1_alpha_value=1.702,
         )
@@ -1186,7 +1122,6 @@ if __name__ == "__main__":
             intermediate_size=1024,
             num_experts=128,
             top_k=8,
-            padding=8,
             use_gemm_bias=True,
             gemm1_alpha_value=1.702,
         )
@@ -1198,7 +1133,6 @@ if __name__ == "__main__":
             intermediate_size=1024,
             num_experts=128,
             top_k=8,
-            padding=8,
             use_gemm_bias=False,
             gemm1_alpha_value=1.702,
             gemm1_beta_value=1.0,
@@ -1211,34 +1145,31 @@ if __name__ == "__main__":
             intermediate_size=1024,
             num_experts=128,
             top_k=8,
-            padding=8,
             use_gemm_bias=False,
             gemm1_alpha_value=1.702,
             gemm1_clamp_limit_value=7.0,
         )
 
-        # Test 9: Full GPT OSS configuration (bias + alpha + beta + clamp_limit)
+        # Test 9: With bias, alpha, beta, and clamp_limit
         run_moe_test(
             num_tokens=128,
             hidden_size=1024,
             intermediate_size=1024,
             num_experts=128,
             top_k=8,
-            padding=8,
             use_gemm_bias=True,
             gemm1_alpha_value=1.702,
             gemm1_beta_value=1.0,
             gemm1_clamp_limit_value=7.0,
         )
 
-        # Test 10: Full GPT OSS configuration that requires padding (bias + alpha + beta + clamp_limit)
+        # Test 10: With bias, alpha, beta, clamp_limit, and requires padding
         run_moe_test(
             num_tokens=128,
             hidden_size=2944,
             intermediate_size=2944,
             num_experts=128,
             top_k=8,
-            padding=8,
             use_gemm_bias=True,
             gemm1_alpha_value=1.702,
             gemm1_beta_value=1.0,
@@ -1252,5 +1183,6 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"\n✗ Test FAILED: {e}")
         import traceback
+
         traceback.print_exc()
         exit(1)
