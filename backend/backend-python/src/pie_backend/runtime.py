@@ -21,7 +21,7 @@ from .config import RuntimeConfig
 from .batching import BatchBuilder, BatchState, ResponsePackager
 from .loader import ModelLoader
 from .adapter import AdapterSubpass
-from .model import llama3
+from .model import llama3, qwen2, qwen3
 from . import message
 
 # Re-export RuntimeConfig for backward compatibility
@@ -84,6 +84,37 @@ class Runtime:
                 
                 # Create KV cache
                 self.kv_cache_at_layer = llama3.create_kv_cache(
+                    self.model_config, config
+                )
+
+            case "qwen2":
+                # Create model config
+                self.model_config = qwen2.ModelConfig.from_dict(normalized_arch)
+                
+                # Create forward pass with weights
+                self.engine = qwen2.ForwardPass(
+                    self.model_config,
+                    config,
+                    weights,
+                )
+                
+                # Create KV cache
+                self.kv_cache_at_layer = qwen2.create_kv_cache(
+                    self.model_config, config
+                )
+            case "qwen3":
+                # Create model config
+                self.model_config = qwen3.ModelConfig.from_dict(normalized_arch)
+                
+                # Create forward pass with weights
+                self.engine = qwen3.ForwardPass(
+                    self.model_config,
+                    config,
+                    weights,
+                )
+                
+                # Create KV cache
+                self.kv_cache_at_layer = qwen3.create_kv_cache(
                     self.model_config, config
                 )
             case _:

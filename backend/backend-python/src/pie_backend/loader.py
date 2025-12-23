@@ -445,6 +445,16 @@ class ModelLoader:
                 from .model import llama3
                 schema = llama3.LLAMA3_SCHEMA
                 num_layers = int(normalized_arch["num_layers"])
+
+            case "qwen2":
+                from .model import qwen2
+                schema = qwen2.QWEN2_SCHEMA
+                num_layers = int(normalized_arch["num_layers"])
+
+            case "qwen3":
+                from .model import qwen3
+                schema = qwen3.QWEN3_SCHEMA
+                num_layers = int(normalized_arch["num_layers"])
             case "gpt_oss" | "gptoss":
                 from .model import gpt_oss
                 # GPT-OSS uses a factory function because MoE transforms need dimensions
@@ -471,10 +481,8 @@ class ModelLoader:
             WeightStore with all loaded weights
         """
         # Determine path to model weight files
-        model_dir = Path(self.config.cache_dir) / self.config.model
-        if not model_dir.exists():
-            # Fallback: weights might be in cache_dir directly
-            model_dir = Path(self.config.cache_dir)
+        model_dir = Path(self.config.cache_dir) / "models" / self.config.model
+
 
         # Load weights
         with ExitStack() as stack:
@@ -543,11 +551,11 @@ class ModelLoader:
         """
         # Try model subdirectory first
         model_info_path = (
-            Path(self.config.cache_dir) / self.config.model / f"{self.config.model}.toml"
+            Path(self.config.cache_dir) / "models" / self.config.model / f"{self.config.model}.toml"
         )
         if not model_info_path.exists():
             # Fallback to cache_dir root
-            model_info_path = Path(self.config.cache_dir) / f"{self.config.model}.toml"
+            model_info_path = Path(self.config.cache_dir) / "models" / f"{self.config.model}.toml"
 
         if not model_info_path.exists():
             raise ValueError(
