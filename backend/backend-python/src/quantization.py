@@ -1,40 +1,27 @@
 import torch
 
-# torchao imports - may fail depending on installed version
-try:
-    import torchao
-    from torchao.dtypes import AffineQuantizedTensor
-    from torchao.quantization import (
-        Int4WeightOnlyConfig,
-        Int8WeightOnlyConfig,
-        Float8WeightOnlyConfig,
-    )
-    TORCHAO_AVAILABLE = True
-except ImportError:
-    TORCHAO_AVAILABLE = False
-    Int4WeightOnlyConfig = None
-    Int8WeightOnlyConfig = None
-    Float8WeightOnlyConfig = None
+import torchao
+from torchao.dtypes import AffineQuantizedTensor
+from torchao.quantization import (
+    Int4WeightOnlyConfig,
+    Int8WeightOnlyConfig,
+    Float8WeightOnlyConfig,
+)
 
-# Optional advanced quantization features
-try:
-    from torchao.quantization import (
-        Int4PreshuffledTensor,
-        Int4Tensor,
-        Int4PlainInt32Tensor,
-        Int4MarlinSparseTensor,
-        Int4OpaqueTensor,
-        Int4TilePackedTo4dTensor,
-        Float8Tensor,
-        PerRow,
-    )
-    from torchao.quantization.quantize_.workflows import (
-        Int4PackingFormat,
-        Int4ChooseQParamsAlgorithm,
-    )
-    ADVANCED_QUANT_AVAILABLE = True
-except ImportError:
-    ADVANCED_QUANT_AVAILABLE = False
+from torchao.quantization import (
+    Int4PreshuffledTensor,
+    Int4Tensor,
+    Int4PlainInt32Tensor,
+    Int4MarlinSparseTensor,
+    Int4TilePackedTo4dTensor,
+    Float8Tensor,
+    PerRow,
+)
+from torchao.quantization.quantize_.workflows import (
+    Int4PackingFormat,
+    Int4ChooseQParamsAlgorithm,
+)
+
 
 
 def quantize(
@@ -88,12 +75,6 @@ def quantize_int4(
             return Int4PlainInt32Tensor.from_hp(x, block_size)
         case Int4PackingFormat.MARLIN_SPARSE:
             return Int4MarlinSparseTensor.from_hp(x, block_size)
-        case Int4PackingFormat.OPAQUE:
-            return Int4OpaqueTensor.from_hp(
-                x,
-                block_size,
-                int4_choose_qparams_algorithm=config.int4_choose_qparams_algorithm,
-            )
         case Int4PackingFormat.TILE_PACKED_TO_4D:
             return Int4TilePackedTo4dTensor.from_hp(
                 x,

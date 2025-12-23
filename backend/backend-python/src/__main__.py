@@ -19,7 +19,8 @@ def main(
     max_num_kv_pages: int | None = None,
     gpu_mem_headroom: float | None = None,
     device: str | None = None,
-    dtype: str = "bfloat16",
+    activation_dtype: str = "bfloat16",
+    weight_dtype: str | None = None,
     enable_profiling: bool = False,
     test: bool = False,
 ):
@@ -44,7 +45,10 @@ def main(
         max_num_adapters: Maximum number of adapters that can be loaded.
         max_adapter_rank: Maximum rank for any loaded adapter.
         device: The device to run the model on (e.g., 'mps', 'cuda:0', 'cpu').
-        dtype: The data type for model weights (e.g., 'bfloat16', 'float16').
+        activation_dtype: The data type for activations (e.g., 'bfloat16', 'float16').
+        weight_dtype: The data type for weights. If different from activation_dtype,
+                      weights will be quantized. Options: 'int4', 'int8', 'float8'.
+                      If None, uses activation_dtype (no quantization).
         enable_profiling: Enable unified profiler (timing + tensor tracking) (default: False).
         test: Run embedded test client after server starts (default: False).
     """
@@ -61,7 +65,8 @@ def main(
         max_num_kv_pages=max_num_kv_pages,
         gpu_mem_headroom=gpu_mem_headroom,
         device=device,
-        dtype=dtype,
+        activation_dtype=activation_dtype,
+        weight_dtype=weight_dtype,
         enable_profiling=enable_profiling,
     )
     config.print()

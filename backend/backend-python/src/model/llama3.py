@@ -8,11 +8,12 @@ import torch.nn.functional as fun
 import torch.distributed as dist
 
 
-from . import Spec as SpecBase, Param as ParamBase, Buffer as BufferBase, Config
+from . import Spec as SpecBase, Config
 
 from ..adapter import AdapterSubpass
 from ..quantization import quantize
 from ..utils import is_apple_silicon, get_available_memory
+from ..weight import Schema, Source, LoadConfig, WeightStore
 
 if is_apple_silicon():
     import flashinfer_metal as ops  # type: ignore[import-not-found]
@@ -58,7 +59,7 @@ def _eval_max_num_kv_pages(
         rank=config.rank,
     )
     usable_bytes = available_bytes * config.mem_utilization
-    element_size_bytes = torch.empty((), dtype=config.dtype).element_size()
+    element_size_bytes = torch.empty((), dtype=config.activation_dtype).element_size()
     total_bytes_per_page = (
         element_size_bytes
         * 2
@@ -71,6 +72,76 @@ def _eval_max_num_kv_pages(
     max_num_pages = int(usable_bytes // total_bytes_per_page)
     return max_num_pages
 
+
+# =============================================================================
+# LLAMA3 WEIGHT SCHEMA
+# =============================================================================
+# Declarative definition of how physical tensor names map to logical names,
+# with fusion, sharding, and quantization applied.
+
+LLAMA3_SCHEMA = (
+    Schema("llama3")
+    # Embedding (row-parallel sharding, no quantization)
+    .define(
+        "embed_token",
+        Source("model.embed_tokens.weight").shard("row"),
+    )
+    # Per-layer weights
+    .define(
+        "layers.*.norm_attn",
+        Source("model.layers.*.input_layernorm.weight"),
+    )
+    .define(
+        "layers.*.norm_mlp",
+        Source("model.layers.*.post_attention_layernorm.weight"),
+    )
+    # Fused QKV projection (column-parallel, quantized)
+    .define(
+        "layers.*.proj_qkv",
+        Source.fuse(
+            [
+                "model.layers.*.self_attn.q_proj.weight",
+                "model.layers.*.self_attn.k_proj.weight",
+                "model.layers.*.self_attn.v_proj.weight",
+            ],
+            dim=0,
+        )
+        .shard("column")
+        .quantize(),
+    )
+    # Output projection (row-parallel, quantized)
+    .define(
+        "layers.*.proj_o",
+        Source("model.layers.*.self_attn.o_proj.weight")
+        .shard("row")
+        .quantize(),
+    )
+    # Fused gate+up projection (column-parallel, quantized)
+    .define(
+        "layers.*.proj_gate_up",
+        Source.fuse(
+            [
+                "model.layers.*.mlp.gate_proj.weight",
+                "model.layers.*.mlp.up_proj.weight",
+            ],
+            dim=0,
+        )
+        .shard("column")
+        .quantize(),
+    )
+    # Down projection (row-parallel, quantized)
+    .define(
+        "layers.*.proj_down",
+        Source("model.layers.*.mlp.down_proj.weight")
+        .shard("row")
+        .quantize(),
+    )
+    # Final layer norm
+    .define(
+        "norm_last",
+        Source("model.norm.weight"),
+    )
+)
 
 @dataclass
 class Spec(SpecBase):
@@ -109,251 +180,27 @@ class Spec(SpecBase):
         )
 
 
-@dataclass
-class Param(ParamBase):
+class ForwardPass:
+    """
+    Llama3 forward pass implementation.
+    
+    Stores model spec, config, and weights internally.
+    """
 
-    spec: Spec
-    config: Config
-
-    # linear weights
-    proj_down: list[torch.Tensor]
-    proj_gate_up: list[torch.Tensor]
-    proj_qkv: list[torch.Tensor]
-    proj_o: list[torch.Tensor]
-
-    # embedding weight
-    embed_token: torch.Tensor
-
-    # norm weights
-    norm_attn: list[torch.Tensor]
-    norm_mlp: list[torch.Tensor]
-    norm_last: torch.Tensor
-
-    @staticmethod
-    def from_reader(
+    def __init__(
+        self,
         spec: Spec,
         config: Config,
-        read: Callable[..., torch.Tensor],
-    ) -> Param:
-
-        shardable_dims = {
-            "vocab_size": spec.num_vocabs,
-            "num_query_heads": spec.num_q_heads,
-            "num_key_value_heads": spec.num_kv_heads,
-            "intermediate_size": spec.dim_mlp,
-        }
-        for name, dim in shardable_dims.items():
-            if dim % config.world_size != 0:
-                raise ValueError(
-                    f"Config dimension {name} ({dim}) is not divisible "
-                    f"by world_size ({config.world_size})."
-                )
-
-        norm_attn = []
-        norm_mlp = []
-        proj_down = []
-        proj_gate_up = []
-        proj_qkv = []
-        proj_o = []
-
-        # let's not quantize embed weights
-        # Don't validate embed vocab size - may differ from config
-        embed_token = _shard(
-            read("model.embed_tokens.weight"),
-            config,
-        ).to(config.device)
-
-        for i in range(spec.num_layers):
-            prefix = f"model.layers.{i}"
-
-            norm_attn.append(
-                read(
-                    f"{prefix}.input_layernorm.weight",
-                    expected_shape=(spec.dim_hidden,),
-                ).to(config.device)
-            )
-            norm_mlp.append(
-                read(
-                    f"{prefix}.post_attention_layernorm.weight",
-                    expected_shape=(spec.dim_hidden,),
-                ).to(config.device)
-            )
-
-            # fuse -> shard -> quantize
-            proj_qkv.append(
-                _shard_and_quantize(
-                    torch.cat(
-                        [
-                            read(
-                                f"{prefix}.self_attn.q_proj.weight",
-                                expected_shape=(spec.dim_hidden, spec.dim_hidden),
-                            ),
-                            read(
-                                f"{prefix}.self_attn.k_proj.weight",
-                                expected_shape=(
-                                    spec.num_kv_heads * spec.dim_head,
-                                    spec.dim_hidden,
-                                ),
-                            ),
-                            read(
-                                f"{prefix}.self_attn.v_proj.weight",
-                                expected_shape=(
-                                    spec.num_kv_heads * spec.dim_head,
-                                    spec.dim_hidden,
-                                ),
-                            ),
-                        ],
-                        dim=0,
-                    ),
-                    config,
-                ).to(config.device)
-            )
-
-            proj_o.append(
-                _shard_and_quantize(
-                    read(
-                        f"{prefix}.self_attn.o_proj.weight",
-                        expected_shape=(spec.dim_hidden, spec.dim_hidden),
-                    ),
-                    config,
-                    row_parallel=True,
-                ).to(config.device)
-            )
-
-            # fuse -> shard -> quantize
-            proj_gate_up.append(
-                _shard_and_quantize(
-                    torch.cat(
-                        [
-                            read(
-                                f"{prefix}.mlp.gate_proj.weight",
-                                expected_shape=(spec.dim_mlp, spec.dim_hidden),
-                            ),
-                            read(
-                                f"{prefix}.mlp.up_proj.weight",
-                                expected_shape=(spec.dim_mlp, spec.dim_hidden),
-                            ),
-                        ],
-                        dim=0,
-                    ),
-                    config,
-                ).to(config.device)
-            )
-
-            proj_down.append(
-                _shard_and_quantize(
-                    read(
-                        f"{prefix}.mlp.down_proj.weight",
-                        expected_shape=(spec.dim_hidden, spec.dim_mlp),
-                    ),
-                    config,
-                    row_parallel=True,
-                ).to(config.device)
-            )
-
-        norm_last = read("model.norm.weight", expected_shape=(spec.dim_hidden,)).to(
-            config.device
-        )
-
-        return Param(
-            spec=spec,
-            config=config,
-            proj_down=proj_down,
-            proj_gate_up=proj_gate_up,
-            proj_qkv=proj_qkv,
-            proj_o=proj_o,
-            embed_token=embed_token,
-            norm_attn=norm_attn,
-            norm_mlp=norm_mlp,
-            norm_last=norm_last,
-        )
-
-
-@dataclass
-class Buffer(BufferBase):
-
-    spec: Spec
-    config: Config
-
-    kv_cache: list[torch.Tensor]
-    adapter: list[tuple[torch.Tensor, torch.Tensor]]
-
-    decode_attn: ops.BatchDecodeWithPagedKVCacheWrapper
-    append_attn: ops.BatchPrefillWithPagedKVCacheWrapper
-
-    @staticmethod
-    def from_config(spec: Spec, config: Config) -> Buffer:
-
-        local_num_q_heads = spec.num_q_heads // config.world_size
-        local_num_kv_heads = spec.num_kv_heads // config.world_size
-        local_q_size = local_num_q_heads * spec.dim_head
-        local_kv_size = local_num_kv_heads * spec.dim_head
-
-        workspace_buffer = torch.empty(
-            128 * 1024 * 1024, dtype=torch.uint8, device=config.device
-        )
-        decode_attn = ops.BatchDecodeWithPagedKVCacheWrapper(workspace_buffer, "NHD")
-        append_attn = ops.BatchPrefillWithPagedKVCacheWrapper(workspace_buffer, "NHD")
-
-        adapter = [
-            (
-                torch.zeros(
-                    (
-                        config.max_num_adapters,
-                        config.max_adapter_rank * 3,
-                        spec.dim_hidden,
-                    ),
-                    dtype=config.dtype,
-                    device=config.device,
-                ),
-                torch.zeros(
-                    (
-                        config.max_num_adapters,
-                        spec.dim_head * (local_num_q_heads + local_num_kv_heads * 2),
-                        config.max_adapter_rank,
-                    ),
-                    dtype=config.dtype,
-                    device=config.device,
-                ),
-            )
-            for _ in range(spec.num_layers)
-        ]
-
-        # update config.max_num_kv_pages
-        config.max_num_kv_pages = _eval_max_num_kv_pages(spec, config)
-
-        kv_cache = [
-            torch.zeros(
-                (
-                    config.max_num_kv_pages,
-                    2,
-                    config.kv_page_size,
-                    local_num_kv_heads,
-                    spec.dim_head,
-                ),
-                dtype=config.dtype,
-                device=config.device,
-            )
-            for _ in range(spec.num_layers)
-        ]
-
-        return Buffer(
-            spec=spec,
-            config=config,
-            adapter=adapter,
-            kv_cache=kv_cache,
-            decode_attn=decode_attn,
-            append_attn=append_attn,
-        )
-
-
-class ForwardPass:
-
-    def __init__(self, device: torch.device):
-        """Initialize the forward pass with attention wrappers."""
+        weights: WeightStore,
+    ):
+        """Initialize the forward pass with weights and attention wrappers."""
+        self.spec = spec
+        self.config = config
+        self.weights = weights
+        
         # Create workspace buffer for attention operations
         workspace_buffer = torch.empty(
-            128 * 1024 * 1024, dtype=torch.uint8, device=device
+            128 * 1024 * 1024, dtype=torch.uint8, device=config.device
         )
         self.wrapper_decode = ops.BatchDecodeWithPagedKVCacheWrapper(
             workspace_buffer, "NHD"
@@ -362,35 +209,29 @@ class ForwardPass:
             workspace_buffer, "NHD"
         )
 
-    def embed_tokens(
-        self, param: Param, token_ids: torch.Tensor
-    ) -> torch.Tensor:
+    def embed_tokens(self, token_ids: torch.Tensor) -> torch.Tensor:
         """Embed token IDs into hidden states."""
-        return fun.embedding(token_ids, param.embed_token)
+        return fun.embedding(token_ids, self.weights.get("embed_token"))
 
-    def lm_head(
-        self, param: Param, hidden_states: torch.Tensor
-    ) -> torch.Tensor:
+    def lm_head(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Project hidden states to vocabulary logits (weight-tied with embed_tokens)."""
         # Apply final layer norm
         normed = fun.rms_norm(
             hidden_states,
-            normalized_shape=[param.spec.dim_hidden],
-            weight=param.norm_last,
-            eps=param.spec.rms_norm_eps,
+            normalized_shape=[self.spec.dim_hidden],
+            weight=self.weights.get("norm_last"),
+            eps=self.spec.rms_norm_eps,
         )
         # Project to vocab (weight-tied with embedding)
-        return fun.linear(normed, param.embed_token)
+        return fun.linear(normed, self.weights.get("embed_token"))
 
-    def mlp(
-        self, param: Param, hidden_states: torch.Tensor, layer_idx: int
-    ) -> torch.Tensor:
+    def mlp(self, hidden_states: torch.Tensor, layer_idx: int) -> torch.Tensor:
         """
         Executes the MLP block for a single layer, including the
         pre-norm and residual connection.
         """
         # --- Calculate local TP sizes ---
-        local_mlp_size = param.spec.dim_mlp // param.config.world_size
+        local_mlp_size = self.spec.dim_mlp // self.config.world_size
 
         # Save input for residual connection
         residual = hidden_states
@@ -398,15 +239,15 @@ class ForwardPass:
         # 1. MLP RMSNorm
         normed_input = fun.rms_norm(
             hidden_states,
-            normalized_shape=[param.spec.dim_hidden],
-            weight=param.norm_mlp[layer_idx],
-            eps=param.spec.rms_norm_eps,
+            normalized_shape=[self.spec.dim_hidden],
+            weight=self.weights.get(f"layers.{layer_idx}.norm_mlp"),
+            eps=self.spec.rms_norm_eps,
         )
 
         # 2. Gate+Up Projection (Column Parallel)
         gate_up = fun.linear(
             normed_input,
-            weight=param.proj_gate_up[layer_idx],
+            weight=self.weights.get(f"layers.{layer_idx}.proj_gate_up"),
             bias=None,
         )
 
@@ -419,13 +260,13 @@ class ForwardPass:
         # 4. Down Projection (Row Parallel)
         down = fun.linear(
             hidden,
-            weight=param.proj_down[layer_idx],
+            weight=self.weights.get(f"layers.{layer_idx}.proj_down"),
             bias=None,
         )
         del hidden, gate, up, gate_up
 
         # ALL-REDUCE: Sum partial outputs from all ranks (only if TP > 1)
-        if param.config.world_size > 1:
+        if self.config.world_size > 1:
             dist.all_reduce(down)
 
         # 5. Residual Connection
@@ -433,7 +274,6 @@ class ForwardPass:
 
     def attention(
         self,
-        param: Param,
         hidden_states: torch.Tensor,
         layer_idx: int,
         position_ids: torch.Tensor,
@@ -451,29 +291,29 @@ class ForwardPass:
         pre-norm and residual connection.
         """
         # --- Calculate local TP sizes ---
-        local_num_query_heads = param.spec.num_q_heads // param.config.world_size
-        local_num_key_value_heads = param.spec.num_kv_heads // param.config.world_size
-        local_q_size = local_num_query_heads * param.spec.dim_head
-        local_kv_size = local_num_key_value_heads * param.spec.dim_head
+        local_num_query_heads = self.spec.num_q_heads // self.config.world_size
+        local_num_key_value_heads = self.spec.num_kv_heads // self.config.world_size
+        local_q_size = local_num_query_heads * self.spec.dim_head
+        local_kv_size = local_num_key_value_heads * self.spec.dim_head
 
         n = hidden_states.size(0)
 
         # Save input for the first residual connection (replicated)
         residual = hidden_states
 
-        # 1. Input RMSNorm (replicated input -> replicated output)  ------------------> input gather
+        # 1. Input RMSNorm (replicated input -> replicated output) 
         normed_input = fun.rms_norm(
             hidden_states,
-            normalized_shape=[param.spec.dim_hidden],
-            weight=param.norm_attn[layer_idx],
-            eps=param.spec.rms_norm_eps,
+            normalized_shape=[self.spec.dim_hidden],
+            weight=self.weights.get(f"layers.{layer_idx}.norm_attn"),
+            eps=self.spec.rms_norm_eps,
         )
 
         # 2. QKV Projection (Column Parallel)
         # Input is replicated, weight is sharded -> output is sharded
         qkv_proj = fun.linear(
             normed_input,
-            weight=param.proj_qkv[layer_idx],
+            weight=self.weights.get(f"layers.{layer_idx}.proj_qkv"),
             bias=None,
         )
 
@@ -488,8 +328,6 @@ class ForwardPass:
             dim=-1,
         )
 
-        # ------------------------------- cut here -------------------------------
-
         # 3. Adapter (if any)
         if adapter_subpass is not None:
             adapter_subpass.execute(
@@ -500,22 +338,21 @@ class ForwardPass:
                 v_state=v,
             )
         del normed_input
-        # ------------------------------- cut here -------------------------------
 
         # 4. Reshape QKV (local shapes) ------------------> input scatter
-        q = q.view(n, local_num_query_heads, param.spec.dim_head)
-        k = k.view(n, local_num_key_value_heads, param.spec.dim_head)
-        v = v.view(n, local_num_key_value_heads, param.spec.dim_head)
+        q = q.view(n, local_num_query_heads, self.spec.dim_head)
+        k = k.view(n, local_num_key_value_heads, self.spec.dim_head)
+        v = v.view(n, local_num_key_value_heads, self.spec.dim_head)
 
         # 5. Apply RoPE (in-place on local shards)
         ops.apply_llama31_rope_pos_ids_inplace(
             q=q,
             k=k,
             pos_ids=position_ids,
-            rope_scale=param.spec.rope_factor,
-            rope_theta=param.spec.rope_theta,
-            low_freq_factor=param.spec.rope_low_frequency_factor,
-            high_freq_factor=param.spec.rope_high_frequency_factor,
+            rope_scale=self.spec.rope_factor,
+            rope_theta=self.spec.rope_theta,
+            low_freq_factor=self.spec.rope_low_frequency_factor,
+            high_freq_factor=self.spec.rope_high_frequency_factor,
         )
 
         # gather where?
@@ -540,8 +377,6 @@ class ForwardPass:
         del q, k, v
         del qkv_proj
 
-        # ------------------------------- cut here -------------------------------
-
         # attn_output is a local shard
         attn_output = attn_output.reshape(n, -1)
 
@@ -549,13 +384,13 @@ class ForwardPass:
         # Input is sharded, weight is sharded -> output is partial
         attn_proj = fun.linear(
             attn_output,
-            weight=param.proj_o[layer_idx],
+            weight=self.weights.get(f"layers.{layer_idx}.proj_o"),
             bias=None,
         )
         del attn_output
 
         # ALL-REDUCE: Sum partial outputs from all ranks (only if TP > 1)
-        if param.config.world_size > 1:
+        if self.config.world_size > 1:
             dist.all_reduce(attn_proj)
 
         # 9. First Residual Connection
@@ -564,7 +399,6 @@ class ForwardPass:
 
     def transform(
         self,
-        param: Param,
         # inputs
         input_embeds: torch.Tensor,  # Replicated [n, hidden_size]
         position_ids: torch.Tensor,
@@ -583,8 +417,8 @@ class ForwardPass:
 
         # --- Calculate local TP sizes ---
         # <-- These are still needed here for planning the wrapper
-        local_num_query_heads = param.spec.num_q_heads // param.config.world_size
-        local_num_key_value_heads = param.spec.num_kv_heads // param.config.world_size
+        local_num_query_heads = self.spec.num_q_heads // self.config.world_size
+        local_num_key_value_heads = self.spec.num_kv_heads // self.config.world_size
 
         hidden_states = input_embeds
         n, _ = hidden_states.size()
@@ -612,7 +446,7 @@ class ForwardPass:
                 last_page_len=kv_last_page_lens,
                 num_qo_heads=local_num_query_heads,  # Use local head count
                 num_kv_heads=local_num_key_value_heads,  # Use local head count
-                head_dim=param.spec.dim_head,
+                head_dim=self.spec.dim_head,
                 page_size=page_size,
                 pos_encoding_mode="NONE",
                 q_data_type=input_embeds.dtype,
@@ -626,16 +460,15 @@ class ForwardPass:
                 paged_kv_last_page_len=kv_last_page_lens,
                 num_qo_heads=local_num_query_heads,  # Use local head count
                 num_kv_heads=local_num_key_value_heads,  # Use local head count
-                head_dim_qk=param.spec.dim_head,
+                head_dim_qk=self.spec.dim_head,
                 page_size=page_size,
                 custom_mask=custom_mask,
-                q_dta_type=input_embeds.dtype,
+                q_data_type=input_embeds.dtype,
             )
 
-        for layer_idx in range(param.spec.num_layers):
+        for layer_idx in range(self.spec.num_layers):
             # 1. Attention Block (includes pre-norm and residual)
             hidden_states = self.attention(
-                param=param,
                 hidden_states=hidden_states,
                 layer_idx=layer_idx,
                 position_ids=position_ids,
@@ -651,10 +484,52 @@ class ForwardPass:
 
             # 2. MLP Block (includes pre-norm and residual)
             hidden_states = self.mlp(
-                param=param,
                 hidden_states=hidden_states,
                 layer_idx=layer_idx,
             )
 
         # Returns replicated hidden_states
         return hidden_states
+
+
+def load_weights(
+    spec: Spec,
+    config: Config,
+    reader: Callable[..., torch.Tensor],
+) -> WeightStore:
+    """Load Llama3 weights using the schema."""
+    load_config = LoadConfig(
+        device=config.device,
+        world_size=config.world_size,
+        rank=config.rank,
+        quantization=config.quantization,
+    )
+    return LLAMA3_SCHEMA.load(
+        reader=reader,
+        config=load_config,
+        num_layers=spec.num_layers,
+    )
+
+
+def create_kv_cache(spec: Spec, config: Config) -> list[torch.Tensor]:
+    """Create KV cache tensors for all layers."""
+    local_num_kv_heads = spec.num_kv_heads // config.world_size
+    
+    # Update config.max_num_kv_pages if not set
+    if config.max_num_kv_pages is None:
+        config.max_num_kv_pages = _eval_max_num_kv_pages(spec, config)
+    
+    return [
+        torch.zeros(
+            (
+                config.max_num_kv_pages,
+                2,
+                config.kv_page_size,
+                local_num_kv_heads,
+                spec.dim_head,
+            ),
+            dtype=config.activation_dtype,
+            device=config.device,
+        )
+        for _ in range(spec.num_layers)
+    ]

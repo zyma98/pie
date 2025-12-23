@@ -16,10 +16,8 @@ class Config:
 
     devices: list[torch.device]
     rank: int
-    dtype: torch.dtype
-    quantization: (
-        Int4WeightOnlyConfig | Int8WeightOnlyConfig | Float8WeightOnlyConfig | None
-    )
+    activation_dtype: torch.dtype
+    weight_dtype: str | None  # "int4", "int8", "float8", or None (same as activation)
     kv_page_size: int
     max_dist_size: int
     max_num_embeds: int
@@ -28,6 +26,26 @@ class Config:
     max_adapter_rank: int
     max_num_kv_pages: int | None
     mem_utilization: float
+
+    @property
+    def needs_quantization(self) -> bool:
+        """True if weight_dtype differs from activation_dtype (quantization needed)."""
+        return self.weight_dtype is not None
+
+    @property
+    def quantization(self) -> Int4WeightOnlyConfig | Int8WeightOnlyConfig | Float8WeightOnlyConfig | None:
+        """Derive quantization config from weight_dtype."""
+        if self.weight_dtype is None:
+            return None
+        match self.weight_dtype:
+            case "int4":
+                return Int4WeightOnlyConfig()
+            case "int8":
+                return Int8WeightOnlyConfig()
+            case "float8":
+                return Float8WeightOnlyConfig()
+            case _:
+                raise ValueError(f"Unknown weight_dtype: {self.weight_dtype}")
 
     @property
     def device(self) -> torch.device:
@@ -100,15 +118,15 @@ class Config:
     @staticmethod
     def from_dict(config: dict) -> Config:
 
-        dtype = Config._parse_dtype(config.get("dtype"))
+        activation_dtype = Config._parse_dtype(config.get("activation_dtype", config.get("dtype")))
         devices = Config._parse_devices(config.get("devices"))
-        quantization = Config._parse_quantization(config.get("quantization"))
+        weight_dtype = config.get("weight_dtype")  # Already a string or None
 
         return Config(
             devices=devices,
             rank=config["rank"],
-            dtype=dtype,
-            quantization=quantization,
+            activation_dtype=activation_dtype,
+            weight_dtype=weight_dtype,
             kv_page_size=config["kv_page_size"],
             max_dist_size=config["max_dist_size"],
             max_num_embeds=config["max_num_embeds"],

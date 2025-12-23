@@ -263,7 +263,7 @@ def worker_thread(
                 case HandlerId.QUERY.value:
                     resps = service.query(reqs)
                 case HandlerId.FORWARD_PASS.value:
-                    resps = service.forward_pass(reqs)
+                    resps = service.forward_pass_handler(reqs)
                 case HandlerId.EMBED_IMAGE.value:
                     service.embed_image(reqs)
                 case HandlerId.INITIALIZE_ADAPTER.value:

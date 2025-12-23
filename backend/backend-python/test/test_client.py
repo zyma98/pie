@@ -15,7 +15,7 @@ from enum import IntEnum
 import msgspec
 import zmq
 
-from .message import (
+from src.message import (
     HandshakeRequest,
     HandshakeResponse,
     HeartbeatRequest,
