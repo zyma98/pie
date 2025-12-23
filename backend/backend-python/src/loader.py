@@ -32,7 +32,7 @@ import tomllib
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, Any
 
 import torch
 from tqdm import tqdm
@@ -57,6 +57,8 @@ class Source:
     
     Use method chaining to apply transforms:
         Source("weight.name").shard("row").quantize()
+        Source.fuse([...], dim=0).transform(my_fn, arg1=val1)
+        Source("sinks").dtype(torch.float32)
     """
     
     _patterns: list[str]
@@ -64,6 +66,10 @@ class Source:
     _sharding: str | None = None  # None, 'column', or 'row'
     _should_quantize: bool = False
     _expected_shapes: list[tuple[int, ...] | None] | None = None
+    _transform_fn: Callable[[list[torch.Tensor], dict[str, Any]], torch.Tensor | dict] | None = None
+    _transform_kwargs: dict[str, Any] | None = None
+    _dtype: torch.dtype | None = None
+    _gather_only: bool = False  # For transforms that need multiple tensors without concatenation
     
     def __init__(self, pattern: str):
         """Create a source from a single tensor pattern."""
@@ -72,6 +78,10 @@ class Source:
         self._sharding = None
         self._should_quantize = False
         self._expected_shapes = None
+        self._transform_fn = None
+        self._transform_kwargs = None
+        self._dtype = None
+        self._gather_only = False
     
     @classmethod
     def fuse(cls, patterns: list[str], dim: int = 0) -> Source:
@@ -81,6 +91,7 @@ class Source:
         Args:
             patterns: List of tensor name patterns to fuse
             dim: Dimension along which to concatenate (default: 0)
+                 Use dim=None with gather_only=True to gather without concat.
         
         Returns:
             A new Source configured for fusion
@@ -91,6 +102,34 @@ class Source:
         source._sharding = None
         source._should_quantize = False
         source._expected_shapes = None
+        source._transform_fn = None
+        source._transform_kwargs = None
+        source._dtype = None
+        source._gather_only = False
+        return source
+    
+    @classmethod
+    def gather(cls, patterns: list[str]) -> Source:
+        """
+        Gather multiple tensors without fusing. Used with .transform() for
+        operations that need multiple input tensors.
+        
+        Args:
+            patterns: List of tensor name patterns to gather
+        
+        Returns:
+            A new Source configured for gathering (no concatenation)
+        """
+        source = cls.__new__(cls)
+        source._patterns = patterns
+        source._fuse_dim = None
+        source._sharding = None
+        source._should_quantize = False
+        source._expected_shapes = None
+        source._transform_fn = None
+        source._transform_kwargs = None
+        source._dtype = None
+        source._gather_only = True
         return source
     
     def shard(self, strategy: str) -> Source:
@@ -105,6 +144,35 @@ class Source:
         self._should_quantize = True
         return self
     
+    def transform(
+        self,
+        fn: Callable[[list[torch.Tensor], dict[str, Any]], torch.Tensor | dict],
+        **kwargs: Any,
+    ) -> Source:
+        """
+        Apply a custom transformation function to loaded tensors.
+        
+        The function receives:
+            - tensors: List of loaded tensors (from patterns)
+            - kwargs: Additional keyword arguments passed here + 'device'
+        
+        It should return:
+            - A single tensor, OR
+            - A dict with 'output_type' key selecting which tensor to return
+        
+        Example:
+            Source.gather(["blocks", "scales", "bias"])
+                .transform(prepare_moe_weights, output_type="weights")
+        """
+        self._transform_fn = fn  
+        self._transform_kwargs = kwargs
+        return self
+    
+    def dtype(self, dt: torch.dtype) -> Source:
+        """Convert tensor to specified dtype."""
+        self._dtype = dt
+        return self
+    
     def expect_shapes(self, shapes: list[tuple[int, ...] | None]) -> Source:
         """Set expected shapes for validation (optional)."""
         self._expected_shapes = shapes
@@ -112,7 +180,15 @@ class Source:
     
     @property
     def is_fused(self) -> bool:
-        return self._fuse_dim is not None
+        return self._fuse_dim is not None and not self._gather_only
+    
+    @property
+    def is_gathered(self) -> bool:
+        return self._gather_only
+    
+    @property
+    def has_transform(self) -> bool:
+        return self._transform_fn is not None
     
     @property
     def patterns(self) -> list[str]:
@@ -262,15 +338,44 @@ class Schema:
         source: Source,
         physical_names: list[str],
     ) -> torch.Tensor:
-        """Load a single (possibly fused) tensor with transforms applied."""
+        """Load a single (possibly fused/gathered) tensor with transforms applied."""
         # Read tensors
         tensors = [reader(name) for name in physical_names]
         
-        # Fuse if needed
-        if source.is_fused:
+        # Apply custom transform if specified
+        if source.has_transform:
+            # Build kwargs for transform function
+            transform_kwargs = dict(source._transform_kwargs or {})
+            transform_kwargs["device"] = str(config.device)
+            
+            # Call the transform function
+            result = source._transform_fn(tensors, transform_kwargs)  # type: ignore[misc]
+            
+            # Handle dict result (select output by type)
+            if isinstance(result, dict):
+                output_type = transform_kwargs.get("output_type")
+                if output_type is None:
+                    raise ValueError(
+                        "Transform returned dict but no 'output_type' specified"
+                    )
+                tensor = result[output_type]
+            else:
+                tensor = result
+        # Fuse if needed (concatenation)
+        elif source.is_fused:
             tensor = torch.cat(tensors, dim=source.fuse_dim)
+        # Gathered but no transform - just take first tensor (unusual case)
+        elif source.is_gathered:
+            raise ValueError(
+                "Source.gather() should be used with .transform(). "
+                "For single tensor, use Source(pattern) instead."
+            )
         else:
             tensor = tensors[0]
+        
+        # Apply dtype conversion
+        if source._dtype is not None:
+            tensor = tensor.to(source._dtype)
         
         # Apply sharding (only if world_size > 1)
         if config.world_size > 1 and source.sharding is not None:
@@ -340,6 +445,12 @@ class ModelLoader:
                 from .model import llama3
                 schema = llama3.LLAMA3_SCHEMA
                 num_layers = int(normalized_arch["num_layers"])
+            case "gpt_oss" | "gptoss":
+                from .model import gpt_oss
+                # GPT-OSS uses a factory function because MoE transforms need dimensions
+                model_config = gpt_oss.ModelConfig.from_dict(normalized_arch)
+                schema = gpt_oss.create_gpt_oss_schema(model_config)
+                num_layers = model_config.num_layers
             case _:
                 raise ValueError(f"Unsupported architecture type: {arch_type}")
 
