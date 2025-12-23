@@ -22,7 +22,7 @@ import torch.distributed as dist
 from .config import RuntimeConfig
 from .batching import BatchBuilder, Batch
 from .loader import ModelLoader
-from .adapter import AdapterSubpass
+from .adapter import AdapterSubpass, CmaesAdapter
 from .model import llama3, qwen2, qwen3, common
 from . import message
 
@@ -359,15 +359,25 @@ class Runtime:
 
     def upload_adapter(self, reqs: list[message.UploadAdapterRequest]) -> None:
         """Upload adapter weights."""
-        # TODO: implement adapter upload
-        pass
+        for req in reqs:
+            if req.adapter_ptr in self.adapters:
+                adapter = self.adapters[req.adapter_ptr]
+                if isinstance(adapter, CmaesAdapter):
+                    adapter.upload(req.name, req.adapter_data)
 
     def download_adapter(
         self, reqs: list[message.DownloadAdapterRequest]
     ) -> list[message.DownloadAdapterResponse]:
         """Download adapter weights."""
-        # TODO: implement adapter download
-        return [message.DownloadAdapterResponse(adapter_data=b"") for _ in reqs]
+        resps = []
+        for req in reqs:
+            if req.adapter_ptr in self.adapters:
+                adapter = self.adapters[req.adapter_ptr]
+                if isinstance(adapter, CmaesAdapter):
+                    data = adapter.download(req.name)
+                    resp = message.DownloadAdapterResponse(adapter_data=data)
+                    resps.append(resp)
+        return resps
 
     # ========================================================================
     # Internal Adapter Methods
@@ -383,7 +393,33 @@ class Runtime:
         mu_fraction: float,
         initial_sigma: float,
     ):
-        raise NotImplementedError
+        cfg = self.model_config
+        
+        # Check if adapter limits are exceeded
+        if adapter_ptr >= self.config.max_num_adapters:
+             raise ValueError(f"Adapter pointer {adapter_ptr} exceeds max_num_adapters {self.config.max_num_adapters}")
+        
+        self.adapters[adapter_ptr] = CmaesAdapter(
+            adapter_id=adapter_ptr,
+            adapter_at_layer=self.adapter_at_layer,
+            rank=rank,
+            alpha=alpha,
+            in_features=cfg.dim_hidden,
+            out_features=[
+                cfg.dim_head * cfg.num_q_heads,
+                cfg.dim_head * cfg.num_kv_heads,
+                cfg.dim_head * cfg.num_kv_heads
+            ],
+            num_layers=cfg.num_layers,
+            population_size=population_size,
+            mu_fraction=mu_fraction,
+            initial_sigma=initial_sigma,
+            min_sigma=1e-7,
+            min_var=1e-8,
+            max_var=1e4,
+            device=self.config.device,
+            dtype=self.config.activation_dtype,
+        )
 
     @torch.inference_mode()
     def _update_adapter(
@@ -393,7 +429,10 @@ class Runtime:
         seeds: list[int],
         max_sigma: float,
     ):
-        raise NotImplementedError
+        if adapter_ptr in self.adapters:
+            adapter = self.adapters[adapter_ptr]
+            if isinstance(adapter, CmaesAdapter):
+                adapter.update(scores, seeds, max_sigma)
 
     # ========================================================================
     # Batch Execution
@@ -479,7 +518,7 @@ class Runtime:
         device = self.config.device#[self.config.rank]
 
         # 1. Prepare inputs using batch method
-        inputs = batch.get_model_inputs(device)
+        inputs = batch.get_model_inputs(device, self.adapter_at_layer, self.adapters)
         t_inputs = time.perf_counter()
 
         # Handle empty batch
