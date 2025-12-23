@@ -20,6 +20,8 @@ if is_apple_silicon():
 else:
     import flashinfer as ops  # type: ignore[import-not-found,no-redef]
 
+from . import common
+
 
 # =============================================================================
 # QWEN3 WEIGHT SCHEMA
@@ -197,6 +199,51 @@ class ForwardPass:
         )
         self.wrapper_append = ops.BatchPrefillWithPagedKVCacheWrapper(
             workspace_buffer, "NHD"
+        )
+
+    def embed_inputs(self, batch_metadata: dict[str, Any]) -> torch.Tensor:
+        """
+        Embed input tokens into hidden states.
+        
+        Args:
+            batch_metadata: Metadata dictionary from the batch builder/packager.
+            
+        Returns:
+            Tensor of input embeddings.
+        """
+        device = self.runtime_config.device
+        
+        # Extract token IDs from metadata
+        token_ids_tensor = torch.as_tensor(
+            batch_metadata["token_ids"], device=device, dtype=torch.int32
+        )
+        
+        return self.embed_tokens(token_ids_tensor)
+
+    def sample(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        """
+        Execute sampling using the model's LM head.
+        
+        Args:
+            hidden_states: Output hidden states.
+            sampling_metadata: Metadata for sampling.
+            
+        Returns:
+            Sampling results (tokens, distributions).
+        """
+        # Define a lambda to call self.lm_head passing parameters correctly
+        lm_head_fn = lambda x: self.lm_head(x)
+        
+        return common.sample_common(
+            hidden_states=hidden_states,
+            sampling_metadata=sampling_metadata,
+            lm_head_fn=lm_head_fn,
+            device=self.runtime_config.device,
+            dtype=self.runtime_config.activation_dtype,
         )
 
     def embed_tokens(self, token_ids: torch.Tensor) -> torch.Tensor:

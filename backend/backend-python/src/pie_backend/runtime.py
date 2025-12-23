@@ -19,10 +19,10 @@ import numpy as np
 import torch
 
 from .config import RuntimeConfig
-from .batching import BatchBuilder, BatchState, ResponsePackager
+from .batching import BatchBuilder, Batch
 from .loader import ModelLoader
 from .adapter import AdapterSubpass
-from .model import llama3, qwen2, qwen3
+from .model import llama3, qwen2, qwen3, common
 from . import message
 
 # Re-export RuntimeConfig for backward compatibility
@@ -50,7 +50,7 @@ class Runtime:
     
     # Batch management
     batch_builder: BatchBuilder
-    batch: BatchState | None
+    batch: Batch | None
 
     def __init__(self, config: RuntimeConfig):
         """
@@ -132,7 +132,9 @@ class Runtime:
         )
 
         # Initialize adapter states
+        # Initialize adapter states
         self._init_adapter_states()
+
 
     # For backward compatibility, expose forward_pass as alias to engine
     @property
@@ -406,18 +408,19 @@ class Runtime:
         t_build = time.perf_counter()
         device = self.config.device#[self.config.rank]
 
-        packager = ResponsePackager(self, batch)
-        
-        # 1. Prepare inputs using packager
-        inputs = packager.finalize()
+        # 1. Prepare inputs using batch method
+        inputs = batch.get_model_inputs(device)
         t_inputs = time.perf_counter()
 
-        if inputs["input_embeds"] is None:
+        if not inputs["token_ids"]:
              return []
 
-        # 2. Run transformer forward pass
+        # 2. Embed inputs
+        input_embeds = self.engine.embed_inputs(inputs)
+        
+        # 3. Run transformer forward pass
         hidden_states = self.engine.transform(
-            input_embeds=inputs["input_embeds"],
+            input_embeds=input_embeds,
             position_ids=inputs["position_ids"],
             qo_indptr=inputs["qo_indptr"],
             kv_cache_at_layer=self.kv_cache_at_layer,
@@ -430,15 +433,21 @@ class Runtime:
         )
         t_forward = time.perf_counter()
 
-        # 3. Package responses
-        responses = packager.package_responses(hidden_states)
+        # 4. Sampling Pass
+        sampling_metadata = batch.get_sampling_metadata(device, self.config.activation_dtype)
+        sampling_results = self.engine.sample(hidden_states, sampling_metadata)
+        t_sampling = time.perf_counter()
+
+        # 4. Package responses
+        responses = batch.create_responses(sampling_results)
         t_package = time.perf_counter()
 
         print(f"Batch execution: {(t_package - t_start) * 1000:.2f} ms")
         print(f"  - Build: {(t_build - t_start) * 1000:.2f} ms")
         print(f"  - Inputs: {(t_inputs - t_build) * 1000:.2f} ms")
         print(f"  - Forward: {(t_forward - t_inputs) * 1000:.2f} ms")
-        print(f"  - Package: {(t_package - t_forward) * 1000:.2f} ms")
+        print(f"  - Sampling: {(t_sampling - t_forward) * 1000:.2f} ms")
+        print(f"  - Package: {(t_package - t_sampling) * 1000:.2f} ms")
 
         return responses
 

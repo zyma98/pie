@@ -12,14 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
-from flashinfer.sampling import (
-            sampling_from_probs,
-            top_p_sampling_from_probs,
-            top_k_sampling_from_probs,
-            min_p_sampling_from_probs,
-            top_k_top_p_sampling_from_probs,
-        )
-        
+
 from . import message
 
 if TYPE_CHECKING:
@@ -27,12 +20,12 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class BatchState:
+class Batch:
     """
-    Holds the accumulated state for a specific inference step.
+    Holds the accumulated state for a specific inference step and handles packaging.
     
-    This replaces the original SyncBatch dataclass with cleaner naming
-    and explicit tracking of the original requests for response mapping.
+    This consolidates the state storage (formerly BatchState) and packaging logic
+    (formerly ResponsePackager) into a single unified class.
     """
 
     # Input tokens and positions
@@ -69,13 +62,137 @@ class BatchState:
     total_tokens: int = 0
     single_token_mode: bool = True
 
+    def get_model_inputs(self, device: torch.device) -> dict[str, Any]:
+        """
+        Finalize batch preparation and create input tensors for the model.
+        
+        Args:
+            device: The torch device to create tensors on.
+            
+        Returns:
+            Dictionary containing input tensors for the model engine.
+        """
+        # Create batched attention mask
+        batched_attention_mask = (
+            np.concatenate(self.attention_masks)
+            if self.attention_masks
+            else np.array([], dtype=np.bool_)
+        )
+
+        return {
+            "token_ids": self.token_ids,
+            "position_ids": torch.as_tensor(
+                self.position_ids, device=device, dtype=torch.int32
+            ),
+            "qo_indptr": torch.as_tensor(
+                self.qo_indptr, device=device, dtype=torch.int32
+            ),
+            "kv_page_indices": torch.as_tensor(
+                self.kv_page_indices, device=device, dtype=torch.int32
+            ),
+            "kv_page_indptr": torch.as_tensor(
+                self.kv_page_indptr, device=device, dtype=torch.int32
+            ),
+            "kv_last_page_lens": torch.as_tensor(
+                self.kv_last_page_lens, device=device, dtype=torch.int32
+            ),
+            "custom_mask": torch.as_tensor(
+                batched_attention_mask, device=device, dtype=torch.bool
+            ),
+            "single_token_inference_mode": self.single_token_mode,
+            "adapter_subpass": None,
+        }
+
+    def get_sampling_metadata(self, device: torch.device, dtype: torch.dtype) -> dict[str, Any]:
+        """
+        Prepare the metadata required for the SamplingPass.
+        
+        Args:
+            device: Torch device.
+            dtype: Torch dtype for temperatures.
+            
+        Returns:
+            Dictionary containing sampling metadata.
+        """
+        # Return empty if no logits needed
+        if not self.indices_for_logits:
+            return {
+                "indices_for_logits": None
+            }
+
+        indices_for_logits = self.indices_for_logits
+        
+        temperatures = torch.tensor(
+            [p["temperature"] for p in self.sampler_params],
+            device=device,
+            dtype=dtype,
+        ).unsqueeze(1)
+
+        # Group samplers
+        sampler_groups: dict[int, list[int]] = {}
+        for i, sampler_idx in enumerate(self.sampler_types):
+            if sampler_idx not in sampler_groups:
+                sampler_groups[sampler_idx] = []
+            sampler_groups[sampler_idx].append(i)
+
+        return {
+            "indices_for_logits": indices_for_logits,
+            "temperatures": temperatures,
+            "sampler_groups": sampler_groups,
+            "sampler_params": self.sampler_params,
+        }
+
+    def create_responses(
+        self, sampling_results: dict[str, Any]
+    ) -> list[message.ForwardPassResponse]:
+        """
+        Package the sampling results into responses for each original request.
+        
+        Args:
+            sampling_results: Dictionary containing 'tokens' and 'dists'.
+            
+        Returns:
+            List of responses in the order of requests.
+        """
+        # Early return if no logits needed
+        if not self.indices_for_logits:
+            return [
+                message.ForwardPassResponse(dists=[], tokens=[])
+                for _ in self.requests
+            ]
+
+        final_dists = sampling_results["dists"]
+        final_tokens_list = sampling_results["tokens"]
+        
+        responses = []
+        cursor = 0
+
+        for req in self.requests:
+            output_token_indices = req.output_token_indices or []
+            num_outputs = len(output_token_indices)
+            request_dists = []
+            request_tokens = []
+
+            for i in range(cursor, cursor + num_outputs):
+                if self.sampler_types[i] == 0:
+                    # Distribution request
+                    if final_dists[i] is not None:
+                        request_dists.append(final_dists[i])
+                else:
+                    # Sampling request
+                    request_tokens.append(final_tokens_list[i])
+
+            responses.append(
+                message.ForwardPassResponse(dists=request_dists, tokens=request_tokens)
+            )
+            cursor += num_outputs
+
+        return responses
+
 
 class BatchBuilder:
     """
-    Responsible for converting incoming ForwardPassRequests into a BatchState.
-    
-    This encapsulates the complex batch construction logic that was previously
-    scattered across the Runtime class.
+    Responsible for converting incoming ForwardPassRequests into a Batch.
     """
 
     def __init__(self, kv_page_size: int, max_dist_size: int, adapters: dict):
@@ -90,11 +207,11 @@ class BatchBuilder:
         self.kv_page_size = kv_page_size
         self.max_dist_size = max_dist_size
         self.adapters = adapters
-        self.current_batch: BatchState | None = None
+        self.current_batch: Batch | None = None
 
     def reset(self) -> None:
         """Reset the builder for a new batch."""
-        self.current_batch = BatchState()
+        self.current_batch = Batch()
 
     def add_request(self, req: message.ForwardPassRequest) -> None:
         """
@@ -175,12 +292,12 @@ class BatchBuilder:
         )
         batch.attention_masks.append(attention_mask)
 
-    def build(self) -> BatchState:
+    def build(self) -> Batch:
         """
         Return the prepared batch and reset the builder.
         
         Returns:
-            The completed BatchState ready for inference
+            The completed Batch ready for inference
         """
         batch = self.current_batch
         self.reset()
@@ -279,272 +396,3 @@ def _decode_brle(brle_buffer: list[int]) -> np.ndarray:
         current_pos += run_len
         value = not value  # Flip value for the next run
     return decoded_array
-
-class ResponsePackager:
-    """
-    Packages model outputs into responses for each original request.
-
-    This class handles the post-inference stages:
-    - Embedding storage
-    - Logits computation via LM head
-    - Temperature scaling
-    - Probability computation (softmax)
-    - Grouped sampling operations
-    - Response distribution back to original requests
-    """
-
-    def __init__(self, runtime: Any, batch: BatchState):
-        """
-        Initialize the response packager.
-        """
-        self.runtime = runtime
-        self.batch = batch
-        
-        # Resolve device and dtype from runtime.config
-        self.device = runtime.config.device
-        self.dtype = runtime.config.activation_dtype
-
-    def finalize(self) -> dict[str, Any]:
-        """
-        Finalize batch preparation, creating tensors and the adapter subpass.
-        """
-        device = self.device
-        batch = self.batch
-
-        # Create batched attention mask
-        batched_attention_mask = (
-            np.concatenate(batch.attention_masks)
-            if batch.attention_masks
-            else np.array([], dtype=np.bool_)
-        )
-
-        # Create token tensor and get embeddings
-        token_ids_tensor = torch.as_tensor(
-            batch.token_ids, device=device, dtype=torch.int32
-        )
-        embed_tokens = self.runtime.engine.embed_tokens 
-        input_embeds = embed_tokens(token_ids_tensor)
-
-        return {
-            "input_embeds": input_embeds,
-            "position_ids": torch.as_tensor(
-                batch.position_ids, device=device, dtype=torch.int32
-            ),
-            "qo_indptr": torch.as_tensor(
-                batch.qo_indptr, device=device, dtype=torch.int32
-            ),
-            "kv_page_indices": torch.as_tensor(
-                batch.kv_page_indices, device=device, dtype=torch.int32
-            ),
-            "kv_page_indptr": torch.as_tensor(
-                batch.kv_page_indptr, device=device, dtype=torch.int32
-            ),
-            "kv_last_page_lens": torch.as_tensor(
-                batch.kv_last_page_lens, device=device, dtype=torch.int32
-            ),
-            "custom_mask": torch.as_tensor(
-                batched_attention_mask, device=device, dtype=torch.bool
-            ),
-            "single_token_inference_mode": batch.single_token_mode,
-            "adapter_subpass": None,
-        }
-
-    def package_responses(
-        self, output_embeds: torch.Tensor
-    ) -> list[message.ForwardPassResponse]:
-        """
-        Package the model outputs into responses for each original request.
-        """
-        batch = self.batch
-        device = self.device
-
-        # Stage 1: Store specified embeddings (if embed storage is available)
-        if batch.indices_for_embed_storage and hasattr(self.runtime, 'embeds'):
-            embeddings_to_store = output_embeds[batch.indices_for_embed_storage]
-            for i, ptr in enumerate(batch.embed_storage_pointers):
-                self.runtime.embeds[ptr].copy_(
-                    embeddings_to_store[i], non_blocking=True
-                )
-
-        # Early return if no logits needed
-        if not batch.indices_for_logits:
-            return [
-                message.ForwardPassResponse(dists=[], tokens=[])
-                for _ in batch.requests
-            ]
-
-        # Stage 2: Compute logits via LM head
-        logits_input = output_embeds[batch.indices_for_logits]
-        logits = self.runtime.engine.lm_head(logits_input)
-
-        # Stage 3: Apply temperature scaling    
-        temperatures = torch.tensor(
-            [p["temperature"] for p in batch.sampler_params],
-            device=device,
-            dtype=self.dtype,
-        ).unsqueeze(1)
-        scaled_logits = logits / torch.clamp(temperatures, min=1e-6)
-
-        # Stage 4: Compute probabilities
-        probs = torch.softmax(scaled_logits, dim=-1)
-
-        # Stage 5: Group requests by sampler type for efficient batch processing
-        sampler_groups: dict[int, list[int]] = {}
-        for i, sampler_idx in enumerate(batch.sampler_types):
-            if sampler_idx not in sampler_groups:
-                sampler_groups[sampler_idx] = []
-            sampler_groups[sampler_idx].append(i)
-
-        num_logit_requests = len(batch.indices_for_logits)
-        final_dists: list[tuple[list[int], list[float]] | None] = [None] * num_logit_requests
-        final_tokens_tensor = torch.empty(
-            num_logit_requests, dtype=torch.long, device=device
-        )
-
-        # Stage 6: Execute sampling for each group
-        for sampler_idx, indices in sampler_groups.items():
-            if not indices:
-                continue
-
-            indices_tensor = torch.tensor(indices, device=device, dtype=torch.long)
-            group_probs = probs.index_select(0, indices_tensor)
-
-            if sampler_idx == 0:
-                # Distribution mode
-                self._process_distributions(
-                    indices, group_probs, final_dists
-                )
-            else:
-                # Sampling mode
-                sampled = self._execute_sampler(
-                    sampler_idx, indices, group_probs
-                )
-                if sampled.dtype != torch.long:
-                    sampled = sampled.to(torch.long)
-                final_tokens_tensor.scatter_(0, indices_tensor, sampled)
-
-        # Stage 7: Distribute results back to individual responses
-        # Optimization: Move entire tensor to CPU list once to avoid repeated .item() syncs
-        final_tokens_list = final_tokens_tensor.tolist()
-        
-        return self._build_responses(final_dists, final_tokens_list)
-
-    def _process_distributions(
-        self,
-        indices: list[int],
-        group_probs: torch.Tensor,
-        final_dists: list[tuple[list[int], list[float]] | None],
-    ) -> None:
-        """
-        Process distribution requests, computing top-k values and indices.
-        """
-        batch = self.batch
-        group_top_k = [batch.sampler_params[i]["top_k"] for i in indices]
-        max_k = max(group_top_k) if group_top_k else 0
-
-        if max_k > 0:
-            topk_vals, topk_inds = torch.topk(group_probs, k=max_k, sorted=True)
-            
-            # Optimization: Move the entire chunk to CPU at once
-            # This avoids sliced .tolist() calls inside the loop which are slower
-            topk_vals_list = topk_vals.tolist()
-            topk_inds_list = topk_inds.tolist()
-            
-            for i, original_idx in enumerate(indices):
-                k = batch.sampler_params[original_idx]["top_k"]
-                # Pure Python list slicing (very fast)
-                ids = topk_inds_list[i][:k]
-                vals = topk_vals_list[i][:k]
-                final_dists[original_idx] = (ids, vals)
-
-    def _execute_sampler(
-        self,
-        sampler_idx: int,
-        indices: list[int],
-        group_probs: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Execute the appropriate sampling operation.
-        """
-        batch = self.batch
-        device = self.device
-
-        if sampler_idx == 1:
-            return sampling_from_probs(group_probs)
-
-        elif sampler_idx == 2:
-            top_p_vals = torch.tensor(
-                [batch.sampler_params[i]["top_p"] for i in indices],
-                device=device,
-                dtype=self.dtype,
-            )
-            return top_p_sampling_from_probs(group_probs, top_p=top_p_vals)
-
-        elif sampler_idx == 3:
-            top_k_vals = torch.tensor(
-                [batch.sampler_params[i]["top_k"] for i in indices],
-                device=device,
-                dtype=torch.long,
-            )
-            return top_k_sampling_from_probs(group_probs, top_k=top_k_vals)
-
-        elif sampler_idx == 4:
-            min_p_vals = torch.tensor(
-                [batch.sampler_params[i]["min_p"] for i in indices],
-                device=device,
-                dtype=self.dtype,
-            )
-            return min_p_sampling_from_probs(group_probs, min_p=min_p_vals)
-
-        elif sampler_idx == 5:
-            top_k_vals = torch.tensor(
-                [batch.sampler_params[i]["top_k"] for i in indices],
-                device=device,
-                dtype=torch.long,
-            )
-            top_p_vals = torch.tensor(
-                [batch.sampler_params[i]["top_p"] for i in indices],
-                device=device,
-                dtype=self.dtype,
-            )
-            return top_k_top_p_sampling_from_probs(
-                group_probs, top_k=top_k_vals, top_p=top_p_vals
-            )
-
-        else:
-            raise ValueError(f"Unknown sampler index: {sampler_idx}")
-
-    def _build_responses(
-        self,
-        final_dists: list[tuple[list[int], list[float]] | None],
-        final_tokens_list: list[int],
-    ) -> list[message.ForwardPassResponse]:
-        """
-        Build response objects by distributing results back to original requests.
-        """
-        batch = self.batch
-        responses = []
-        cursor = 0
-
-        for req in batch.requests:
-            output_token_indices = req.output_token_indices or []
-            num_outputs = len(output_token_indices)
-            request_dists = []
-            request_tokens = []
-
-            for i in range(cursor, cursor + num_outputs):
-                if batch.sampler_types[i] == 0:
-                    # Distribution request
-                    if final_dists[i] is not None:
-                        request_dists.append(final_dists[i])
-                else:
-                    # Sampling request
-                    # Optimization: Accessing pre-converted list avoids .item() sync
-                    request_tokens.append(final_tokens_list[i])
-
-            responses.append(
-                message.ForwardPassResponse(dists=request_dists, tokens=request_tokens)
-            )
-            cursor += num_outputs
-
-        return responses

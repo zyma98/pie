@@ -16,7 +16,7 @@ try:
 except ImportError:
     HAS_MINIJINJA = False
 
-from src.runtime import Runtime, RuntimeConfig
+from pie_backend.runtime import Runtime, RuntimeConfig
 
 
 def format_chat_prompt(
