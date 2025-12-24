@@ -170,7 +170,7 @@ class ESOrchestrator:
         self.clients = []
         for uri in self.config.SERVER_URIS:
             client = await self._exit_stack.enter_async_context(PieClient(uri))
-            await client.authenticate("test-token")
+            await client.authenticate("main-user")
             self.clients.append(client)
         tqdm.write(f"✅ Connected to {len(self.clients)} Pie server(s).")
         wandb.config.update({"num_clients": len(self.clients)}, allow_val_change=True)

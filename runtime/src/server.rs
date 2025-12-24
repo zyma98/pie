@@ -403,6 +403,7 @@ impl Session {
     async fn external_authenticate(&mut self, corr_id: u32, username: String) -> Result<()> {
         // If authentication is disabled, we authorize the user immediately without
         // checking if they are in the authorized users file or challenging them.
+
         if !self.state.enable_auth {
             self.send_response(
                 corr_id,
