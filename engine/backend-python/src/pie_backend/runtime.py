@@ -512,14 +512,11 @@ class Runtime:
         Returns:
             List of ForwardPassResponse for each request in the batch
         """
-        t_start = time.perf_counter()  
         batch = self.batch_builder.build()
-        t_build = time.perf_counter()
-        device = self.config.device#[self.config.rank]
+        device = self.config.device
 
         # 1. Prepare inputs using batch method
         inputs = batch.get_model_inputs(device, self.adapter_at_layer, self.adapters)
-        t_inputs = time.perf_counter()
 
         # Handle empty batch
         if not inputs["token_ids"]:
@@ -545,18 +542,9 @@ class Runtime:
 
         # Execute step
         sampling_results = self._run_step(inputs, sampling_metadata)
-        
-        t_forward_sample = time.perf_counter() # merged timing for simplicity
 
         # Package responses
         responses = batch.create_responses(sampling_results)
-        t_package = time.perf_counter()
-
-        print(f"Batch execution: {(t_package - t_start) * 1000:.2f} ms")
-        print(f"  - Build: {(t_build - t_start) * 1000:.2f} ms")
-        print(f"  - Inputs: {(t_inputs - t_build) * 1000:.2f} ms")
-        print(f"  - Forward+Sample: {(t_forward_sample - t_inputs) * 1000:.2f} ms")
-        print(f"  - Package: {(t_package - t_forward_sample) * 1000:.2f} ms")
 
         return responses
 
