@@ -155,8 +155,8 @@ class Runtime:
                 torch.zeros(
                     (
                         self.config.max_num_adapters,
-                        self.config.max_adapter_rank * 3,
                         self.model_config.dim_hidden,
+                        self.config.max_adapter_rank * 3,
                     ),
                     dtype=self.config.activation_dtype,
                     device=device,
@@ -164,12 +164,12 @@ class Runtime:
                 torch.zeros(
                     (
                         self.config.max_num_adapters,
+                        self.config.max_adapter_rank,
                         self.model_config.dim_head
                         * (
                             self.model_config.num_q_heads
                             + self.model_config.num_kv_heads * 2
                         ),
-                        self.config.max_adapter_rank,
                     ),
                     dtype=self.config.activation_dtype,
                     device=device,
