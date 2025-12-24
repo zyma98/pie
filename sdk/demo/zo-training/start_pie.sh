@@ -8,11 +8,11 @@ module load git-lfs
 module load gcc/11.4.0
 
 # ==== Configure here: PORTS / DEVICES / MODEL / KV_PAGES ====
-DEFAULT_PORTS=(8080 8081 8082 8083)
-DEFAULT_DEVICES=(cuda:0 cuda:1 cuda:2 cuda:3)
+DEFAULT_PORTS=(8080) # 8081 8082 8083)
+DEFAULT_DEVICES=(cuda:0) # cuda:1 cuda:2 cuda:3)
 
 # Configure model and max_num_kv_pages here. These are not overridden by env vars.
-MODEL="llama-3.1-8b-instruct"
+MODEL="llama-3.2-1b-instruct"
 MAX_NUM_KV_PAGES=30000
 
 # --- The rest of the script remains the same ---
@@ -31,9 +31,6 @@ PID_DIR="$SCRIPT_DIR/pids"
 mkdir -p "$CONF_DIR" "$LOG_DIR" "$PID_DIR"
 
 command -v pie >/dev/null 2>&1 || { echo "ERROR: 'pie' not found in PATH"; exit 1; }
-
-# Resolve backend exec to an absolute path (adjust if your layout differs)
-BACKEND_PATH="$(cd "$SCRIPT_DIR/../backend/backend-python" && printf "%s/server.py" "$(pwd)")"
 
 # Helper: build a PTY-wrapped command array compatible with Linux/macOS
 pty_wrap_cmd() {
@@ -80,28 +77,27 @@ fi
 rm -f "$pidfile"
 
 # Write per-instance TOML (absolute paths)
-cat > "$cfg" <<EOF
-host = "0.0.0.0"
-port = ${port}
-enable_auth = false
-auth_secret = "hello"
-verbose = true
-log = "${app_log}"
+    # Create empty config file if it doesn't exist
+    touch "$cfg"
 
-[[backend]]
-backend_type = "python"
-exec_path = "${BACKEND_PATH}"
-model = "${MODEL}"
-device = "${device}"
-dtype = "bfloat16"
-kv_page_size = 16
-max_batch_tokens = ${MAX_NUM_KV_PAGES}
-max_dist_size = 32
-max_num_kv_pages = ${MAX_NUM_KV_PAGES}
-max_num_embeds = 1
-max_num_adapters = 1
-max_adapter_rank = 8
-EOF
+    # Update config using CLI
+    pie config update \
+        --path "$cfg" \
+        --host "0.0.0.0" \
+        --port "${port}" \
+        --enable-auth "false" \
+        --verbose "true" \
+        --log "${app_log}" \
+        --backend-type "python" \
+        --backend-model "${MODEL}" \
+        --backend-device "${device}" \
+        --backend-activation-dtype "bfloat16" \
+        --backend-kv-page-size 16 \
+        --backend-max-batch-tokens "${MAX_NUM_KV_PAGES}" \
+        --backend-max-dist-size 32 \
+        --backend-max-num-embeds 1 \
+        --backend-max-num-adapters 1 \
+        --backend-max-adapter-rank 8
 
 # Build PTY-wrapped command
 CMD_STR="$(pty_wrap_cmd "pie start --config \"$cfg\"")"
