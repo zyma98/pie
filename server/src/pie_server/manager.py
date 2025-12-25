@@ -4,28 +4,35 @@ This module handles the lifecycle of the Pie engine and backend services,
 mirroring Rust cli/manager.rs functionality.
 """
 
+import os
 import subprocess
 import sys
+import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import typer
 
 from . import path as pie_path
 
+if TYPE_CHECKING:
+    from . import pie_server_rs
+
 
 def start_engine_and_backend(
     engine_config: dict,
     backend_configs: list[dict],
-) -> tuple[str, list[subprocess.Popen]]:
+    timeout: float = 60.0,
+) -> tuple["pie_server_rs.ServerHandle", list[subprocess.Popen]]:
     """Start the Pie engine and all configured backend services.
 
     Args:
         engine_config: Engine configuration dict
         backend_configs: List of backend configurations
+        timeout: Maximum time to wait for backends to connect (seconds)
 
     Returns:
-        Tuple of (internal_auth_token, list of backend processes)
+        Tuple of (ServerHandle, list of backend processes)
     """
     from . import pie_server_rs
 
@@ -46,23 +53,24 @@ def start_engine_and_backend(
         log_path=engine_config.get("log"),
     )
 
-    # Start the engine
-    internal_token = pie_server_rs.start_server(server_config, authorized_users_path)
+    # Start the engine - returns a ServerHandle
+    server_handle = pie_server_rs.start_server(server_config, authorized_users_path)
+    typer.echo(f"✅ Engine started (token: {server_handle.internal_token[:8]}...)")
 
+    # Count expected backends
+    expected_backends = 0
+    
     # Launch backend processes
     backend_processes: list[subprocess.Popen] = []
-    num_backends = 0
 
     for backend_config in backend_configs:
         backend_type = backend_config.get("backend_type")
 
         if backend_type == "dummy":
             # Dummy backend is handled internally by the Rust code
-            # We just count it for the wait
-            num_backends += 1
+            expected_backends += 1
             typer.echo("- Starting dummy backend")
-            # Note: We'd need to call into Rust for the actual dummy backend
-            # For now, skip it
+            # TODO: Call into Rust to start dummy backend
             continue
 
         exec_path = backend_config.get("exec_path")
@@ -74,7 +82,7 @@ def start_engine_and_backend(
         cmd = [exec_path]
         cmd.extend(["--host", engine_config.get("host", "127.0.0.1")])
         cmd.extend(["--port", str(engine_config.get("port", 8080))])
-        cmd.extend(["--internal_auth_token", internal_token])
+        cmd.extend(["--internal-auth-token", server_handle.internal_token])
 
         # Add additional backend config options
         for key, value in backend_config.items():
@@ -93,28 +101,81 @@ def start_engine_and_backend(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                env={**__import__("os").environ, "PYTHONUNBUFFERED": "1"},
+                env={**os.environ, "PYTHONUNBUFFERED": "1"},
             )
             backend_processes.append(process)
-            num_backends += 1
+            expected_backends += 1
         except Exception as e:
             typer.echo(f"❌ Failed to spawn backend: {e}", err=True)
             # Clean up already-started backends
             for p in backend_processes:
                 p.terminate()
+            server_handle.shutdown()
             raise typer.Exit(1)
 
-    # TODO: Wait for backends to be ready
-    # The Rust implementation uses signals and internal communication
-    # For now, we'll just return immediately
+    # Wait for backends to register with the engine
+    if expected_backends > 0:
+        typer.echo(f"⏳ Waiting for {expected_backends} backend(s) to connect...")
+        if not wait_for_backends(server_handle, expected_backends, timeout, backend_processes):
+            typer.echo("❌ Timeout waiting for backends to connect", err=True)
+            for p in backend_processes:
+                p.terminate()
+            server_handle.shutdown()
+            raise typer.Exit(1)
+        typer.echo(f"✅ {expected_backends} backend(s) connected")
 
-    return internal_token, backend_processes
+    return server_handle, backend_processes
 
 
-def terminate_engine_and_backend(backend_processes: list[subprocess.Popen]) -> None:
+def wait_for_backends(
+    server_handle: "pie_server_rs.ServerHandle",
+    expected_count: int,
+    timeout: float,
+    backend_processes: list[subprocess.Popen],
+) -> bool:
+    """Wait for the expected number of backends to register with the engine.
+
+    Args:
+        server_handle: The server handle to query
+        expected_count: Number of backends we expect to connect
+        timeout: Maximum time to wait in seconds
+        backend_processes: List of backend processes to check for early exit
+
+    Returns:
+        True if all backends connected, False if timeout
+    """
+    start_time = time.time()
+    poll_interval = 0.5  # seconds
+    
+    while time.time() - start_time < timeout:
+        # Check if any backend process has died
+        for i, process in enumerate(backend_processes):
+            if process.poll() is not None:
+                # Process has exited
+                stderr = process.stderr.read().decode() if process.stderr else ""
+                typer.echo(f"❌ Backend process exited unexpectedly (exit code {process.returncode})", err=True)
+                if stderr:
+                    typer.echo(f"   stderr: {stderr[:500]}", err=True)
+                return False
+        
+        # Check registered models
+        models = server_handle.registered_models()
+        if len(models) >= expected_count:
+            return True
+        
+        time.sleep(poll_interval)
+    
+    return False
+
+
+def terminate_engine_and_backend(
+    server_handle: "pie_server_rs.ServerHandle | None",
+    backend_processes: list[subprocess.Popen],
+) -> None:
     """Terminate the engine and backend processes.
 
     Args:
+        server_handle: The server handle (or None if already shut down)
         backend_processes: List of backend subprocess.Popen objects
     """
     import signal
@@ -134,8 +195,14 @@ def terminate_engine_and_backend(backend_processes: list[subprocess.Popen]) -> N
             except Exception as e:
                 typer.echo(f"  Error terminating process {pid}: {e}")
 
-    # Note: The Rust engine will shut down when it loses connection
-    # In a full implementation, we'd send a shutdown signal to the engine
+    # Gracefully shut down the engine
+    if server_handle is not None:
+        try:
+            if server_handle.is_running():
+                typer.echo("🔄 Shutting down engine...")
+                server_handle.shutdown()
+        except Exception as e:
+            typer.echo(f"  Error shutting down engine: {e}")
 
 
 def run_interactive_shell(engine_config: dict, internal_token: str) -> None:
