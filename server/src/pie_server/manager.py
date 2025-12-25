@@ -233,18 +233,87 @@ def submit_inferlet_and_wait(
         inferlet_path: Path to the .wasm inferlet file
         arguments: Arguments to pass to the inferlet
     """
+    import asyncio
+
+    asyncio.run(_submit_inferlet_async(client_config, inferlet_path, arguments))
+
+
+async def _submit_inferlet_async(
+    client_config: dict,
+    inferlet_path: Path,
+    arguments: list[str],
+) -> None:
+    """Async implementation of submit_inferlet_and_wait."""
+    import blake3
+    from pie_client import PieClient, Event
+
     # Check inferlet exists
     if not inferlet_path.exists():
         raise FileNotFoundError(f"Inferlet not found: {inferlet_path}")
 
     # Read and hash the inferlet
-    import hashlib
     inferlet_blob = inferlet_path.read_bytes()
-    hash_hex = hashlib.blake2b(inferlet_blob, digest_size=32).hexdigest()
-    typer.echo(f"Inferlet hash: {hash_hex}")
+    program_hash = blake3.blake3(inferlet_blob).hexdigest()
+    typer.echo(f"Inferlet hash: {program_hash}")
 
-    # TODO: Connect to engine and run the inferlet
-    # This requires implementing the WebSocket client protocol
-    # For now, we'll just print a placeholder message
-    typer.echo(f"(Would run inferlet {inferlet_path.name} with args {arguments})")
-    typer.echo("Note: Full inferlet execution requires pie-client Python bindings")
+    # Build the WebSocket URI
+    host = client_config.get("host", "127.0.0.1")
+    port = client_config.get("port", 8080)
+    internal_token = client_config.get("internal_auth_token")
+    server_uri = f"ws://{host}:{port}"
+
+    async with PieClient(server_uri) as client:
+        # Authenticate with internal token
+        await client.internal_authenticate(internal_token)
+
+        # Check if program already exists, upload if not
+        if not await client.program_exists(program_hash):
+            typer.echo("Uploading inferlet...")
+            await client.upload_program(inferlet_blob)
+        else:
+            typer.echo("Inferlet already cached on server.")
+
+        # Launch the instance
+        typer.echo(f"Launching {inferlet_path.name}...")
+        cmd_name = inferlet_path.stem  # Use filename without extension
+        instance = await client.launch_instance(
+            program_hash=program_hash,
+            arguments=arguments,
+            cmd_name=cmd_name,
+            detached=False,
+        )
+        typer.echo(f"Instance launched: {instance.instance_id}")
+
+        # Stream events until completion
+        while True:
+            event, message = await instance.recv()
+
+            if event == Event.Stdout:
+                # Stream stdout without extra newline
+                print(message, end="", flush=True)
+            elif event == Event.Stderr:
+                # Stream stderr to stderr
+                import sys
+                print(message, end="", file=sys.stderr, flush=True)
+            elif event == Event.Message:
+                typer.echo(f"[Message] {message}")
+            elif event == Event.Completed:
+                typer.echo(f"✅ Instance completed: {message}")
+                break
+            elif event == Event.Aborted:
+                typer.echo(f"⚠️ Instance aborted: {message}")
+                break
+            elif event == Event.Exception:
+                typer.echo(f"❌ Instance exception: {message}", err=True)
+                break
+            elif event == Event.ServerError:
+                typer.echo(f"❌ Server error: {message}", err=True)
+                break
+            elif event == Event.OutOfResources:
+                typer.echo(f"❌ Out of resources: {message}", err=True)
+                break
+            elif event == Event.Blob:
+                typer.echo(f"[Received blob: {len(message)} bytes]")
+            else:
+                typer.echo(f"[Unknown event {event}]: {message}")
+
