@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.scripts]
-pie-cli = "pie_cli.main:app"
+pie-cli = "pie_client_cli.main:app"
 
 [project.optional-dependencies]
 dev = [
