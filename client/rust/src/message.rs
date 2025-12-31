@@ -86,6 +86,15 @@ pub enum ClientMessage {
         detached: bool,
     },
 
+    #[serde(rename = "launch_instance_from_registry")]
+    LaunchInstanceFromRegistry {
+        corr_id: u32,
+        inferlet: String,
+        cmd_name: String,
+        arguments: Vec<String>,
+        detached: bool,
+    },
+
     #[serde(rename = "attach_instance")]
     AttachInstance { corr_id: u32, instance_id: String },
 

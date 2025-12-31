@@ -89,6 +89,8 @@ pub async fn run_server(
         config.enable_auth,
         authorized_users,
         internal_auth_token.clone(),
+        config.registry.clone(),
+        config.cache_dir.clone(),
     );
     kvs::start_service();
     messaging::start_service();
