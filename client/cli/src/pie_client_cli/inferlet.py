@@ -347,6 +347,15 @@ def publish(
                 name=name,
                 version=version,
                 storage_path=start_resp.storage_path,
+                checksum=checksum,
+                size_bytes=size_bytes,
+                description=description,
+                requires_engine=requires_engine,
+                interface_spec=interface_spec,
+                authors=authors,
+                keywords=keywords,
+                repository=repository,
+                readme=readme_content,
             )
             commit_resp = client.commit_publish(commit_req)
             

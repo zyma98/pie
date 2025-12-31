@@ -187,15 +187,41 @@ class PublishCommitRequest:
     name: str
     version: str
     storage_path: str
+    checksum: str
+    size_bytes: int
+    description: Optional[str] = None
+    requires_engine: Optional[str] = None
+    interface_spec: Optional[dict[str, Any]] = None
+    authors: Optional[list[str]] = None
+    keywords: Optional[list[str]] = None
+    repository: Optional[str] = None
+    readme: Optional[str] = None
 
     def to_dict(self) -> dict:
         """Convert to API request dict."""
-        return {
+        result = {
             "namespace": self.namespace,
             "name": self.name,
             "version": self.version,
             "storage_path": self.storage_path,
+            "checksum": self.checksum,
+            "size_bytes": self.size_bytes,
         }
+        if self.description:
+            result["description"] = self.description
+        if self.requires_engine:
+            result["requires_engine"] = self.requires_engine
+        if self.interface_spec:
+            result["interface_spec"] = self.interface_spec
+        if self.authors:
+            result["authors"] = self.authors
+        if self.keywords:
+            result["keywords"] = self.keywords
+        if self.repository:
+            result["repository"] = self.repository
+        if self.readme:
+            result["readme"] = self.readme
+        return result
 
 
 @dataclass
