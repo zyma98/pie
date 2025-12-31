@@ -51,7 +51,8 @@ def start_engine_and_backend(
         enable_auth=engine_config.get("enable_auth", True),
         cache_dir=engine_config.get("cache_dir"),
         verbose=engine_config.get("verbose", False),
-        log_path=engine_config.get("log"),
+        log_dir=engine_config.get("log_dir"),
+        registry=engine_config.get("registry", "https://registry.pie-project.org/"),
     )
 
     # Start the engine - returns a ServerHandle

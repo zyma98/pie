@@ -9,17 +9,22 @@ from typing import Optional
 import toml
 import typer
 
-from . import path as pie_path
+from . import path
 
 app = typer.Typer(help="Manage configuration")
 
 
 def create_default_config_content(backend_type: str = "python") -> str:
     """Create the default configuration file content."""
+    cache_dir = str(path.get_pie_home() / "cache")
+    log_dir = str(path.get_pie_home() / "logs")
     config = {
         "host": "127.0.0.1",
         "port": 8080,
         "enable_auth": False,
+        "cache_dir": cache_dir,
+        "verbose": False,
+        "log_dir": log_dir,
         "registry": "https://registry.pie-project.org/",
     }
 
@@ -109,7 +114,8 @@ def config_update(
     ),
     cache_dir: Optional[str] = typer.Option(None, "--cache-dir", help="Cache directory path"),
     verbose: Optional[bool] = typer.Option(None, "--verbose", help="Enable verbose logging"),
-    log: Optional[str] = typer.Option(None, "--log", help="Log file path"),
+    log_dir: Optional[str] = typer.Option(None, "--log-dir", help="Log directory path"),
+    registry: Optional[str] = typer.Option(None, "--registry", help="Inferlet registry URL"),
     # Backend configuration options
     backend_type: Optional[str] = typer.Option(None, "--backend-type", help="Backend type"),
     backend_exec_path: Optional[str] = typer.Option(
@@ -161,7 +167,8 @@ def config_update(
             "enable_auth": enable_auth,
             "cache_dir": cache_dir,
             "verbose": verbose,
-            "log": log,
+            "log_dir": log_dir,
+            "registry": registry,
         }.items()
         if v is not None
     }

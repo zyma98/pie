@@ -18,7 +18,8 @@ pub struct Config {
     pub enable_auth: bool,
     pub cache_dir: PathBuf,
     pub verbose: bool,
-    pub log: Option<PathBuf>,
+    pub log_dir: Option<PathBuf>,
+    pub registry: String,
 }
 
 /// Runs the PIE server logic within an existing Tokio runtime.
