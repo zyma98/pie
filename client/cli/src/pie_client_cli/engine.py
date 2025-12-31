@@ -324,6 +324,26 @@ def launch_instance(
     )
 
 
+def launch_instance_from_registry(
+    client: PieClient,
+    inferlet: str,
+    cmd_name: str,
+    arguments: list[str],
+    detached: bool = False,
+) -> Instance:
+    """Launch an instance from the registry (sync wrapper).
+    
+    The inferlet parameter can be:
+    - Full name with version: "std/text-completion@0.1.0"
+    - Without namespace (defaults to "std"): "text-completion@0.1.0"
+    - Without version (defaults to "latest"): "std/text-completion" or "text-completion"
+    """
+    return asyncio.get_event_loop().run_until_complete(
+        client.launch_instance_from_registry(inferlet, arguments, cmd_name, detached)
+    )
+
+
 def close_client(client: PieClient) -> None:
     """Close the client (sync wrapper)."""
     asyncio.get_event_loop().run_until_complete(client.close())
+
