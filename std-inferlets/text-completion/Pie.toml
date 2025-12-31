@@ -1,0 +1,13 @@
+[package]
+name = "std/text-completion"
+version = "0.1.0"
+description = "Simple text completion inferlet"
+[engine]
+min_version = "^1.0.0"
+[interface]
+inputs = [
+    { name = "prompt", type = "string" }
+]
+outputs = [
+    { name = "completion", type = "string" }
+]

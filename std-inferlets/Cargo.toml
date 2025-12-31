@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = [
+    "beam-search",
+    "text-completion",
+]
+
+[workspace.dependencies]
+inferlet = { path = "../rust/inferlet" }
+inferlet-macros = { path = "../rust/inferlet-macros" }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+futures = "0.3.31"
+
+[profile.release]
+lto = true
