@@ -425,11 +425,9 @@ async def _submit_inferlet_async(
 
         # Launch the instance
         typer.echo(f"Launching {inferlet_path.name}...")
-        cmd_name = inferlet_path.stem  # Use filename without extension
         instance = await client.launch_instance(
             program_hash=program_hash,
             arguments=arguments,
-            cmd_name=cmd_name,
             detached=False,
         )
         typer.echo(f"Instance launched: {instance.instance_id}")

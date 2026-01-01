@@ -570,14 +570,12 @@ impl Session {
                 ClientMessage::LaunchInstance {
                     corr_id,
                     program_hash,
-                    cmd_name,
                     arguments,
                     detached,
                 } => {
                     self.handle_launch_instance(
                         corr_id,
                         program_hash,
-                        cmd_name,
                         arguments,
                         detached,
                     )
@@ -586,14 +584,12 @@ impl Session {
                 ClientMessage::LaunchInstanceFromRegistry {
                     corr_id,
                     inferlet,
-                    cmd_name,
                     arguments,
                     detached,
                 } => {
                     self.handle_launch_instance_from_registry(
                         corr_id,
                         inferlet,
-                        cmd_name,
                         arguments,
                         detached,
                     )
@@ -609,14 +605,12 @@ impl Session {
                     corr_id,
                     port,
                     program_hash,
-                    cmd_name,
                     arguments,
                 } => {
                     self.handle_launch_server_instance(
                         corr_id,
                         port,
                         program_hash,
-                        cmd_name,
                         arguments,
                     )
                     .await
@@ -905,7 +899,6 @@ impl Session {
         &mut self,
         corr_id: u32,
         program_hash: String,
-        cmd_name: String,
         arguments: Vec<String>,
         detached: bool,
     ) {
@@ -913,7 +906,6 @@ impl Session {
 
         runtime::Command::LaunchInstance {
             program_hash,
-            cmd_name,
             arguments,
             detached,
             event: evt_tx,
@@ -960,7 +952,6 @@ impl Session {
         &mut self,
         corr_id: u32,
         inferlet: String,
-        cmd_name: String,
         arguments: Vec<String>,
         detached: bool,
     ) {
@@ -994,7 +985,7 @@ impl Session {
                 }
 
                 // Now launch the instance using the same flow as handle_launch_instance
-                self.handle_launch_instance(corr_id, program_hash, cmd_name, arguments, detached)
+                self.handle_launch_instance(corr_id, program_hash, arguments, detached)
                     .await;
             }
             Err(e) => {
@@ -1095,14 +1086,12 @@ impl Session {
         corr_id: u32,
         port: u32,
         program_hash: String,
-        cmd_name: String,
         arguments: Vec<String>,
     ) {
         let (evt_tx, evt_rx) = oneshot::channel();
         runtime::Command::LaunchServerInstance {
             program_hash,
             port,
-            cmd_name,
             arguments,
             event: evt_tx,
         }

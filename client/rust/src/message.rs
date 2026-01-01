@@ -39,7 +39,6 @@ pub enum InstanceStatus {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct InstanceInfo {
     pub id: String,
-    pub cmd_name: String,
     pub arguments: Vec<String>,
     pub status: InstanceStatus,
 }
@@ -81,7 +80,6 @@ pub enum ClientMessage {
     LaunchInstance {
         corr_id: u32,
         program_hash: String,
-        cmd_name: String,
         arguments: Vec<String>,
         detached: bool,
     },
@@ -90,7 +88,6 @@ pub enum ClientMessage {
     LaunchInstanceFromRegistry {
         corr_id: u32,
         inferlet: String,
-        cmd_name: String,
         arguments: Vec<String>,
         detached: bool,
     },
@@ -103,7 +100,6 @@ pub enum ClientMessage {
         corr_id: u32,
         port: u32,
         program_hash: String,
-        cmd_name: String,
         arguments: Vec<String>,
     },
 

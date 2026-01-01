@@ -27,7 +27,6 @@ class Event(Enum):
 class InstanceInfo:
     """Information about a running instance."""
     id: str
-    cmd_name: str
     arguments: list[str]
     status: str  # "Attached", "Detached", or "Finished"
 
@@ -186,7 +185,6 @@ class PieClient:
                 instances = [
                     InstanceInfo(
                         id=inst.get("id"),
-                        cmd_name=inst.get("cmd_name"),
                         arguments=inst.get("arguments", []),
                         status=inst.get("status", "Unknown")
                     )
@@ -437,7 +435,6 @@ class PieClient:
         self,
         program_hash: str,
         arguments: list[str] | None = None,
-        cmd_name: str = "default",
         detached: bool = False
     ) -> Instance:
         """Launch an instance of a program."""
@@ -447,7 +444,6 @@ class PieClient:
             "corr_id": corr_id,
             "program_hash": program_hash,
             "arguments": arguments or [],
-            "cmd_name": cmd_name,
             "detached": detached,
         }
         
@@ -466,7 +462,6 @@ class PieClient:
         self,
         inferlet: str,
         arguments: list[str] | None = None,
-        cmd_name: str = "default",
         detached: bool = False
     ) -> Instance:
         """
@@ -479,7 +474,6 @@ class PieClient:
         
         :param inferlet: The inferlet name (e.g., "std/text-completion@0.1.0").
         :param arguments: Command-line arguments to pass to the inferlet.
-        :param cmd_name: The command name within the inferlet to run.
         :param detached: If True, the instance runs in detached mode.
         :return: An Instance object for the launched inferlet.
         """
@@ -489,7 +483,6 @@ class PieClient:
             "corr_id": corr_id,
             "inferlet": inferlet,
             "arguments": arguments or [],
-            "cmd_name": cmd_name,
             "detached": detached,
         }
         

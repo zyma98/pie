@@ -386,7 +386,6 @@ impl Client {
     pub async fn launch_instance(
         &self,
         program_hash: String,
-        cmd_name: String,
         arguments: Vec<String>,
         detached: bool,
     ) -> Result<Instance> {
@@ -394,7 +393,6 @@ impl Client {
         let msg = ClientMessage::LaunchInstance {
             corr_id: *corr_id_guard,
             program_hash,
-            cmd_name,
             arguments,
             detached,
         };
@@ -425,7 +423,6 @@ impl Client {
     pub async fn launch_instance_from_registry(
         &self,
         inferlet: String,
-        cmd_name: String,
         arguments: Vec<String>,
         detached: bool,
     ) -> Result<Instance> {
@@ -433,7 +430,6 @@ impl Client {
         let msg = ClientMessage::LaunchInstanceFromRegistry {
             corr_id: *corr_id_guard,
             inferlet,
-            cmd_name,
             arguments,
             detached,
         };

@@ -364,16 +364,14 @@ export class PieClient {
      * - Without version (defaults to "latest"): "std/text-completion" or "text-completion"
      * 
      * @param {string} inferlet The inferlet name (e.g., "std/text-completion@0.1.0").
-     * @param {string} [cmdName="default"] The command name within the inferlet to run.
      * @param {string[]} [args=[]] Optional command-line arguments.
      * @param {boolean} [detached=false] If true, the instance runs in detached mode.
      * @returns {Promise<Instance>}
      */
-    async launchInstanceFromRegistry(inferlet, cmdName = "default", args = [], detached = false) {
+    async launchInstanceFromRegistry(inferlet, args = [], detached = false) {
         const msg = {
             type: "launch_instance_from_registry",
             inferlet: inferlet,
-            cmd_name: cmdName,
             arguments: args,
             detached: detached,
         };

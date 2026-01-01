@@ -314,20 +314,18 @@ def program_exists(client: PieClient, program_hash: str) -> bool:
 def launch_instance(
     client: PieClient,
     program_hash: str,
-    cmd_name: str,
     arguments: list[str],
     detached: bool = False,
 ) -> Instance:
     """Launch an instance (sync wrapper)."""
     return asyncio.get_event_loop().run_until_complete(
-        client.launch_instance(program_hash, arguments, cmd_name, detached)
+        client.launch_instance(program_hash, arguments, detached)
     )
 
 
 def launch_instance_from_registry(
     client: PieClient,
     inferlet: str,
-    cmd_name: str,
     arguments: list[str],
     detached: bool = False,
 ) -> Instance:
@@ -339,7 +337,7 @@ def launch_instance_from_registry(
     - Without version (defaults to "latest"): "std/text-completion" or "text-completion"
     """
     return asyncio.get_event_loop().run_until_complete(
-        client.launch_instance_from_registry(inferlet, arguments, cmd_name, detached)
+        client.launch_instance_from_registry(inferlet, arguments, detached)
     )
 
 
