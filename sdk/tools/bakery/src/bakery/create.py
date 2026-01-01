@@ -1,6 +1,6 @@
-"""Create command implementation for the Pie CLI.
+"""Create command implementation for Bakery.
 
-This module implements the `pie-cli create` subcommand for creating
+This module implements the `bakery create` subcommand for creating
 new JavaScript/TypeScript inferlet projects.
 """
 
@@ -36,7 +36,7 @@ def get_inferlet_js_path() -> Path:
     raise FileNotFoundError(
         f"Could not find inferlet-js directory.\n"
         f"Searched from: {current_dir}\n"
-        f"Make sure you're running from within the pie repository or that pie-cli is properly installed."
+        f"Make sure you're running from within the pie repository or that PIE_HOME is set."
     )
 
 
@@ -127,7 +127,7 @@ def handle_create_command(
     js: bool = False,
     output: Optional[Path] = None,
 ) -> None:
-    """Handle the `pie-cli create` command.
+    """Handle the `bakery create` command.
     
     Creates a new inferlet project with:
     - index.ts or index.js
@@ -188,4 +188,4 @@ def handle_create_command(
     print()
     print("Next steps:")
     print(f"   cd {project_dir}")
-    print(f"   pie-cli build . -o {project_name}.wasm")
+    print(f"   bakery build . -o {project_name}.wasm")
