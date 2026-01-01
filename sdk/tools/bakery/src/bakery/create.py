@@ -10,6 +10,8 @@ from pathlib import Path
 from string import Template
 from typing import Optional
 
+import typer
+
 
 def get_template(name: str) -> Template:
     """Load a template file from the templates directory.
@@ -194,14 +196,14 @@ def handle_create_command(
         generate_rust_cargo_toml(project_dir, project_name)
         generate_pie_toml(project_dir, project_name, language)
         
-        print(f"✅ Created Rust inferlet project: {project_name}")
-        print(f"   {project_dir}/src/lib.rs")
-        print(f"   {project_dir}/Cargo.toml")
-        print(f"   {project_dir}/Pie.toml")
-        print()
-        print("Next steps:")
-        print(f"   cd {project_dir}")
-        print("   cargo build --release --target wasm32-wasip2")
+        typer.echo(f"✅ Created Rust inferlet project: {project_name}")
+        typer.echo(f"   {project_dir}/src/lib.rs")
+        typer.echo(f"   {project_dir}/Cargo.toml")
+        typer.echo(f"   {project_dir}/Pie.toml")
+        typer.echo()
+        typer.echo("Next steps:")
+        typer.echo(f"   cd {project_dir}")
+        typer.echo("   cargo build --release --target wasm32-wasip2")
     else:
         # Generate TypeScript project
         try:
@@ -219,12 +221,12 @@ def handle_create_command(
         generate_tsconfig(project_dir, relative_path)
         generate_pie_toml(project_dir, project_name, language)
         
-        print(f"✅ Created TypeScript inferlet project: {project_name}")
-        print(f"   {project_dir}/index.ts")
-        print(f"   {project_dir}/package.json")
-        print(f"   {project_dir}/tsconfig.json")
-        print(f"   {project_dir}/Pie.toml")
-        print()
-        print("Next steps:")
-        print(f"   cd {project_dir}")
-        print(f"   bakery build . -o {project_name}.wasm")
+        typer.echo(f"✅ Created TypeScript inferlet project: {project_name}")
+        typer.echo(f"   {project_dir}/index.ts")
+        typer.echo(f"   {project_dir}/package.json")
+        typer.echo(f"   {project_dir}/tsconfig.json")
+        typer.echo(f"   {project_dir}/Pie.toml")
+        typer.echo()
+        typer.echo("Next steps:")
+        typer.echo(f"   cd {project_dir}")
+        typer.echo(f"   bakery build . -o {project_name}.wasm")
