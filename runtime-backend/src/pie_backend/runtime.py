@@ -127,6 +127,7 @@ class Runtime:
                 self.model_config = qwen3.ModelConfig.from_dict(normalized_arch)
                 
                 # Create forward pass with weights
+                # Create forward pass with weights
                 self.engine = qwen3.ForwardPass(
                     self.model_config,
                     config,
@@ -430,7 +431,7 @@ class Runtime:
             # Wait for inputs
             print(f"Worker {self.config.rank}: waiting for broadcast...")
             objects = [None, None]
-            dist.broadcast_object_list(objects, src=0)
+            dist.broadcast_object_list(objects, src=0, device=device)
             print(f"Worker {self.config.rank}: received broadcast")
             inputs, sampling_metadata = objects
             
@@ -521,7 +522,7 @@ class Runtime:
                 k: (v.cpu() if isinstance(v, torch.Tensor) else v) 
                 for k, v in sampling_metadata.items()
             }
-            dist.broadcast_object_list([cpu_inputs, cpu_sampling_metadata], src=0)
+            dist.broadcast_object_list([cpu_inputs, cpu_sampling_metadata], src=0, device=device)
             print(f"Rank 0: Broadcast complete")
 
         # Execute step
