@@ -111,8 +111,22 @@ def serve(
             console.print("[dim]Press Ctrl+C to stop[/dim]")
             import signal
 
+            import time
+            typer.echo("[dim]Use check_backend_processes loop to monitor...[/dim]")
+
             try:
-                signal.pause()
+                # Keep running while processes are alive
+                while True:
+                    if not manager.check_backend_processes(backend_processes):
+                        typer.echo("[red]A backend process died. Shutting down.[/red]")
+                        break
+                    
+                    if server_handle and hasattr(server_handle, 'is_running'):
+                         if not server_handle.is_running():
+                             typer.echo("[red]Engine process died. Shutting down.[/red]")
+                             break
+
+                    time.sleep(1.0)
             except KeyboardInterrupt:
                 pass
 

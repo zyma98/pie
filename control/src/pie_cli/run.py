@@ -101,6 +101,8 @@ def run(
                 client_config,
                 path,
                 arguments or [],
+                server_handle,
+                backend_processes
             )
         else:
             # Launch from registry
@@ -108,6 +110,8 @@ def run(
                 client_config,
                 inferlet,
                 arguments or [],
+                server_handle,
+                backend_processes
             )
 
         # Cleanup

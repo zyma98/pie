@@ -232,28 +232,8 @@ def wait_for_backends(
     
     while time.time() - start_time < timeout:
         # Check if any backend process has died
-        for i, process in enumerate(backend_processes):
-            is_dead = False
-            return_code = None
-            stderr = ""
-
-            if isinstance(process, subprocess.Popen):
-                if process.poll() is not None:
-                    is_dead = True
-                    return_code = process.returncode
-                    stderr = process.stderr.read().decode() if process.stderr else ""
-            else:
-                # Assume multiprocessing.Process
-                if not process.is_alive():
-                    is_dead = True
-                    return_code = process.exitcode
-            
-            if is_dead:
-                # Process has exited
-                typer.echo(f"❌ Backend process exited unexpectedly (exit code {return_code})", err=True)
-                if stderr:
-                    typer.echo(f"   stderr: {stderr[:500]}", err=True)
-                return False
+        if not check_backend_processes(backend_processes):
+            return False
         
         # Check registered models
         models = server_handle.registered_models()
@@ -263,6 +243,44 @@ def wait_for_backends(
         time.sleep(poll_interval)
     
     return False
+
+
+
+def check_backend_processes(backend_processes: list) -> bool:
+    """Check if all backend processes are still alive.
+    
+    Args:
+        backend_processes: List of backend processes to check
+        
+    Returns:
+        True if all processes are alive, False if any have died
+    """
+    import subprocess
+    
+    all_alive = True
+    for process in backend_processes:
+        is_dead = False
+        return_code = None
+        stderr = ""
+
+        if isinstance(process, subprocess.Popen):
+            if process.poll() is not None:
+                is_dead = True
+                return_code = process.returncode
+                stderr = process.stderr.read().decode() if process.stderr else ""
+        else:
+            # Assume multiprocessing.Process
+            if not process.is_alive():
+                is_dead = True
+                return_code = process.exitcode
+        
+        if is_dead:
+            all_alive = False
+            typer.echo(f"❌ Backend process exited unexpectedly (exit code {return_code})", err=True)
+            if stderr:
+                typer.echo(f"   stderr: {stderr[:500]}", err=True)
+            
+    return all_alive
 
 
 def terminate_engine_and_backend(
@@ -402,6 +420,8 @@ def submit_inferlet_and_wait(
     client_config: dict,
     inferlet_path: Path,
     arguments: list[str],
+    server_handle: "pie_rs.ServerHandle | None" = None,
+    backend_processes: list | None = None,
 ) -> None:
     """Submit an inferlet to the engine and wait for it to finish.
 
@@ -412,13 +432,21 @@ def submit_inferlet_and_wait(
     """
     import asyncio
 
-    asyncio.run(_submit_inferlet_async(client_config, inferlet_path, arguments))
+    asyncio.run(_submit_inferlet_async(
+        client_config, 
+        inferlet_path, 
+        arguments,
+        server_handle,
+        backend_processes
+    ))
 
 
 async def _submit_inferlet_async(
     client_config: dict,
     inferlet_path: Path,
     arguments: list[str],
+    server_handle: "pie_rs.ServerHandle | None" = None,
+    backend_processes: list | None = None,
 ) -> None:
     """Async implementation of submit_inferlet_and_wait."""
     import blake3
@@ -439,64 +467,121 @@ async def _submit_inferlet_async(
     internal_token = client_config.get("internal_auth_token")
     server_uri = f"ws://{host}:{port}"
 
-    async with PieClient(server_uri) as client:
-        # Authenticate with internal token
-        await client.internal_authenticate(internal_token)
+    # Start monitoring task if processes provided
+    monitor_task = None
+    if backend_processes:
+        monitor_task = asyncio.create_task(_monitor_processes_task(server_handle, backend_processes))
 
-        # Check if program already exists, upload if not
-        if not await client.program_exists(program_hash):
-            typer.echo("Uploading inferlet...")
-            await client.upload_program(inferlet_blob)
-        else:
-            typer.echo("Inferlet already cached on server.")
+    try:
+        async with PieClient(server_uri) as client:
+            # Authenticate with internal token
+            await client.internal_authenticate(internal_token)
 
-        # Launch the instance
-        typer.echo(f"Launching {inferlet_path.name}...")
-        instance = await client.launch_instance(
-            program_hash=program_hash,
-            arguments=arguments,
-            detached=False,
-        )
-        typer.echo(f"Instance launched: {instance.instance_id}")
-
-        # Stream events until completion
-        while True:
-            event, message = await instance.recv()
-
-            if event == Event.Stdout:
-                # Stream stdout without extra newline
-                print(message, end="", flush=True)
-            elif event == Event.Stderr:
-                # Stream stderr to stderr
-                import sys
-                print(message, end="", file=sys.stderr, flush=True)
-            elif event == Event.Message:
-                typer.echo(f"[Message] {message}")
-            elif event == Event.Completed:
-                typer.echo(f"✅ Instance completed: {message}")
-                break
-            elif event == Event.Aborted:
-                typer.echo(f"⚠️ Instance aborted: {message}")
-                break
-            elif event == Event.Exception:
-                typer.echo(f"❌ Instance exception: {message}", err=True)
-                break
-            elif event == Event.ServerError:
-                typer.echo(f"❌ Server error: {message}", err=True)
-                break
-            elif event == Event.OutOfResources:
-                typer.echo(f"❌ Out of resources: {message}", err=True)
-                break
-            elif event == Event.Blob:
-                typer.echo(f"[Received blob: {len(message)} bytes]")
+            # Check if program already exists, upload if not
+            if not await client.program_exists(program_hash):
+                typer.echo("Uploading inferlet...")
+                await client.upload_program(inferlet_blob)
             else:
-                typer.echo(f"[Unknown event {event}]: {message}")
+                typer.echo("Inferlet already cached on server.")
+
+            # Launch the instance
+            typer.echo(f"Launching {inferlet_path.name}...")
+            instance = await client.launch_instance(
+                program_hash=program_hash,
+                arguments=arguments,
+                detached=False,
+            )
+            typer.echo(f"Instance launched: {instance.instance_id}")
+
+            # Stream events until completion
+            while True:
+                # Wait for either new message or monitor failure
+                recv_task = asyncio.create_task(instance.recv())
+                
+                tasks = [recv_task]
+                if monitor_task:
+                    tasks.append(monitor_task)
+                
+                done, pending = await asyncio.wait(
+                    tasks, 
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+
+                if monitor_task in done:
+                    # Monitor task finished (meaning it raised exception)
+                    monitor_task.result()  # Re-raise exception
+                
+                # If we get here, recv_task must be done
+                event, message = recv_task.result()
+
+                if event == Event.Stdout:
+                    # Stream stdout without extra newline
+                    print(message, end="", flush=True)
+                elif event == Event.Stderr:
+                    # Stream stderr to stderr
+                    import sys
+                    print(message, end="", file=sys.stderr, flush=True)
+                elif event == Event.Message:
+                    typer.echo(f"[Message] {message}")
+                elif event == Event.Completed:
+                    typer.echo(f"✅ Instance completed: {message}")
+                    break
+                elif event == Event.Aborted:
+                    typer.echo(f"⚠️ Instance aborted: {message}")
+                    break
+                elif event == Event.Exception:
+                    typer.echo(f"❌ Instance exception: {message}", err=True)
+                    break
+                elif event == Event.ServerError:
+                    typer.echo(f"❌ Server error: {message}", err=True)
+                    break
+                elif event == Event.OutOfResources:
+                    typer.echo(f"❌ Out of resources: {message}", err=True)
+                    break
+                elif event == Event.Blob:
+                    typer.echo(f"[Received blob: {len(message)} bytes]")
+                else:
+                    typer.echo(f"[Unknown event {event}]: {message}")
+
+        # If we have a monitor task, cancel it
+        if monitor_task:
+            monitor_task.cancel()
+            try:
+                await monitor_task
+            except asyncio.CancelledError:
+                pass
+
+
+async def _monitor_processes_task(
+    server_handle: "pie_rs.ServerHandle | None",
+    backend_processes: list | None,
+):
+    """Async task to monitor backend processes."""
+    import asyncio
+    
+    if not backend_processes:
+        return
+
+    while True:
+        if not check_backend_processes(backend_processes):
+            # If any backend dies, we raise an exception to cancel the run
+            raise RuntimeError("Backend process died")
+        
+        # Also check engine if possible
+        if server_handle and hasattr(server_handle, 'is_running'):
+            if not server_handle.is_running():
+                raise RuntimeError("Engine process died")
+
+        await asyncio.sleep(1.0)
+
 
 
 def submit_inferlet_from_registry_and_wait(
     client_config: dict,
     inferlet_name: str,
     arguments: list[str],
+    server_handle: "pie_rs.ServerHandle | None" = None,
+    backend_processes: list | None = None,
 ) -> None:
     """Submit an inferlet from the registry and wait for it to finish.
 
@@ -507,13 +592,21 @@ def submit_inferlet_from_registry_and_wait(
     """
     import asyncio
 
-    asyncio.run(_submit_inferlet_from_registry_async(client_config, inferlet_name, arguments))
+    asyncio.run(_submit_inferlet_from_registry_async(
+        client_config, 
+        inferlet_name, 
+        arguments, 
+        server_handle, 
+        backend_processes
+    ))
 
 
 async def _submit_inferlet_from_registry_async(
     client_config: dict,
     inferlet_name: str,
     arguments: list[str],
+    server_handle: "pie_rs.ServerHandle | None" = None,
+    backend_processes: list | None = None,
 ) -> None:
     """Async implementation of submit_inferlet_from_registry_and_wait."""
     from pie_client import PieClient, Event
@@ -524,22 +617,45 @@ async def _submit_inferlet_from_registry_async(
     internal_token = client_config.get("internal_auth_token")
     server_uri = f"ws://{host}:{port}"
 
-    async with PieClient(server_uri) as client:
-        # Authenticate with internal token
-        await client.internal_authenticate(internal_token)
+    # Start monitoring task if processes provided
+    monitor_task = None
+    if backend_processes:
+        monitor_task = asyncio.create_task(_monitor_processes_task(server_handle, backend_processes))
 
-        # Launch the instance from registry
-        typer.echo(f"Launching {inferlet_name} from registry...")
-        instance = await client.launch_instance_from_registry(
-            inferlet=inferlet_name,
-            arguments=arguments,
-            detached=False,
-        )
-        typer.echo(f"Instance launched: {instance.instance_id}")
+    try:
+        async with PieClient(server_uri) as client:
+            # Authenticate with internal token
+            await client.internal_authenticate(internal_token)
 
-        # Stream events until completion
-        while True:
-            event, message = await instance.recv()
+            # Launch the instance from registry
+            typer.echo(f"Launching {inferlet_name} from registry...")
+            instance = await client.launch_instance_from_registry(
+                inferlet=inferlet_name,
+                arguments=arguments,
+                detached=False,
+            )
+            typer.echo(f"Instance launched: {instance.instance_id}")
+
+            # Stream events until completion
+            while True:
+                # Wait for either new message or monitor failure
+                recv_task = asyncio.create_task(instance.recv())
+                
+                tasks = [recv_task]
+                if monitor_task:
+                    tasks.append(monitor_task)
+                
+                done, pending = await asyncio.wait(
+                    tasks, 
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+
+                if monitor_task in done:
+                    # Monitor task finished (meaning it raised exception)
+                    monitor_task.result()  # Re-raise exception
+                
+                # If we get here, recv_task must be done
+                event, message = recv_task.result()
 
             if event == Event.Stdout:
                 # Stream stdout without extra newline
@@ -569,3 +685,7 @@ async def _submit_inferlet_from_registry_async(
                 typer.echo(f"[Received blob: {len(message)} bytes]")
             else:
                 typer.echo(f"[Unknown event {event}]: {message}")
+    except Exception:
+        if monitor_task and not monitor_task.done():
+            monitor_task.cancel()
+        raise
