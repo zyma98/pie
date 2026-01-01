@@ -201,24 +201,43 @@ class ForwardPass:
             workspace_buffer, "NHD"
         )
 
-    def embed_inputs(self, batch_metadata: dict[str, Any]) -> torch.Tensor:
-        """
-        Embed input tokens into hidden states.
+    def embed_tokens(self, token_ids: torch.Tensor) -> torch.Tensor:
+
+
+        if self.runtime_config.world_size == 1:
+            return fun.embedding(token_ids, self.weights.get("embed_token"))
+
+        """Embed token IDs with Tensor Parallel support."""
+        # 1. Determine local vocab range
+        vocab_size = self.model_config.num_vocabs
+        world_size = self.runtime_config.world_size
+        rank = self.runtime_config.rank
         
-        Args:
-            batch_metadata: Metadata dictionary from the batch builder/packager.
-            
-        Returns:
-            Tensor of input embeddings.
-        """
-        device = self.runtime_config.device
-        
-        # Extract token IDs from metadata
-        token_ids_tensor = torch.as_tensor(
-            batch_metadata["token_ids"], device=device, dtype=torch.int32
-        )
-        
-        return self.embed_tokens(token_ids_tensor)
+        part_size = vocab_size // world_size
+        start_idx = rank * part_size
+        end_idx = start_idx + part_size
+
+        # 2. Mask and Shift indices
+        # Create a mask for tokens belonging to this rank
+        mask = (token_ids >= start_idx) & (token_ids < end_idx)
+        # Shift indices to be 0-based for the local shard
+        local_ids = token_ids - start_idx
+        # Zero out indices not in this shard to prevent OOB crash
+        # (The embedding output for these will be masked out anyway or irrelevant)
+        safe_ids = torch.where(mask, local_ids, torch.tensor(0, device=token_ids.device))
+
+        # 3. Lookup
+        local_embeds = fun.embedding(safe_ids, self.weights.get("embed_token"))
+
+        # 4. Zero out embeddings for tokens not owned by this rank
+        # shape: [batch, seq, hidden]
+        local_embeds = local_embeds * mask.unsqueeze(-1)
+
+        # 5. AllReduce to combine partial embeddings from all ranks
+        if world_size > 1:
+            dist.all_reduce(local_embeds)
+
+        return local_embeds
 
     def sample(
         self,
@@ -259,7 +278,6 @@ class ForwardPass:
             weight=self.weights.get("norm_last"),
             eps=self.model_config.rms_norm_eps,
         )
-        # Project to vocab (weight-tied with embedding)
         # Project to vocab (weight-tied with embedding)
         logits = fun.linear(normed, self.weights.get("embed_token"))
 
