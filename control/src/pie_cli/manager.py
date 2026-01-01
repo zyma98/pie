@@ -214,7 +214,7 @@ def wait_for_backends(
     server_handle: "pie_rs.ServerHandle",
     expected_count: int,
     timeout: float,
-    backend_processes: list[subprocess.Popen],
+    backend_processes: list,
 ) -> bool:
     """Wait for the expected number of backends to register with the engine.
 
@@ -233,10 +233,24 @@ def wait_for_backends(
     while time.time() - start_time < timeout:
         # Check if any backend process has died
         for i, process in enumerate(backend_processes):
-            if process.poll() is not None:
+            is_dead = False
+            return_code = None
+            stderr = ""
+
+            if isinstance(process, subprocess.Popen):
+                if process.poll() is not None:
+                    is_dead = True
+                    return_code = process.returncode
+                    stderr = process.stderr.read().decode() if process.stderr else ""
+            else:
+                # Assume multiprocessing.Process
+                if not process.is_alive():
+                    is_dead = True
+                    return_code = process.exitcode
+            
+            if is_dead:
                 # Process has exited
-                stderr = process.stderr.read().decode() if process.stderr else ""
-                typer.echo(f"❌ Backend process exited unexpectedly (exit code {process.returncode})", err=True)
+                typer.echo(f"❌ Backend process exited unexpectedly (exit code {return_code})", err=True)
                 if stderr:
                     typer.echo(f"   stderr: {stderr[:500]}", err=True)
                 return False
@@ -253,7 +267,7 @@ def wait_for_backends(
 
 def terminate_engine_and_backend(
     server_handle: "pie_rs.ServerHandle | None",
-    backend_processes: list[subprocess.Popen],
+    backend_processes: list,
 ) -> None:
     """Terminate the engine and backend processes.
 
@@ -266,12 +280,25 @@ def terminate_engine_and_backend(
     typer.echo("🔄 Terminating backend processes...")
 
     for process in backend_processes:
-        if process.poll() is None:  # Still running
-            pid = process.pid
+        is_running = False
+        pid = process.pid
+        
+        if isinstance(process, subprocess.Popen):
+            is_running = process.poll() is None
+        else:
+            is_running = process.is_alive()
+
+        if is_running:  # Still running
             typer.echo(f"🔄 Terminating backend process with PID: {pid}")
             try:
-                process.send_signal(signal.SIGTERM)
-                process.wait(timeout=10)
+                if isinstance(process, subprocess.Popen):
+                    process.send_signal(signal.SIGTERM)
+                    process.wait(timeout=10)
+                else:
+                    process.terminate()
+                    process.join(timeout=10)
+                    if process.is_alive():
+                        raise subprocess.TimeoutExpired(cmd=str(pid), timeout=10)
             except subprocess.TimeoutExpired:
                 typer.echo(f"  Force killing process {pid}")
                 process.kill()
