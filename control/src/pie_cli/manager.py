@@ -450,6 +450,7 @@ async def _submit_inferlet_async(
 ) -> None:
     """Async implementation of submit_inferlet_and_wait."""
     import blake3
+    import asyncio
     from pie_client import PieClient, Event
 
     # Check inferlet exists
@@ -543,6 +544,7 @@ async def _submit_inferlet_async(
                 else:
                     typer.echo(f"[Unknown event {event}]: {message}")
 
+    finally:
         # If we have a monitor task, cancel it
         if monitor_task:
             monitor_task.cancel()
@@ -609,6 +611,7 @@ async def _submit_inferlet_from_registry_async(
     backend_processes: list | None = None,
 ) -> None:
     """Async implementation of submit_inferlet_from_registry_and_wait."""
+    import asyncio
     from pie_client import PieClient, Event
 
     # Build the WebSocket URI
@@ -657,34 +660,34 @@ async def _submit_inferlet_from_registry_async(
                 # If we get here, recv_task must be done
                 event, message = recv_task.result()
 
-            if event == Event.Stdout:
-                # Stream stdout without extra newline
-                print(message, end="", flush=True)
-            elif event == Event.Stderr:
-                # Stream stderr to stderr
-                import sys
-                print(message, end="", file=sys.stderr, flush=True)
-            elif event == Event.Message:
-                typer.echo(f"[Message] {message}")
-            elif event == Event.Completed:
-                typer.echo(f"✅ Instance completed: {message}")
-                break
-            elif event == Event.Aborted:
-                typer.echo(f"⚠️ Instance aborted: {message}")
-                break
-            elif event == Event.Exception:
-                typer.echo(f"❌ Instance exception: {message}", err=True)
-                break
-            elif event == Event.ServerError:
-                typer.echo(f"❌ Server error: {message}", err=True)
-                break
-            elif event == Event.OutOfResources:
-                typer.echo(f"❌ Out of resources: {message}", err=True)
-                break
-            elif event == Event.Blob:
-                typer.echo(f"[Received blob: {len(message)} bytes]")
-            else:
-                typer.echo(f"[Unknown event {event}]: {message}")
+                if event == Event.Stdout:
+                    # Stream stdout without extra newline
+                    print(message, end="", flush=True)
+                elif event == Event.Stderr:
+                    # Stream stderr to stderr
+                    import sys
+                    print(message, end="", file=sys.stderr, flush=True)
+                elif event == Event.Message:
+                    typer.echo(f"[Message] {message}")
+                elif event == Event.Completed:
+                    typer.echo(f"✅ Instance completed: {message}")
+                    break
+                elif event == Event.Aborted:
+                    typer.echo(f"⚠️ Instance aborted: {message}")
+                    break
+                elif event == Event.Exception:
+                    typer.echo(f"❌ Instance exception: {message}", err=True)
+                    break
+                elif event == Event.ServerError:
+                    typer.echo(f"❌ Server error: {message}", err=True)
+                    break
+                elif event == Event.OutOfResources:
+                    typer.echo(f"❌ Out of resources: {message}", err=True)
+                    break
+                elif event == Event.Blob:
+                    typer.echo(f"[Received blob: {len(message)} bytes]")
+                else:
+                    typer.echo(f"[Unknown event {event}]: {message}")
     except Exception:
         if monitor_task and not monitor_task.done():
             monitor_task.cancel()
