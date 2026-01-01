@@ -220,6 +220,13 @@ def init_process(
         # Rank 0 runs the server
         print(f"Starting server for model {model} on {config.device}...")
         start_server(host=host, port=port, auth_token=internal_auth_token, service=service, run_tests=test)
+        
+        # Shutdown workers
+        if world_size > 1:
+            print("Stopping worker processes...")
+            from . import utils
+            # Use broadcast_struct to send STOP signal
+            utils.broadcast_struct("STOP", src=0, device=config.device)
     else:
         # Workers run the worker loop
         service.worker_loop()

@@ -434,11 +434,12 @@ class Runtime:
             
             # Use optimized broadcast structure (metadata on CPU, tensors on GPU)
             inputs = utils.broadcast_struct(None, src=0, device=device)
-            sampling_metadata = utils.broadcast_struct(None, src=0, device=device)
-            
             if inputs == "STOP":
                 break
                 
+            # If we didn't receive "STOP", we expect the sampling metadata next
+            sampling_metadata = utils.broadcast_struct(None, src=0, device=device)
+            
             if inputs is None:
                 continue
 
