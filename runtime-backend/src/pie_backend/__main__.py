@@ -85,11 +85,24 @@ def main(
         # Use 'spawn' context for CUDA compatibility
         mp.set_start_method("spawn", force=True)
         
+        # Helper: signal
+        import signal
+        
+        # Remove the previous simple ignore if present, or just implement new logic
+        # We need the parent to handle SIGTERM to kill children, but children need to ignore it initially
+        # until Rank 0 tells them to stop (or parent kills them).
+        
+        # ACTUALLY, simpler approach based on plan:
+        # Parent: Catch SIGTERM -> ctx.terminate() -> join()
+        # Children: Ignore SIGTERM. Rank 0 re-enables it.
+        
+        # So in main (parent):
         # Generate master port BEFORE spawn so all processes use same port
         master_port = 29500 + random.randint(0, 1000)
         
         print(f"Spawning {world_size} processes for devices: {device_list}")
-        mp.spawn(
+        
+        ctx = mp.spawn(
             init_process,
             args=(
                 world_size,
@@ -113,8 +126,21 @@ def main(
                 test,
             ),
             nprocs=world_size,
-            join=True,
+            join=False, # We manage join manually
         )
+        
+        def sigterm_handler(signum, frame):
+            # Forward signal to children
+            # iterating ctx.processes is correct for SpawnContext
+            for p in ctx.processes:
+                if p.is_alive():
+                    p.terminate()
+            
+        signal.signal(signal.SIGTERM, sigterm_handler)
+        
+        # Wait for children
+        while not ctx.join():
+             pass
     else:
         # Single process mode (backward compatibility)
         single_device = device_list[0] if device_list else None
@@ -167,6 +193,12 @@ def init_process(
     """
     import os
     import torch.distributed as dist
+    import signal
+
+    # Ignore SIGTERM initially so we don't die when parent forwards it.
+    # Rank 0 will re-enable a handler in start_server.
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
 
     # Setup distributed environment if world_size > 1
     if world_size > 1:
@@ -222,11 +254,8 @@ def init_process(
         start_server(host=host, port=port, auth_token=internal_auth_token, service=service, run_tests=test)
         
         # Shutdown workers
-        if world_size > 1:
-            print("Stopping worker processes...")
-            from . import utils
-            # Use broadcast_struct to send STOP signal
-            utils.broadcast_struct("STOP", src=0, device=config.device)
+        # Handled inside start_server -> service.shutdown()
+        
     else:
         # Workers run the worker loop
         service.worker_loop()

@@ -521,4 +521,13 @@ class Runtime:
 
         return responses
 
+    def shutdown(self):
+        """
+        Cleanup runtime resources.
+        
+        For Rank 0 in multi-GPU setup, this broadcasts the 'STOP' signal to workers.
+        """
+        if self.config.world_size > 1 and self.config.rank == 0:
+            print("Broadcasting STOP signal to workers...")
+            utils.broadcast_struct("STOP", src=0, device=self.config.device)
 
