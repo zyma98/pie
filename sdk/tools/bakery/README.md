@@ -76,10 +76,10 @@ bakery inferlet publish <path>
 
 ## Development
 
-When developing within the pie repository, set `PIE_HOME` to the repository root:
+When developing within the pie repository, set `PIE_SDK` to the SDK directory:
 
 ```bash
-export PIE_HOME=/path/to/pie
+export PIE_SDK=/path/to/pie/sdk
 ```
 
 This allows bakery to find the inferlet SDK libraries automatically.

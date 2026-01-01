@@ -96,41 +96,41 @@ def ensure_npm_dependencies(package_dir: Path) -> None:
 
 def get_inferlet_js_path() -> Path:
     """Get the path to the inferlet-js library."""
-    # Try PIE_HOME environment variable
-    if pie_home := os.environ.get("PIE_HOME"):
-        path = Path(pie_home) / "inferlet-js"
+    # Try PIE_SDK environment variable
+    if pie_sdk := os.environ.get("PIE_SDK"):
+        path = Path(pie_sdk) / "javascript"
         if path.exists():
             return path
     
     # Walk up from current directory
     current_dir = Path.cwd()
     for parent in [current_dir] + list(current_dir.parents):
-        inferlet_js_path = parent / "inferlet-js"
+        inferlet_js_path = parent / "sdk" / "javascript"
         if inferlet_js_path.exists() and (inferlet_js_path / "package.json").exists():
             return inferlet_js_path
     
     raise FileNotFoundError(
-        "Could not find inferlet-js library. Please set PIE_HOME environment variable."
+        "Could not find inferlet-js library. Please set PIE_SDK environment variable."
     )
 
 
 def get_wit_path() -> Path:
     """Get the path to the WIT directory."""
-    # Try PIE_HOME environment variable
-    if pie_home := os.environ.get("PIE_HOME"):
-        path = Path(pie_home) / "inferlet" / "wit"
+    # Try PIE_SDK environment variable
+    if pie_sdk := os.environ.get("PIE_SDK"):
+        path = Path(pie_sdk) / "interfaces"
         if path.exists():
             return path
     
     # Walk up from current directory
     current_dir = Path.cwd()
     for parent in [current_dir] + list(current_dir.parents):
-        wit_path = parent / "inferlet" / "wit"
+        wit_path = parent / "sdk" / "interfaces"
         if wit_path.exists():
             return wit_path
     
     raise FileNotFoundError(
-        "Could not find WIT directory. Please set PIE_HOME environment variable."
+        "Could not find WIT directory. Please set PIE_SDK environment variable."
     )
 
 

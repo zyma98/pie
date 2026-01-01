@@ -28,29 +28,29 @@ def get_inferlet_js_path() -> Path:
     """Get the path to the inferlet-js library.
     
     Searches in order:
-    1. PIE_HOME environment variable
+    1. PIE_SDK environment variable
     2. Walk up from current directory (for development)
     
     Raises:
         FileNotFoundError: If inferlet-js cannot be found.
     """
-    # Try PIE_HOME environment variable
-    if pie_home := os.environ.get("PIE_HOME"):
-        path = Path(pie_home) / "inferlet-js"
+    # Try PIE_SDK environment variable
+    if pie_sdk := os.environ.get("PIE_SDK"):
+        path = Path(pie_sdk) / "javascript"
         if path.exists():
             return path
     
     # Walk up from current directory (development mode)
     current_dir = Path.cwd()
     for parent in [current_dir] + list(current_dir.parents):
-        inferlet_js_path = parent / "inferlet-js"
+        inferlet_js_path = parent / "sdk" / "javascript"
         if inferlet_js_path.exists() and (inferlet_js_path / "package.json").exists():
             return inferlet_js_path
     
     raise FileNotFoundError(
         f"Could not find inferlet-js directory.\n"
         f"Searched from: {current_dir}\n"
-        f"Make sure you're running from within the pie repository or that PIE_HOME is set."
+        f"Make sure you're running from within the pie repository or that PIE_SDK is set."
     )
 
 
@@ -118,9 +118,9 @@ def generate_rust_lib(project_dir: Path, _name: str) -> None:
 def generate_rust_cargo_toml(project_dir: Path, name: str) -> None:
     """Generate the Cargo.toml file for Rust inferlet."""
     # Use crates.io path if not in dev mode
-    if pie_home := os.environ.get("PIE_HOME"):
-        inferlet_dep = f'{{ path = "{pie_home}/sdk/rust/inferlet" }}'
-        macros_dep = f'{{ path = "{pie_home}/sdk/rust/inferlet-macros" }}'
+    if pie_sdk := os.environ.get("PIE_SDK"):
+        inferlet_dep = f'{{ path = "{pie_sdk}/rust/inferlet" }}'
+        macros_dep = f'{{ path = "{pie_sdk}/rust/inferlet-macros" }}'
     else:
         # Try to find relative paths
         current_dir = Path.cwd()
