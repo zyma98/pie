@@ -1,7 +1,7 @@
 """Build command implementation for Bakery.
 
 This module implements the `bakery build` subcommand for building
-JavaScript/TypeScript inferlets into WebAssembly components.
+JavaScript/TypeScript and Rust inferlets into WebAssembly components.
 """
 
 import json
@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
 from typing import Optional
 
@@ -24,6 +25,41 @@ except ImportError:
 def command_exists(cmd: str) -> bool:
     """Check if a command is available in PATH."""
     return shutil.which(cmd) is not None
+
+
+def detect_platform(input_path: Path) -> str:
+    """Auto-detect project platform (rust or javascript).
+    
+    Args:
+        input_path: Path to file or directory.
+    
+    Returns:
+        "rust" or "javascript"
+    
+    Raises:
+        ValueError: If platform cannot be determined.
+    """
+    if input_path.is_dir():
+        if (input_path / "Cargo.toml").exists():
+            return "rust"
+        if (input_path / "package.json").exists():
+            return "javascript"
+        raise ValueError(
+            f"Cannot detect platform for '{input_path}'. "
+            "Expected Cargo.toml (Rust) or package.json (JavaScript)."
+        )
+    
+    if input_path.is_file():
+        ext = input_path.suffix.lower()
+        if ext == ".rs":
+            return "rust"
+        if ext in (".js", ".ts"):
+            return "javascript"
+        raise ValueError(
+            f"Unsupported file type: {ext}. Expected .rs, .js, or .ts"
+        )
+    
+    raise ValueError(f"Input '{input_path}' does not exist")
 
 
 def ensure_npm_dependencies(package_dir: Path) -> None:
@@ -98,8 +134,8 @@ def get_wit_path() -> Path:
     )
 
 
-def detect_input_type(input_path: Path) -> tuple[str, Path]:
-    """Detect whether input is a single file or package directory.
+def detect_js_input_type(input_path: Path) -> tuple[str, Path]:
+    """Detect whether JS input is a single file or package directory.
     
     Returns:
         Tuple of (type, entry_point) where type is "file" or "package".
@@ -383,12 +419,77 @@ export const run = {{
     output_path.write_text(wrapper_content)
 
 
-def handle_build_command(
-    input_path: Path,
-    output: Path,
-    debug: bool = False,
-) -> None:
-    """Handle the `bakery build` command.
+def handle_rust_build(input_path: Path, output: Path) -> None:
+    """Build a Rust inferlet to WASM.
+    
+    Args:
+        input_path: Path to the Rust project directory (containing Cargo.toml).
+        output: Output path for the .wasm file.
+    """
+    # Check prerequisites
+    if not command_exists("cargo"):
+        raise RuntimeError(
+            "cargo is required but not found. Please install Rust: https://rustup.rs"
+        )
+    
+    # Ensure input is a directory with Cargo.toml
+    if not input_path.is_dir():
+        raise ValueError(f"Rust build requires a directory, got file: {input_path}")
+    
+    cargo_toml = input_path / "Cargo.toml"
+    if not cargo_toml.exists():
+        raise ValueError(f"No Cargo.toml found in {input_path}")
+    
+    print("🏗️  Building Rust inferlet...")
+    print(f"   Input: {input_path}")
+    print(f"   Output: {output}")
+    
+    # Run cargo build
+    print("🔧 Running cargo build...")
+    cmd = [
+        "cargo", "build",
+        "--target", "wasm32-wasip2",
+        "--release",
+    ]
+    
+    result = subprocess.run(
+        cmd,
+        cwd=input_path,
+        capture_output=True,
+        text=True,
+    )
+    
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"cargo build failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+    
+    # Find the output wasm file
+    # Parse Cargo.toml to get the package name
+    cargo_data = tomllib.loads(cargo_toml.read_text())
+    package_name = cargo_data.get("package", {}).get("name", input_path.name)
+    # Cargo replaces hyphens with underscores in output file names
+    wasm_name = package_name.replace("-", "_")
+    
+    wasm_path = input_path / "target" / "wasm32-wasip2" / "release" / f"{wasm_name}.wasm"
+    
+    if not wasm_path.exists():
+        raise RuntimeError(
+            f"Expected output not found at {wasm_path}\n"
+            "Build may have succeeded but output location is different."
+        )
+    
+    # Copy to output location
+    shutil.copy2(wasm_path, output)
+    
+    # Success
+    wasm_size = output.stat().st_size if output.exists() else 0
+    print("✅ Build successful!")
+    print(f"   Output: {output} ({wasm_size / 1024:.1f} KB)")
+
+
+def handle_js_build(input_path: Path, output: Path, debug: bool = False) -> None:
+    """Build a JavaScript/TypeScript inferlet to WASM.
     
     Build process:
     1. Check prerequisites (Node.js, npx)
@@ -421,7 +522,7 @@ def handle_build_command(
     print(f"   Output: {output}")
     
     # Detect input type
-    input_type, entry_point = detect_input_type(input_path)
+    input_type, entry_point = detect_js_input_type(input_path)
     print(f"   Type: {'Single file' if input_type == 'file' else 'Package'}")
     
     # Create temp directory
@@ -457,3 +558,27 @@ def handle_build_command(
     wasm_size = output.stat().st_size if output.exists() else 0
     print("✅ Build successful!")
     print(f"   Output: {output} ({wasm_size / 1024:.1f} KB)")
+
+
+def handle_build_command(
+    input_path: Path,
+    output: Path,
+    debug: bool = False,
+) -> None:
+    """Handle the `bakery build` command.
+    
+    Auto-detects project platform (Rust or JavaScript) and dispatches
+    to the appropriate build handler.
+    
+    Args:
+        input_path: Path to the project directory or source file.
+        output: Output path for the .wasm file.
+        debug: Enable debug mode (JS only: inline source maps).
+    """
+    # Auto-detect platform
+    platform = detect_platform(input_path)
+    
+    if platform == "rust":
+        handle_rust_build(input_path, output)
+    else:
+        handle_js_build(input_path, output, debug)

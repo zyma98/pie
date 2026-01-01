@@ -16,7 +16,7 @@ from . import login as login_cmd
 # Main application
 app = typer.Typer(
     name="bakery",
-    help="Pie Bakery - Build and publish JS/TS inferlets",
+    help="Pie Bakery - Build and publish inferlets",
     no_args_is_help=True,
 )
 
@@ -78,12 +78,12 @@ def build(
 @app.command()
 def create(
     name: Annotated[str, typer.Argument(help="Name of the inferlet project.")],
-    js: Annotated[bool, typer.Option("--js", help="Use JavaScript instead of TypeScript.")] = False,
+    ts: Annotated[bool, typer.Option("--ts", "-t", help="Create a TypeScript project instead of Rust.")] = False,
     output: Annotated[Optional[Path], typer.Option("-o", "--output", help="Output directory.")] = None,
 ) -> None:
-    """Create a new JavaScript/TypeScript inferlet project."""
+    """Create a new inferlet project (Rust by default, or TypeScript with --ts)."""
     try:
-        create_cmd.handle_create_command(name=name, js=js, output=output)
+        create_cmd.handle_create_command(name=name, rust=not ts, output=output)
     except Exception as e:
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(1)
