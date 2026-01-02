@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 def start_engine_and_backend(
     engine_config: dict,
-    backend_configs: list[dict],
+    model_configs: list[dict],
     timeout: float = 60.0,
 ) -> tuple["pie_rs.ServerHandle", list[subprocess.Popen]]:
     """Start the Pie engine and all configured backend services.
