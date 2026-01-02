@@ -391,10 +391,32 @@ class Runtime:
     def upload_adapter(self, reqs: list[message.UploadAdapterRequest]) -> None:
         """Upload adapter weights."""
         for req in reqs:
-            if req.adapter_ptr in self.adapters:
-                adapter = self.adapters[req.adapter_ptr]
-                if isinstance(adapter, CmaesAdapter):
-                    adapter.upload(req.name, req.adapter_data)
+            args = {
+                "adapter_ptr": req.adapter_ptr,
+                "name": req.name,
+                "data": req.adapter_data
+            }
+            
+            if self.config.world_size > 1:
+                # Broadcast UPLOAD_ADAPTER command
+                msg = {
+                    "type": "UPLOAD_ADAPTER",
+                    "kwargs": args
+                }
+                utils.broadcast_struct(msg, src=0, device=self.config.device)
+            
+            self._upload_adapter(**args)
+
+    def _upload_adapter(self, adapter_ptr: int, name: str, data: bytes) -> None:
+        if adapter_ptr in self.adapters:
+            adapter = self.adapters[adapter_ptr]
+            if isinstance(adapter, CmaesAdapter):
+                # For multi-GPU, append rank to filename to ensure each rank loads its own shard
+                # Current CmaesAdapter implementation expects rank-specific checkpoints
+                if self.config.world_size > 1:
+                    name = f"{name}_rank{self.config.rank}"
+                
+                adapter.upload(name, data)
 
     def download_adapter(
         self, reqs: list[message.DownloadAdapterRequest]
@@ -402,13 +424,37 @@ class Runtime:
         """Download adapter weights."""
         resps = []
         for req in reqs:
-            if req.adapter_ptr in self.adapters:
-                adapter = self.adapters[req.adapter_ptr]
-                if isinstance(adapter, CmaesAdapter):
-                    data = adapter.download(req.name)
-                    resp = message.DownloadAdapterResponse(adapter_data=data)
-                    resps.append(resp)
+            args = {
+                "adapter_ptr": req.adapter_ptr,
+                "name": req.name
+            }
+            
+            if self.config.world_size > 1:
+                # Broadcast DOWNLOAD_ADAPTER command
+                msg = {
+                    "type": "DOWNLOAD_ADAPTER",
+                    "kwargs": args
+                }
+                utils.broadcast_struct(msg, src=0, device=self.config.device)
+                
+            data = self._download_adapter(**args)
+            
+            # Pack response (only Rank 0 returns data to client)
+            resp = message.DownloadAdapterResponse(adapter_data=data)
+            resps.append(resp)
+            
         return resps
+
+    def _download_adapter(self, adapter_ptr: int, name: str) -> bytes:
+        if adapter_ptr in self.adapters:
+            adapter = self.adapters[adapter_ptr]
+            if isinstance(adapter, CmaesAdapter):
+                # For multi-GPU, append rank to filename to save rank-specific shards
+                if self.config.world_size > 1:
+                    name = f"{name}_rank{self.config.rank}"
+                    
+                return adapter.download(name)
+        return b""
 
     # ========================================================================
     # Internal Adapter Methods
@@ -542,6 +588,16 @@ class Runtime:
                     # Update adapter
                     kwargs = msg["kwargs"]
                     self._update_adapter(**kwargs)
+
+                elif msg_type == "UPLOAD_ADAPTER":
+                    # Upload adapter
+                    kwargs = msg["kwargs"]
+                    self._upload_adapter(**kwargs)
+
+                elif msg_type == "DOWNLOAD_ADAPTER":
+                    # Download adapter
+                    kwargs = msg["kwargs"]
+                    self._download_adapter(**kwargs)
                     
             # Other message types can be added here
 
