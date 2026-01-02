@@ -59,7 +59,7 @@ class TrainingConfig:
     )
 
     # --- Checkpointing Configuration ---
-    INITIAL_CHECKPOINT_NAME: Optional[str] = None
+    INITIAL_CHECKPOINT_NAME: Optional[str] = "evo-math-v1-step-65"
     CHECKPOINT_EVERY_N_STEPS: int = 5
 
     # --- Evaluation Configuration ---
