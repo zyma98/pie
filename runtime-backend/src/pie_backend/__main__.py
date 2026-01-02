@@ -39,8 +39,6 @@ def main(
         model: Name of the model to load (required).
         host: Hostname for the ZMQ service to bind to.
         port: Port for the ZMQ service to bind to.
-        controller_host: Hostname of the controller to register with.
-        controller_port: Port of the controller to register with.
         internal_auth_token: Internal authentication token for connecting to the controller.
         cache_dir: Directory for model cache. Defaults to PIE_HOME env var,
                    then the platform-specific user cache dir.

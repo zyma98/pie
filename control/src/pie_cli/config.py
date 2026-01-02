@@ -19,7 +19,7 @@ console = Console()
 app = typer.Typer(help="Manage configuration")
 
 
-def create_default_config_content(backend_type: str = "python") -> str:
+def create_default_config_content() -> str:
     """Create the default configuration file content."""
     cache_dir = str(pie_path.get_pie_home() / "cache")
     log_dir = str(pie_path.get_pie_home() / "logs")
@@ -31,18 +31,12 @@ def create_default_config_content(backend_type: str = "python") -> str:
         "verbose": False,
         "log_dir": log_dir,
         "registry": "https://registry.pie-project.org/",
-    }
-
-    if backend_type == "dummy":
-        config["backend"] = [{"backend_type": "dummy"}]
-    else:
-        config["backend"] = [
+        "backend": [
             {
-                "backend_type": "python",
-                "exec_path": "pie-backend",
                 "model": "qwen-3-0.6b",
                 "device": ["cuda:0"],
                 "activation_dtype": "bfloat16",
+                "weight_dtype": "auto",
                 "kv_page_size": 16,
                 "max_batch_tokens": 10240,
                 "max_dist_size": 32,
@@ -53,14 +47,14 @@ def create_default_config_content(backend_type: str = "python") -> str:
                 "enable_profiling": False,
                 "random_seed": 42,
             }
-        ]
+        ],
+    }
 
     return toml.dumps(config)
 
 
 @app.command("init")
 def config_init(
-    dummy: bool = typer.Option(False, "--dummy", help="Initialize with dummy backend"),
     path: Optional[str] = typer.Option(None, "--path", help="Custom config path"),
 ) -> None:
     """Create a default config file."""
@@ -79,8 +73,7 @@ def config_init(
     config_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Create the default config file
-    backend_type = "dummy" if dummy else "python"
-    config_content = create_default_config_content(backend_type)
+    config_content = create_default_config_content()
     config_path.write_text(config_content)
 
     console.print(f"[green]✓[/green] Created {config_path}")
@@ -120,10 +113,6 @@ def config_update(
     log_dir: Optional[str] = typer.Option(None, "--log-dir", help="Log directory path"),
     registry: Optional[str] = typer.Option(None, "--registry", help="Inferlet registry URL"),
     # Backend configuration options
-    backend_type: Optional[str] = typer.Option(None, "--backend-type", help="Backend type"),
-    backend_exec_path: Optional[str] = typer.Option(
-        None, "--backend-exec-path", help="Backend executable path"
-    ),
     backend_model: Optional[str] = typer.Option(None, "--model", help="Model name"),
     backend_device: Optional[list[str]] = typer.Option(
         None, "--device", help="Device(s) (e.g., cuda:0 cuda:1)"
@@ -132,7 +121,7 @@ def config_update(
         None, "--activation-dtype", help="Activation dtype (e.g., bfloat16)"
     ),
     backend_weight_dtype: Optional[str] = typer.Option(
-        None, "--weight-dtype", help="Weight dtype (e.g., int4, int8)"
+        None, "--weight-dtype", help="Weight dtype: auto, float32, float16, bfloat16, int4, int8, float8"
     ),
     backend_kv_page_size: Optional[int] = typer.Option(
         None, "--kv-page-size", help="KV page size"
@@ -183,8 +172,6 @@ def config_update(
     backend_updates = {
         k: v
         for k, v in {
-            "backend_type": backend_type,
-            "exec_path": backend_exec_path,
             "model": backend_model,
             "device": backend_device,
             "activation_dtype": backend_activation_dtype,

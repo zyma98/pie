@@ -426,8 +426,11 @@ class Schema:
         
         # Apply quantization (lazy import to avoid dependency issues)
         if source.should_quantize and config.quantization is not None:
-            
             tensor = quantize(tensor, config.quantization)
+        else:
+            # Apply dtype casting for float weight types (including 'auto')
+            # This handles: auto -> activation_dtype, float32/float16/bfloat16 -> specified dtype
+            tensor = tensor.to(config.compute_dtype)
         
         # Move to device
         tensor = tensor.to(config.device)

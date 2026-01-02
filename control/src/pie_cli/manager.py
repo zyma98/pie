@@ -66,70 +66,18 @@ def start_engine_and_backend(
     backend_processes: list["multiprocessing.Process | subprocess.Popen"] = []
 
     for backend_config in backend_configs:
-        backend_type = backend_config.get("backend_type")
-
-        if backend_type == "dummy":
-            # Dummy backend is handled internally by the Rust code
-            expected_backends += 1
-            typer.echo("- Starting dummy backend")
-            # TODO: Call into Rust to start dummy backend
-            continue
-
-        if backend_type == "python":
-            # Spawn pie-backend directly using multiprocessing
-            typer.echo("- Spawning Python backend (pie-backend)")
-            try:
-                process = spawn_python_backend(
-                    engine_config, 
-                    backend_config, 
-                    server_handle.internal_token
-                )
-                backend_processes.append(process)
-                expected_backends += 1
-            except Exception as e:
-                typer.echo(f"❌ Failed to spawn backend: {e}", err=True)
-                for p in backend_processes:
-                    p.terminate()
-                server_handle.shutdown()
-                raise typer.Exit(1)
-            continue
-
-        # Fallback: external backend via exec_path (for custom backends)
-        exec_path = backend_config.get("exec_path")
-        if not exec_path:
-            typer.echo(f"⚠️ Backend config missing exec_path: {backend_config}", err=True)
-            continue
-
-        # Build command with arguments
-        cmd = [exec_path]
-        cmd.extend(["--host", engine_config.get("host", "127.0.0.1")])
-        cmd.extend(["--port", str(engine_config.get("port", 8080))])
-        cmd.extend(["--internal-auth-token", server_handle.internal_token])
-
-        # Add additional backend config options
-        for key, value in backend_config.items():
-            if key in ("backend_type", "exec_path"):
-                continue
-            if isinstance(value, bool):
-                if value:
-                    cmd.append(f"--{key.replace('_', '-')}")
-            else:
-                cmd.extend([f"--{key.replace('_', '-')}", str(value)])
-
-        typer.echo(f"- Spawning external backend: {exec_path}")
-
+        # Spawn pie-backend directly using multiprocessing
+        typer.echo("- Spawning Python backend (pie-backend)")
         try:
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            process = spawn_python_backend(
+                engine_config, 
+                backend_config, 
+                server_handle.internal_token
             )
             backend_processes.append(process)
             expected_backends += 1
         except Exception as e:
             typer.echo(f"❌ Failed to spawn backend: {e}", err=True)
-            # Clean up already-started backends
             for p in backend_processes:
                 p.terminate()
             server_handle.shutdown()
