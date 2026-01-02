@@ -480,16 +480,29 @@ class Runtime:
         Waits for control messages from rank 0 and executes commands.
         """
         import torch.distributed as dist
+        import signal
         
-        # Create a dummy structure for broadcast receiver
-        # The actual structure is determined by the sender
+        # Re-enable SIGTERM handling so this worker can be terminated
+        # by the parent process during shutdown
+        shutdown_requested = False
+        
+        def sigterm_handler(signum, frame):
+            nonlocal shutdown_requested
+            shutdown_requested = True
+        
+        signal.signal(signal.SIGTERM, sigterm_handler)
+        signal.signal(signal.SIGINT, sigterm_handler)
+        
         device = self.config.device
         
-        while True:
+        while not shutdown_requested:
             # Receive control message
             try:
                 msg = utils.broadcast_struct(None, src=0, device=device)
             except Exception:
+                break
+                
+            if shutdown_requested:
                 break
                 
             if msg == "STOP":
@@ -510,8 +523,6 @@ class Runtime:
                     self._initialize_adapter(**kwargs)
                     
             # Other message types can be added here
-            
-        # print(f"Worker {self.config.rank} finished")
 
     def _run_step(self, inputs: dict, sampling_metadata: dict) -> list:
         """

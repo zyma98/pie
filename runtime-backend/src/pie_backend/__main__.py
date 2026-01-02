@@ -130,18 +130,31 @@ def main(
             join=False, # We manage join manually
         )
         
-        def sigterm_handler(signum, frame):
-            # Forward signal to children
-            # iterating ctx.processes is correct for SpawnContext
+        # Cleanup function to kill all children
+        def cleanup_children():
             for p in ctx.processes:
                 if p.is_alive():
-                    p.terminate()
+                    p.kill()  # Use SIGKILL to ensure termination
+                    p.join(timeout=2)
+        
+        # Register atexit handler to ensure children die when parent dies
+        import atexit
+        atexit.register(cleanup_children)
+        
+        def sigterm_handler(signum, frame):
+            # Forward signal to children and exit
+            cleanup_children()
+            sys.exit(0)
             
         signal.signal(signal.SIGTERM, sigterm_handler)
+        signal.signal(signal.SIGINT, sigterm_handler)
         
         # Wait for children
-        while not ctx.join():
-             pass
+        try:
+            while not ctx.join():
+                pass
+        finally:
+            cleanup_children()
     else:
         # Single process mode (backward compatibility)
         single_device = device_list[0] if device_list else None
@@ -213,12 +226,18 @@ def init_process(
         local_device = devices[rank] if devices and rank < len(devices) else f"cuda:{rank}"
         torch.cuda.set_device(local_device)
         
+        # Suppress harmless barrier() device warning
+        import warnings
+        warnings.filterwarnings("ignore", message=".*barrier.*device under current context.*")
+        
         # Use NCCL for CUDA, GLOO for CPU
         backend = "nccl" if torch.cuda.is_available() else "gloo"
-        # device_id silences "barrier(): using the device under current context" warning
-        # Parse device index from string like "cuda:2"
-        device_idx = int(local_device.split(":")[-1]) if ":" in local_device else 0
-        dist.init_process_group(backend, rank=rank, world_size=world_size, device_id=torch.device("cuda", device_idx))
+        dist.init_process_group(backend, rank=rank, world_size=world_size)
+        
+        # Create a separate GLOO process group for CPU control messages
+        # This allows metadata broadcasts without GPU spin
+        import pie_backend.utils as pie_utils
+        pie_utils._cpu_group = dist.new_group(backend="gloo")
     
     # Determine local device for this rank
     # If devices list is empty (auto-detect), RuntimeConfig will handle it for rank 0
@@ -252,6 +271,11 @@ def init_process(
 
     # Initialize Runtime
     service = Runtime(config)
+
+    # Synchronize all ranks before starting server/worker loop
+    # This prevents workers from spinning on NCCL broadcast before rank 0 is ready
+    if world_size > 1:
+        dist.barrier()
 
     if rank == 0:
         # Rank 0 runs the server
