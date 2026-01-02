@@ -5,6 +5,7 @@ import sys
 import platform
 import importlib.metadata
 import torch
+import time
 
 
 # Main entry point for the server
@@ -127,6 +128,24 @@ def main(
         
         # Cleanup function to kill all children
         def cleanup_children():
+            # First try graceful termination to allow cleanup (destroy_process_group)
+            for p in ctx.processes:
+                if p.is_alive():
+                    p.terminate()
+            
+            # Wait a bit for them to finish
+            start = time.time()
+            all_dead = False
+            while time.time() - start < 12:
+                all_dead = True
+                for p in ctx.processes:
+                    if p.is_alive():
+                        all_dead = False
+                if all_dead:
+                    break
+                time.sleep(0.1)
+
+            # Force kill if still alive
             for p in ctx.processes:
                 if p.is_alive():
                     p.kill()  # Use SIGKILL to ensure termination
@@ -220,7 +239,7 @@ def init_process(
         # Set NCCL timeout so operations fail instead of hanging forever
         # This allows recovery when one rank dies mid-operation
         os.environ["NCCL_TIMEOUT"] = "300"  # 5 minutes
-        os.environ["NCCL_ASYNC_ERROR_HANDLING"] = "1"
+        os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
         
         # CRITICAL: Set CUDA device BEFORE init_process_group so NCCL detects correct device
         local_device = devices[rank] if devices and rank < len(devices) else f"cuda:{rank}"
