@@ -190,17 +190,19 @@ class ForwardPass:
         self.model_config = model_config
         self.runtime_config = runtime_config
         self.weights = weights
-        
+
         # Create workspace buffer for attention operations
-        workspace_buffer = torch.empty(
-            128 * 1024 * 1024, dtype=torch.uint8, device=runtime_config.device
+        self.workspace_buffer = torch.zeros(
+            512 * 1024 * 1024, dtype=torch.uint8, device=self.runtime_config.device
         )
         self.wrapper_decode = ops.BatchDecodeWithPagedKVCacheWrapper(
-            workspace_buffer, "NHD"
+            self.workspace_buffer, "NHD"
         )
         self.wrapper_append = ops.BatchPrefillWithPagedKVCacheWrapper(
-            workspace_buffer, "NHD"
+            self.workspace_buffer, "NHD"
         )
+        
+        
 
     def embed_tokens(self, token_ids: torch.Tensor) -> torch.Tensor:
         """Embed token IDs with Tensor Parallel support (Column Parallel).
@@ -518,6 +520,8 @@ class ForwardPass:
     ) -> torch.Tensor:
         """Main transformation pipeline through all layers."""
 
+        
+
         # --- Calculate local TP sizes ---
         # <-- These are still needed here for planning the wrapper
         local_num_query_heads = self.model_config.num_q_heads // self.runtime_config.world_size
@@ -540,7 +544,7 @@ class ForwardPass:
             nnz=n,
         )
         del seq_lens  # No longer needed
-
+        self.workspace_buffer.zero_()
         if single_token_inference_mode:
             wrapper = self.wrapper_decode
             wrapper.plan(
