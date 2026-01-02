@@ -391,14 +391,27 @@ class Runtime:
     def upload_adapter(self, reqs: list[message.UploadAdapterRequest]) -> None:
         """Upload adapter weights."""
         for req in reqs:
+            # Convert list[int] to bytes if necessary
+            data = req.adapter_data
+            if isinstance(data, list):
+                data = bytes(data)
+            
             args = {
                 "adapter_ptr": req.adapter_ptr,
                 "name": req.name,
-                "data": req.adapter_data
+                "data": data
             }
             
             if self.config.world_size > 1:
                 # Broadcast UPLOAD_ADAPTER command
+                # We do NOT include the data in the broadcast for now to avoid massive traffic
+                # Each rank must load it? Or rank 0 loads and broadcasts weights?
+                # The CmaesAdapter implementation handles broadcasting/sharding OF THE WEIGHTS 
+                # inside .upload() if we wanted, but currently it just loads from file.
+                # However, since we are moving to in-memory, we might need rank 0 to broadcast.
+                # BUT: The current architecture assumes the CLIENT sends the request to the server.
+                # If we are using multi-GPU, we need consistent state.
+                # For now, let's assume we pass the data down.
                 msg = {
                     "type": "UPLOAD_ADAPTER",
                     "kwargs": args
@@ -411,6 +424,8 @@ class Runtime:
         if adapter_ptr in self.adapters:
             adapter = self.adapters[adapter_ptr]
             if isinstance(adapter, CmaesAdapter):
+                # For multi-GPU, append rank to filename to ensure each rank loads its own shard
+                # Current CmaesAdapter implementation expects rank-specific checkpoints
                 # For multi-GPU, append rank to filename to ensure each rank loads its own shard
                 # Current CmaesAdapter implementation expects rank-specific checkpoints
                 if self.config.world_size > 1:
