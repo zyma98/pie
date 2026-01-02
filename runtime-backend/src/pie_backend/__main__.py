@@ -6,6 +6,9 @@ import platform
 import importlib.metadata
 import torch
 import time
+import os
+import signal
+import warnings
 
 
 # Main entry point for the server
@@ -126,32 +129,17 @@ def main(
             join=False, # We manage join manually
         )
         
-        # Cleanup function to kill all children
+        # Cleanup function to kill all children immediately
         def cleanup_children():
-            # First try graceful termination to allow cleanup (destroy_process_group)
             for p in ctx.processes:
                 if p.is_alive():
-                    p.terminate()
-            
-            # Wait a bit for them to finish
-            start = time.time()
-            all_dead = False
-            while time.time() - start < 12:
-                all_dead = True
-                for p in ctx.processes:
-                    if p.is_alive():
-                        all_dead = False
-                if all_dead:
-                    break
-                time.sleep(0.1)
-
-            # Force kill if still alive
-            for p in ctx.processes:
-                if p.is_alive():
-                    p.kill()  # Use SIGKILL to ensure termination
-                    p.join(timeout=2)
+                    try:
+                        os.kill(p.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    p.join(timeout=1.0)
         
-        # Register atexit handler to ensure children die when parent dies
+        # Register atexit handler
         import atexit
         atexit.register(cleanup_children)
         

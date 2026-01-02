@@ -207,6 +207,7 @@ def _run_backend_process(**kwargs):
     
     This runs in a separate process and imports/calls pie_backend.main().
     """
+
     from pie_backend.__main__ import main
     main(**kwargs)
 
@@ -312,12 +313,12 @@ def terminate_engine_and_backend(
             try:
                 if isinstance(process, subprocess.Popen):
                     process.send_signal(signal.SIGTERM)
-                    process.wait(timeout=10)
+                    process.wait(timeout=5)
                 else:
                     process.terminate()
-                    process.join(timeout=10)
+                    process.join(timeout=5)
                     if process.is_alive():
-                        raise subprocess.TimeoutExpired(cmd=str(pid), timeout=10)
+                        raise subprocess.TimeoutExpired(cmd=str(pid), timeout=5)
             except subprocess.TimeoutExpired:
                 typer.echo(f"  Force killing process {pid}")
                 process.kill()
