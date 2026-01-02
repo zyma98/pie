@@ -11,6 +11,7 @@ by delegating to specialized components:
 from __future__ import annotations
 
 import base64
+import random
 from pathlib import Path
 import time
 from typing import TYPE_CHECKING
@@ -64,6 +65,14 @@ class Runtime:
         self.config = config
         self.adapters = {}
         self.batch = None
+
+        # Initialize seeds
+        print(f"Initializing with random seed: {config.random_seed}")
+        random.seed(config.random_seed)
+        np.random.seed(config.random_seed)
+        torch.manual_seed(config.random_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(config.random_seed)
 
         # Load model weights using ModelLoader
         loader = ModelLoader(config)

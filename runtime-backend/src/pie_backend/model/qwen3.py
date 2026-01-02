@@ -193,7 +193,7 @@ class ForwardPass:
 
         # Create workspace buffer for attention operations
         self.workspace_buffer = torch.zeros(
-            512 * 1024 * 1024, dtype=torch.uint8, device=self.runtime_config.device
+            2048 * 1024 * 1024, dtype=torch.uint8, device=self.runtime_config.device
         )
         self.wrapper_decode = ops.BatchDecodeWithPagedKVCacheWrapper(
             self.workspace_buffer, "NHD"
@@ -544,7 +544,7 @@ class ForwardPass:
             nnz=n,
         )
         del seq_lens  # No longer needed
-        self.workspace_buffer.zero_()
+
         if single_token_inference_mode:
             wrapper = self.wrapper_decode
             wrapper.plan(

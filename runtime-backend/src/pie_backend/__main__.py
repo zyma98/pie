@@ -25,6 +25,7 @@ def main(
     activation_dtype: str = "bfloat16",
     weight_dtype: str | None = None,
     enable_profiling: bool = False,
+    random_seed: int = 42,
     test: bool = False,
     doctor: bool = False,
 ):
@@ -122,6 +123,7 @@ def main(
                 activation_dtype,
                 weight_dtype,
                 enable_profiling,
+                random_seed,
                 test,
             ),
             nprocs=world_size,
@@ -163,6 +165,7 @@ def main(
             activation_dtype,
             weight_dtype,
             enable_profiling,
+            random_seed,
             test,
         )
 
@@ -186,6 +189,7 @@ def init_process(
     activation_dtype: str,
     weight_dtype: str | None,
     enable_profiling: bool,
+    random_seed: int,
     test: bool,
 ):
     """
@@ -233,6 +237,7 @@ def init_process(
         activation_dtype=activation_dtype,
         weight_dtype=weight_dtype,
         enable_profiling=enable_profiling,
+        random_seed=random_seed,
         rank=rank,
         world_size=world_size,
     )
