@@ -150,7 +150,7 @@ def broadcast_struct(data: Any, src: int = 0, device: torch.device | None = None
             elif isinstance(obj, tuple):
                 for v in obj: find_specs(v)
         
-        find_specs(metadata)
+        find_specs(metadata)  # Actually traverse to find tensor specs
         
         # Allocate empty tensors
         tensors = [None] * len(tensor_specs)

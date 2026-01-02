@@ -215,7 +215,10 @@ def init_process(
         
         # Use NCCL for CUDA, GLOO for CPU
         backend = "nccl" if torch.cuda.is_available() else "gloo"
-        dist.init_process_group(backend, rank=rank, world_size=world_size)
+        # device_id silences "barrier(): using the device under current context" warning
+        # Parse device index from string like "cuda:2"
+        device_idx = int(local_device.split(":")[-1]) if ":" in local_device else 0
+        dist.init_process_group(backend, rank=rank, world_size=world_size, device_id=torch.device("cuda", device_idx))
     
     # Determine local device for this rank
     # If devices list is empty (auto-detect), RuntimeConfig will handle it for rank 0
