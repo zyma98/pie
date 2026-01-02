@@ -27,7 +27,6 @@ def main(
     enable_profiling: bool = False,
     random_seed: int = 42,
     test: bool = False,
-    doctor: bool = False,
 ):
     """
     Runs the application with configuration provided as command-line arguments.
@@ -57,11 +56,7 @@ def main(
                       If None, uses activation_dtype (no quantization).
         enable_profiling: Enable unified profiler (timing + tensor tracking) (default: False).
         test: Run embedded test client after server starts (default: False).
-        doctor: Run environment health check and exit (default: False).
     """
-    if doctor:
-        run_doctor()
-        return
 
     if model is None:
         raise ValueError("The 'model' argument is required unless --doctor is specified.")
@@ -222,6 +217,11 @@ def init_process(
         os.environ["MASTER_ADDR"] = "localhost"
         os.environ["MASTER_PORT"] = str(master_port)
         
+        # Set NCCL timeout so operations fail instead of hanging forever
+        # This allows recovery when one rank dies mid-operation
+        os.environ["NCCL_TIMEOUT"] = "300"  # 5 minutes
+        os.environ["NCCL_ASYNC_ERROR_HANDLING"] = "1"
+        
         # CRITICAL: Set CUDA device BEFORE init_process_group so NCCL detects correct device
         local_device = devices[rank] if devices and rank < len(devices) else f"cuda:{rank}"
         torch.cuda.set_device(local_device)
@@ -294,74 +294,6 @@ def init_process(
         dist.destroy_process_group()
 
 
-def run_doctor():
-    """Checks the environment for potential issues."""
-    print("Pie Backend Doctor")
-    print("==================")
-    
-    # Check Python version
-    python_version = sys.version.split()[0]
-    print(f"Python version: {python_version}")
-    if sys.version_info < (3, 11):
-        print("  [FAIL] Python 3.11+ is required.")
-    else:
-        print("  [PASS] Python version is compatible.")
-
-    # Check Platform
-    print(f"Platform: {platform.system()} {platform.release()} ({platform.machine()})")
-
-    # Check PyTorch
-    try:
-        torch_version = torch.__version__
-        print(f"PyTorch version: {torch_version}")
-        print("  [PASS] PyTorch is installed.")
-    except ImportError:
-        print("  [FAIL] PyTorch is NOT installed.")
-        return
-
-    # Check CUDA/MPS
-    if torch.cuda.is_available():
-        print(f"CUDA available: Yes (v{torch.version.cuda})")
-        print(f"Device count: {torch.cuda.device_count()}")
-        for i in range(torch.cuda.device_count()):
-             print(f"  Device {i}: {torch.cuda.get_device_name(i)}")
-    elif torch.backends.mps.is_available():
-        print("MPS (Metal) available: Yes")
-    else:
-        print("CUDA/MPS available: No (Running on CPU)")
-
-    # Check Dependencies
-    print("\nDependencies:")
-    
-    # FlashInfer (CUDA)
-    try:
-        import flashinfer
-        ver = importlib.metadata.version('flashinfer-python')
-        print(f"  [PASS] flashinfer: Installed (v{ver})")
-    except ImportError:
-        print("  [WARN] flashinfer: Not installed (Required for CUDA performance)")
-    except Exception as e:
-         print(f"  [WARN] flashinfer: Error importing ({e})")
-
-    # FBGEMM_GPU (CUDA)
-    try:
-        import fbgemm_gpu
-        print(f"  [PASS] fbgemm_gpu: Installed (v{importlib.metadata.version('fbgemm-gpu-genai')})") # Package name checks might vary
-    except ImportError: # Try checking metadata directly if import fails or differs
-        try:
-             ver = importlib.metadata.version('fbgemm-gpu-genai')
-             print(f"  [PASS] fbgemm_gpu: Installed (v{ver})")
-        except importlib.metadata.PackageNotFoundError:
-             print("  [WARN] fbgemm_gpu: Not installed (Required for CUDA performance)")
-
-    # PyObjC (Metal)
-    if platform.system() == "Darwin":
-        try:
-            import objc
-            print(f"  [PASS] pyobjc: Installed (v{importlib.metadata.version('pyobjc-core')})")
-        except ImportError:
-            print("  [WARN] pyobjc: Not installed (Required for Metal performance)")
-    
 
 def entrypoint():
     fire.Fire(main)

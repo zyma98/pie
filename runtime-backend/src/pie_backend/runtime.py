@@ -371,12 +371,22 @@ class Runtime:
     def update_adapter(self, reqs: list[message.UpdateAdapterRequest]) -> None:
         """Update adapter parameters."""
         for req in reqs:
-            self._update_adapter(
-                adapter_ptr=req.adapter_ptr,
-                scores=req.scores,
-                seeds=req.seeds,
-                max_sigma=req.max_sigma,
-            )
+            args = {
+                "adapter_ptr": req.adapter_ptr,
+                "scores": req.scores,
+                "seeds": req.seeds,
+                "max_sigma": req.max_sigma,
+            }
+
+            if self.config.world_size > 1:
+                # Broadcast UPDATE_ADAPTER command
+                msg = {
+                    "type": "UPDATE_ADAPTER",
+                    "kwargs": args
+                }
+                utils.broadcast_struct(msg, src=0, device=self.config.device)
+
+            self._update_adapter(**args)
 
     def upload_adapter(self, reqs: list[message.UploadAdapterRequest]) -> None:
         """Upload adapter weights."""
@@ -515,12 +525,23 @@ class Runtime:
                     # Execute inference step
                     inputs = msg["inputs"]
                     sampling_metadata = msg["sampling_metadata"]
-                    self._run_step(inputs, sampling_metadata)
+                    try:
+                        self._run_step(inputs, sampling_metadata)
+                    except Exception as e:
+                        # Log error but continue - don't let one error hang the whole system
+                        print(f"Worker {self.config.rank} _run_step error: {e}")
+                        # Sync CUDA to clear any pending operations
+                        torch.cuda.synchronize()
                     
                 elif msg_type == "INIT_ADAPTER":
                     # Initialize adapter
                     kwargs = msg["kwargs"]
                     self._initialize_adapter(**kwargs)
+
+                elif msg_type == "UPDATE_ADAPTER":
+                    # Update adapter
+                    kwargs = msg["kwargs"]
+                    self._update_adapter(**kwargs)
                     
             # Other message types can be added here
 
