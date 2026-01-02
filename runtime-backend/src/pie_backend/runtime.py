@@ -27,6 +27,7 @@ from .loader import ModelLoader
 from .adapter import AdapterSubpass, CmaesAdapter
 from .model import llama3, qwen2, qwen3, common, gpt_oss
 from . import message
+from . import hf_utils
 
 # Re-export RuntimeConfig for backward compatibility
 __all__ = ["Runtime", "RuntimeConfig"]
@@ -78,6 +79,9 @@ class Runtime:
         loader = ModelLoader(config)
         print("Loading model weights")
         weights, normalized_arch, self.info = loader.load()
+        
+        # Store snapshot_dir for tokenizer loading
+        self.snapshot_dir = loader.snapshot_dir
 
         print("Loaded model weights")
 
@@ -198,70 +202,57 @@ class Runtime:
     def get_metadata(self) -> dict:
         """Get model metadata."""
         return {
-            "name": self.info.get("name", self.config.model),
-            "description": self.info.get("description", ""),
-            "version": self.info.get("version", "1.0.0"),
+            "name": self.config.hf_repo,
+            "description": "",
+            "version": "1.0.0",
         }
 
     def get_chat_template(self) -> dict:
-        """Get chat template configuration."""
-        template = self.info.get("template", {})
+        """Get chat template configuration from HuggingFace tokenizer_config.json."""
+        if self.snapshot_dir is None:
+            return {
+                "template_type": "none",
+                "template_content": "",
+                "stop_tokens": [],
+            }
+        
+        # Load tokenizer info from HuggingFace
+        tokenizer_info = hf_utils.load_hf_tokenizer(self.snapshot_dir)
+        chat_template = tokenizer_info.get("chat_template", "")
+        
+        # Determine stop tokens from special tokens
+        special_tokens = tokenizer_info.get("special_tokens", {})
+        stop_tokens = []
+        # Common stop tokens across models
+        for token_name in ["<|im_end|>", "<|eot_id|>", "<|end_of_text|>", "</s>"]:
+            if token_name in special_tokens:
+                stop_tokens.append(token_name)
+        
         return {
-            "template_type": template.get("type", "none"),
-            "template_content": template.get("content", ""),
-            "stop_tokens": template.get("stop_tokens", []),
+            "template_type": "minijinja" if chat_template else "none",
+            "template_content": chat_template,
+            "stop_tokens": stop_tokens,
         }
 
     def get_tokenizer(self) -> dict:
-        """Get tokenizer configuration with merge table."""
-        tokenizer_info = self.info.get("tokenizer", {})
-        model_dir = Path(self.config.cache_dir) / "models" / self.config.model
-        #print("model_dir", model_dir)
-        # Get vocab file path
-        vocab_filename = tokenizer_info.get("vocab") or tokenizer_info.get(
-            "vocabulary_file"
-        )
-        if not vocab_filename:
-            # Return minimal tokenizer info if no vocab file
+        """Get tokenizer configuration with merge table from HuggingFace."""
+        if self.snapshot_dir is None:
             return {
-                "type": tokenizer_info.get("type", "bpe"),
-                "num_vocab": tokenizer_info.get(
-                    "vocab_size", self.engine.weights.get("embed_token").shape[0]
-                ),
+                "type": "bpe",
+                "num_vocab": self.engine.weights.get("embed_token").shape[0],
                 "merge_table": {},
-                "split_regex": tokenizer_info.get("split_regex", ""),
-                "special_tokens": tokenizer_info.get("special_tokens", {}),
-                "escape_non_printable": tokenizer_info.get(
-                    "escape_non_printable", False
-                ),
+                "split_regex": "",
+                "special_tokens": {},
+                "escape_non_printable": False,
             }
-
-        vocab_file_path = model_dir / vocab_filename
-        merge_rules: dict[int, bytes] = {}
-
-        if vocab_file_path.exists():
-            with open(vocab_file_path, "r", encoding="utf-8") as f:
-                for line_number, line in enumerate(f, 1):
-                    line = line.strip()
-                    if not line:
-                        continue
-                    parts = line.split()
-                    if len(parts) != 2:
-                        continue
-                    b64_token, rank_str = parts
-                    try:
-                        decoded_token = base64.b64decode(b64_token)
-                        rank = int(rank_str)
-                        merge_rules[rank] = decoded_token
-                    except (ValueError, TypeError):
-                        continue
-
+        
+        # Load tokenizer info from HuggingFace
+        tokenizer_info = hf_utils.load_hf_tokenizer(self.snapshot_dir)
+        
         return {
             "type": tokenizer_info.get("type", "bpe"),
-            "num_vocab": tokenizer_info.get(
-                "vocab_size", self.engine.weights.get("embed_token").shape[0]
-            ),
-            "merge_table": merge_rules,
+            "num_vocab": tokenizer_info.get("num_vocab", self.engine.weights.get("embed_token").shape[0]),
+            "merge_table": tokenizer_info.get("merge_table", {}),
             "split_regex": tokenizer_info.get("split_regex", ""),
             "special_tokens": tokenizer_info.get("special_tokens", {}),
             "escape_non_printable": tokenizer_info.get("escape_non_printable", False),
@@ -270,7 +261,6 @@ class Runtime:
     # ========================================================================
     # Service Protocol Implementation
     # ========================================================================
-
     def handshake(
         self, reqs: list[message.HandshakeRequest]
     ) -> list[message.HandshakeResponse]:

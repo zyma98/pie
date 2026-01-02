@@ -13,7 +13,7 @@ import warnings
 
 # Main entry point for the server
 def main(
-    model: str | None = None,
+    hf_repo: str | None = None,
     host: str = "localhost",
     port: int = 9123,
     internal_auth_token: str | None = None,
@@ -36,7 +36,7 @@ def main(
     Runs the application with configuration provided as command-line arguments.
 
     Args:
-        model: Name of the model to load (required).
+        hf_repo: HuggingFace repo (e.g., "meta-llama/Llama-3.2-1B-Instruct") (required).
         host: Hostname for the ZMQ service to bind to.
         port: Port for the ZMQ service to bind to.
         internal_auth_token: Internal authentication token for connecting to the controller.
@@ -60,8 +60,8 @@ def main(
         test: Run embedded test client after server starts (default: False).
     """
 
-    if model is None:
-        raise ValueError("The 'model' argument is required unless --doctor is specified.")
+    if hf_repo is None:
+        raise ValueError("The 'hf_repo' argument is required.")
     # Parse device argument
     if device is None:
         device_list = None
@@ -105,7 +105,7 @@ def main(
                 world_size,
                 device_list,
                 master_port,  # Pass port to ensure all processes use same port
-                model,
+                hf_repo,
                 host,
                 port,
                 internal_auth_token,
@@ -163,7 +163,7 @@ def main(
             1, # world_size
             [single_device] if single_device else [], # devices (will be resolved in config)
             0, # master_port (unused in single process mode)
-            model,
+            hf_repo,
             host,
             port,
             internal_auth_token,
@@ -187,7 +187,7 @@ def init_process(
     world_size: int,
     devices: list[str],
     master_port: int,  # Port for distributed coordination (shared by all processes)
-    model: str,
+    hf_repo: str,
     host: str,
     port: int,
     internal_auth_token: str | None,
@@ -251,7 +251,7 @@ def init_process(
 
     # Create configuration
     config = RuntimeConfig.from_args(
-        model=model,
+        hf_repo=hf_repo,
         cache_dir=cache_dir,
         kv_page_size=kv_page_size,
         max_dist_size=max_dist_size,
@@ -284,7 +284,7 @@ def init_process(
 
     if rank == 0:
         # Rank 0 runs the server
-        print(f"Starting server for model {model} on {config.device}...")
+        print(f"Starting server for {hf_repo} on {config.device}...")
         start_server(host=host, port=port, auth_token=internal_auth_token, service=service, run_tests=test)
         
         # Shutdown workers

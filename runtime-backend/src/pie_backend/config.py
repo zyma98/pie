@@ -33,14 +33,14 @@ class RuntimeConfig:
     configuration used by model forward passes.
     """
 
-    model: str
+    # Model identification
+    hf_repo: str  # HuggingFace repo (e.g., "meta-llama/Llama-3.2-1B-Instruct")
+    
     cache_dir: str
     kv_page_size: int
     max_dist_size: int
     max_num_embeds: int
     max_batch_tokens: int | None
-    max_num_adapters: int
-    max_adapter_rank: int
     max_num_adapters: int
     max_adapter_rank: int
     gpu_mem_utilization: float
@@ -104,7 +104,7 @@ class RuntimeConfig:
     @classmethod
     def from_args(
         cls,
-        model: str,
+        hf_repo: str,
         cache_dir: str | None = None,
         kv_page_size: int = 16,
         max_dist_size: int = 64,
@@ -126,7 +126,7 @@ class RuntimeConfig:
         Factory method to build a validated and resolved RuntimeConfig.
 
         Args:
-            model: Model name or path
+            hf_repo: HuggingFace repo (e.g., "meta-llama/Llama-3.2-1B-Instruct")
             cache_dir: Directory for model cache (resolved automatically if None)
             kv_page_size: Size of KV cache pages
             max_dist_size: Maximum distribution size for sampling
@@ -188,7 +188,7 @@ class RuntimeConfig:
 
         # Create the config instance
         return cls(
-            model=model,
+            hf_repo=hf_repo,
             cache_dir=resolved_cache_dir,
             kv_page_size=kv_page_size,
             max_dist_size=max_dist_size,

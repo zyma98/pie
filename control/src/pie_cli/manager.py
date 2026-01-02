@@ -29,7 +29,7 @@ def start_engine_and_backend(
 
     Args:
         engine_config: Engine configuration dict
-        backend_configs: List of backend configurations
+        model_configs: List of model configurations (formerly backend_configs)
         timeout: Maximum time to wait for backends to connect (seconds)
 
     Returns:
@@ -65,13 +65,13 @@ def start_engine_and_backend(
     # Launch backend processes
     backend_processes: list["multiprocessing.Process | subprocess.Popen"] = []
 
-    for backend_config in backend_configs:
+    for model_config in model_configs:
         # Spawn pie-backend directly using multiprocessing
         typer.echo("- Spawning Python backend (pie-backend)")
         try:
             process = spawn_python_backend(
                 engine_config, 
-                backend_config, 
+                model_config, 
                 server_handle.internal_token
             )
             backend_processes.append(process)
@@ -99,7 +99,7 @@ def start_engine_and_backend(
 
 def spawn_python_backend(
     engine_config: dict,
-    backend_config: dict,
+    model_config: dict,
     internal_token: str,
 ) -> multiprocessing.Process:
     """Spawn a Python backend process directly using multiprocessing.
@@ -109,7 +109,7 @@ def spawn_python_backend(
 
     Args:
         engine_config: Engine configuration dict (host, port)
-        backend_config: Backend configuration dict
+        model_config: Model configuration dict (formerly backend_config)
         internal_token: Internal authentication token
 
     Returns:
@@ -120,20 +120,20 @@ def spawn_python_backend(
         "host": engine_config.get("host", "127.0.0.1"),
         "port": engine_config.get("port", 8080),
         "internal_auth_token": internal_token,
-        "model": backend_config.get("model"),
-        "device": backend_config.get("device"),
-        "cache_dir": backend_config.get("cache_dir"),
-        "kv_page_size": backend_config.get("kv_page_size", 16),
-        "max_dist_size": backend_config.get("max_dist_size", 64),
-        "max_num_embeds": backend_config.get("max_num_embeds", 128),
-        "max_batch_tokens": backend_config.get("max_batch_tokens", 10240),
-        "max_num_adapters": backend_config.get("max_num_adapters", 48),
-        "max_adapter_rank": backend_config.get("max_adapter_rank", 8),
-        "gpu_mem_utilization": backend_config.get("gpu_mem_utilization", 0.9),
-        "activation_dtype": backend_config.get("activation_dtype", "bfloat16"),
-        "weight_dtype": backend_config.get("weight_dtype"),
-        "enable_profiling": backend_config.get("enable_profiling", False),
-        "random_seed": backend_config.get("random_seed", 42),
+        "hf_repo": model_config.get("hf_repo"),
+        "device": model_config.get("device"),
+        "cache_dir": model_config.get("cache_dir"),
+        "kv_page_size": model_config.get("kv_page_size", 16),
+        "max_dist_size": model_config.get("max_dist_size", 64),
+        "max_num_embeds": model_config.get("max_num_embeds", 128),
+        "max_batch_tokens": model_config.get("max_batch_tokens", 10240),
+        "max_num_adapters": model_config.get("max_num_adapters", 48),
+        "max_adapter_rank": model_config.get("max_adapter_rank", 8),
+        "gpu_mem_utilization": model_config.get("gpu_mem_utilization", 0.9),
+        "activation_dtype": model_config.get("activation_dtype", "bfloat16"),
+        "weight_dtype": model_config.get("weight_dtype"),
+        "enable_profiling": model_config.get("enable_profiling", False),
+        "random_seed": model_config.get("random_seed", 42),
     }
     
     # Remove None values
