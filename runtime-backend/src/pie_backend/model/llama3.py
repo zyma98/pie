@@ -192,37 +192,69 @@ class ForwardPass:
         # --- CUDA Graph Setup (Bins + Padding) ---
         # Binned batch sizes for graph capture
         # Reduce bins to avoid OOM on smaller GPUs
-        self.cuda_graph_bins = [1, 2, 4, 8, 16, 24, 32, 48, 64] # Max 64 for now
+        # --- CUDA Graph Setup (Bins + Padding) ---
+        self.use_cuda_graphs = runtime_config.use_cuda_graphs
+        
+        # Dynamic bins: Powers of 2 up to 16, then steps of 16
+        limit = runtime_config.max_batch_size or 512
+        bins = [1, 2, 4, 8, 16]
+        bins = [b for b in bins if b <= limit]
+        if limit > 16:
+            bins.extend(range(24, limit + 1, 16))
+            if bins[-1] < limit: # Ensure we cover the limit if not multiple of 8
+                bins.append(limit)
+        self.cuda_graph_bins = sorted(list(set(bins)))
+        max_bin = self.cuda_graph_bins[-1]
+
         self.cuda_graph_wrappers = {}
-        self.cuda_graph_aux_buffers = {}
+        # Aux buffers derived from shared static buffers (views)
+        # Allocate ONE set of maximal buffers
+        self.shared_static_hidden = torch.zeros(
+            (max_bin, model_config.dim_hidden), 
+            dtype=runtime_config.activation_dtype, 
+            device=device
+        )
+        self.shared_static_indptr = torch.zeros(
+            max_bin + 1, dtype=torch.int32, device=device
+        )
+        self.shared_static_last_len = torch.zeros(
+            max_bin, dtype=torch.int32, device=device
+        )
+        self.shared_static_position_ids = torch.zeros(
+            max_bin, dtype=torch.int32, device=device
+        )
+        self.shared_static_batch_indices = torch.zeros(
+            max_bin, dtype=torch.int32, device=device
+        )
+        self.shared_static_batch_positions = torch.zeros(
+            max_bin, dtype=torch.int32, device=device
+        )
+        self.cuda_graph_aux_buffers = {} # Maps bin -> (indptr_view, last_len_view)
         
         # Scratch page index for padding (use the extra page we allocated)
         self.scratch_page_idx = runtime_config.max_num_kv_pages
         
-        # Initialize wrappers for each bin
-        max_num_pages = runtime_config.max_num_kv_pages + 1 # Include scratch
-        
-        # Shared indices buffer (large enough for all pages)
-        # We can share this because it just holds page indices, size depends on max_pages not batch
+        # Initialize wrappers for each bin using VIEWS of shared buffers
+        max_num_pages = runtime_config.max_num_kv_pages + 1
         self.shared_kv_indices_buffer = torch.zeros(
             max_num_pages, dtype=torch.int32, device=device
         )
         
-        if runtime_config.use_cuda_graphs:
+        if self.use_cuda_graphs:
             for b in self.cuda_graph_bins:
-                # Aux buffers for this bin size
-                indptr_buf = torch.zeros(b + 1, dtype=torch.int32, device=device)
-                last_len_buf = torch.zeros(b, dtype=torch.int32, device=device)
-                self.cuda_graph_aux_buffers[b] = (indptr_buf, last_len_buf)
+                # Create views
+                indptr_view = self.shared_static_indptr[:b+1]
+                last_len_view = self.shared_static_last_len[:b]
+                self.cuda_graph_aux_buffers[b] = (indptr_view, last_len_view)
                 
                 # Wrapper with usage_cuda_graph=True
                 self.cuda_graph_wrappers[b] = ops.BatchDecodeWithPagedKVCacheWrapper(
                     self.workspace_buffer,
                     "NHD",
                     use_cuda_graph=True,
-                    paged_kv_indptr_buffer=indptr_buf,
+                    paged_kv_indptr_buffer=indptr_view,
                     paged_kv_indices_buffer=self.shared_kv_indices_buffer,
-                    paged_kv_last_page_len_buffer=last_len_buf,
+                    paged_kv_last_page_len_buffer=last_len_view,
                 )
             
         # CUDA Graph cache for the layer loop: bin_size -> (graph, static_inputs..., static_output)
@@ -240,7 +272,7 @@ class ForwardPass:
        
     def warmup_cuda_graphs(self, kv_cache_at_layer: list[torch.Tensor]):
         """
-        Pre-capture CUDA graphs for all defined bins.
+        Pre-capture CUDA graphs for all defined bins using shared static buffers.
         This avoids lag during the first few inference steps.
         """
         if not self.use_cuda_graphs:
@@ -250,39 +282,88 @@ class ForwardPass:
         device = self.runtime_config.device
         dim = self.model_config.dim_hidden
         
-        print("Warmup: Capturing CUDA graphs...")
+        # Local head counts for planning
+        local_num_query_heads = self.model_config.num_q_heads // self.runtime_config.world_size
+        local_num_key_value_heads = self.model_config.num_kv_heads // self.runtime_config.world_size
+        page_size = self.runtime_config.kv_page_size
+        
+        print(f"Warmup: Capturing CUDA graphs for bins {self.cuda_graph_bins}...")
         
         for b in tqdm(self.cuda_graph_bins, desc="CUDA Graphs"):
-            # Create dummy inputs for bin size b
-            # Each "request" uses 1 page (scratch page)
-            hidden_states = torch.zeros(b, dim, device=device, dtype=self.runtime_config.activation_dtype)
-            position_ids = torch.zeros(b, device=device, dtype=torch.int32)
+            # 1. Get Views of Shared Buffers
+            indptr_view, last_len_view = self.cuda_graph_aux_buffers[b]
+            hidden_view = self.shared_static_hidden[:b]
             
+            # 2. Plan Wrapper (Critical: Must be done before capture for each bin config)
+            # Update views with valid DUMMY content for planning/capture
             # indptr: 0, 1, 2, ... b (total pages = b)
-            kv_page_indptr = torch.arange(b + 1, device=device, dtype=torch.int32)
+            indptr_view.copy_(torch.arange(b + 1, dtype=torch.int32, device=device))
+            # last_len: 1 (safe)
+            last_len_view.fill_(1)
             
-            # indices: all point to scratch page
-            kv_page_indices = torch.full((b,), self.scratch_page_idx, device=device, dtype=torch.int32)
-            
-            # last_len: 1
-            kv_last_page_lens = torch.ones(b, device=device, dtype=torch.int32)
-            
-            batch_indices = torch.arange(b, device=device, dtype=torch.int32)
-            batch_positions = torch.zeros(b, device=device, dtype=torch.int32)
-            
-            # Trigger capture by running the graphed path
-            # total_pages_cpu = b
-            self._run_layers_graphed(
-                hidden_states=hidden_states,
-                position_ids=position_ids,
-                kv_cache_at_layer=kv_cache_at_layer,
-                kv_page_indices=kv_page_indices,
-                kv_page_indptr=kv_page_indptr,
-                kv_last_page_lens=kv_last_page_lens,
-                batch_indices=batch_indices,
-                batch_positions=batch_positions,
-                total_pages_cpu=b,
+            wrapper = self.cuda_graph_wrappers[b]
+            wrapper.plan(
+                indptr=indptr_view,
+                indices=self.shared_kv_indices_buffer, # Full buffer view (shared)
+                last_page_len=last_len_view,
+                num_qo_heads=local_num_query_heads,
+                num_kv_heads=local_num_key_value_heads,
+                head_dim=self.model_config.dim_head,
+                page_size=page_size,
+                pos_encoding_mode="NONE",
+                q_data_type=self.runtime_config.activation_dtype,
             )
+            
+            # 3. Create Dummy Inputs for Capture
+            # Indices: point to scratch page
+            dummy_indices = torch.full((b,), self.scratch_page_idx, device=device, dtype=torch.int32)
+            # We must copy dummy indices to the shared buffer because wrapper reads from it!
+            self.shared_kv_indices_buffer[:b].copy_(dummy_indices)
+            
+            # Dummy Position IDs (View)
+            pos_view = self.shared_static_position_ids[:b]
+            pos_view.zero_()
+            
+            # Dummy Batch Indices (View)
+            batch_indices_view = self.shared_static_batch_indices[:b]
+            batch_indices_view.copy_(torch.arange(b, device=device, dtype=torch.int32))
+            
+            # Dummy Batch Positions (View)
+            batch_pos_view = self.shared_static_batch_positions[:b]
+            batch_pos_view.zero_()
+            
+            # 4. Capture
+            graph = torch.cuda.CUDAGraph()
+            # Run once before capture (warmup caches)
+            self._run_layers(
+                 hidden_states=hidden_view,
+                 position_ids=pos_view,
+                 kv_cache_at_layer=kv_cache_at_layer,
+                 kv_page_indices=self.shared_kv_indices_buffer,
+                 kv_page_indptr=indptr_view,
+                 kv_last_page_lens=last_len_view,
+                 batch_indices=batch_indices_view,
+                 batch_positions=batch_pos_view,
+                 adapter_subpass=None,
+                 wrapper=wrapper
+            )
+            
+            # Capture
+            with torch.cuda.graph(graph):
+                output = self._run_layers(
+                    hidden_states=hidden_view,
+                    position_ids=pos_view,
+                    kv_cache_at_layer=kv_cache_at_layer,
+                    kv_page_indices=self.shared_kv_indices_buffer,
+                    kv_page_indptr=indptr_view,
+                    kv_last_page_lens=last_len_view,
+                    batch_indices=batch_indices_view,
+                    batch_positions=batch_pos_view,
+                    adapter_subpass=None,
+                    wrapper=wrapper
+                )
+             
+            self.cuda_graph_img[b] = (graph,)
         
         torch.cuda.synchronize()
         print("Warmup complete.")
@@ -737,179 +818,73 @@ class ForwardPass:
         total_pages_cpu: int = 0,
     ) -> torch.Tensor:
         """
-        Execute layers with CUDA graph capture/replay using bins and padding.
+        Execute layers with CUDA graph replay using shared buffers.
+        Optimized for zero-overhead launch.
         """
-        batch_size = hidden_states.size(0)
+        batch_size = hidden_states.shape[0]
         bin_size = self._get_bin(batch_size)
         
-        # Fallback if batch is too large
-        if bin_size is None:
-             return self._run_layers(
-                hidden_states=hidden_states,
-                position_ids=position_ids,
-                kv_cache_at_layer=kv_cache_at_layer,
-                kv_page_indices=kv_page_indices,
-                kv_page_indptr=kv_page_indptr,
-                kv_last_page_lens=kv_last_page_lens,
-                batch_indices=batch_indices,
-                batch_positions=batch_positions,
-                adapter_subpass=None,
-                wrapper=self.wrapper_decode_fallback # Use fallback wrapper
-            )
-
-        device = self.runtime_config.device
-        wrapper = self.cuda_graph_wrappers[bin_size]
-        
-        # 1. Pad Inputs to bin_size
-        num_pad = bin_size - batch_size
-        
-        # Use CPU integer for offset calculation to avoid .item() sync
-        # If total_pages_cpu is 0 (not provided), we MUST fallback to .item() (legacy behavior)
-        # But we should enforce it being provided for performance.
-        last_ptr = total_pages_cpu
-        
-        if num_pad > 0:
-             # Create pad_range on GPU directly using CPU offset
-             pad_range = torch.arange(1, num_pad + 1, device=device, dtype=torch.int32) + last_ptr
-             padded_indptr = torch.cat([kv_page_indptr, pad_range])
-             
-             padded_hidden = fun.pad(hidden_states, (0, 0, 0, num_pad))
-             padded_position_ids = fun.pad(position_ids, (0, num_pad))
-             
-             # Pad last_page_len with 1 (safe for scratch page) instead of 0
-             padded_last_page_lens = fun.pad(kv_last_page_lens, (0, num_pad), value=1)
-             
-             padded_batch_indices = fun.pad(batch_indices, (0, num_pad))
-             padded_batch_positions = fun.pad(batch_positions, (0, num_pad))
-             
-             # Pad indices: append scratch_page_idx (repeated num_pad times)
-             pad_indices = torch.full((num_pad,), self.scratch_page_idx, device=device, dtype=torch.int32)
-             padded_indices_content = torch.cat([kv_page_indices, pad_indices])
-             
-        else:
-             padded_indptr = kv_page_indptr
-             padded_hidden = hidden_states
-             padded_position_ids = position_ids
-             padded_last_page_lens = kv_last_page_lens
-             padded_batch_indices = batch_indices
-             padded_batch_positions = batch_positions
-             padded_indices_content = kv_page_indices
-
-        # 2. Plan the wrapper with PADDED inputs
-        # FlashInfer wrapper needs plan() call to setup internal state (which is fixed for this bin)
-        local_num_query_heads = self.model_config.num_q_heads // self.runtime_config.world_size
-        local_num_key_value_heads = self.model_config.num_kv_heads // self.runtime_config.world_size
-        
-        wrapper.plan(
-            indptr=padded_indptr,
-            indices=padded_indices_content,
-            last_page_len=padded_last_page_lens,
-            num_qo_heads=local_num_query_heads,
-            num_kv_heads=local_num_key_value_heads,
-            head_dim=self.model_config.dim_head,
-            page_size=self.runtime_config.kv_page_size,
-            pos_encoding_mode="NONE",
-            q_data_type=padded_hidden.dtype,
-        )
-
-        
-        # 3. Retrieve/Capture Graph
-        if bin_size not in self.cuda_graph_img:
-             # Capture
-             
-             # Allocate static buffers (bin size)
-             # Note: Indices buffer is SHARED and large, so we don't alloc it per bin
-             # But we need input buffers for _run_layers
-             static_hidden = torch.empty_like(padded_hidden)
-             static_position_ids = torch.empty_like(padded_position_ids)
-             static_kv_indptr = torch.empty_like(padded_indptr)
-             static_kv_last_page_lens = torch.empty_like(padded_last_page_lens)
-             static_batch_indices = torch.empty_like(padded_batch_indices)
-             static_batch_positions = torch.empty_like(padded_batch_positions)
-             
-             # Fill warm up data
-             static_hidden.copy_(padded_hidden)
-             static_position_ids.copy_(padded_position_ids)
-             static_kv_indptr.copy_(padded_indptr)
-             static_kv_last_page_lens.copy_(padded_last_page_lens)
-             static_batch_indices.copy_(padded_batch_indices)
-             static_batch_positions.copy_(padded_batch_positions)
-             # Copy indices content to shared buffer -> Redundant, wrapper.plan does this!
-             # We rely on wrapper.plan to update self.shared_kv_indices_buffer
-             
-             # Warmup
-             torch.cuda.synchronize(device)
-             for _ in range(3):
-                  self._run_layers(
-                      hidden_states=static_hidden,
-                      position_ids=static_position_ids,
-                      kv_cache_at_layer=kv_cache_at_layer,
-                      kv_page_indices=self.shared_kv_indices_buffer, # Use shared buffer
-                      kv_page_indptr=static_kv_indptr,
-                      kv_last_page_lens=static_kv_last_page_lens,
-                      batch_indices=static_batch_indices,
-                      batch_positions=static_batch_positions,
-                      adapter_subpass=None,
-                      wrapper=wrapper
-                  )
-             torch.cuda.synchronize(device)
-             
-             # Capture
-             capture_stream = torch.cuda.Stream(device=device)
-             graph = torch.cuda.CUDAGraph()
-             with torch.cuda.stream(capture_stream):
-                with torch.cuda.graph(graph, stream=capture_stream):
-                     static_output = self._run_layers(
-                          hidden_states=static_hidden,
-                          position_ids=static_position_ids,
-                          kv_cache_at_layer=kv_cache_at_layer,
-                          kv_page_indices=self.shared_kv_indices_buffer, # Use shared buffer
-                          kv_page_indptr=static_kv_indptr,
-                          kv_last_page_lens=static_kv_last_page_lens,
-                          batch_indices=static_batch_indices,
-                          batch_positions=static_batch_positions,
-                          adapter_subpass=None,
-                          wrapper=wrapper
-                     )
-             torch.cuda.current_stream(device).wait_stream(capture_stream)
-             
-             self.cuda_graph_img[bin_size] = (
-                 graph,
-                 static_hidden,
-                 static_position_ids,
-                 static_kv_indptr,
-                 static_kv_last_page_lens,
-                 static_batch_indices,
-                 static_batch_positions,
-                 static_output
+        if bin_size is None or bin_size not in self.cuda_graph_img:
+             # Fallback
+             wrapper = self.wrapper_decode_fallback
+             page_size = self.runtime_config.kv_page_size
+             wrapper.plan(
+                indptr=kv_page_indptr,
+                indices=kv_page_indices,
+                last_page_len=kv_last_page_lens,
+                num_qo_heads=self.model_config.num_q_heads // self.runtime_config.world_size,
+                num_kv_heads=self.model_config.num_kv_heads // self.runtime_config.world_size,
+                head_dim=self.model_config.dim_head,
+                page_size=page_size,
+                pos_encoding_mode="NONE",
+                q_data_type=hidden_states.dtype,
              )
+             return self._run_layers(
+                 hidden_states, position_ids, kv_cache_at_layer,
+                 kv_page_indices, kv_page_indptr, kv_last_page_lens,
+                 batch_indices, batch_positions, None, wrapper
+             )
+        
+        # 1. Copy data to Shared Static Buffers
+        self.shared_static_hidden[:batch_size].copy_(hidden_states)
+        
+        indptr_view = self.cuda_graph_aux_buffers[bin_size][0]
+        indptr_view[:batch_size+1].copy_(kv_page_indptr)
+        
+        last_len_view = self.cuda_graph_aux_buffers[bin_size][1]
+        last_len_view[:batch_size].copy_(kv_last_page_lens)
+        
+        num_indices = kv_page_indices.numel()
+        self.shared_kv_indices_buffer[:num_indices].copy_(kv_page_indices)
+        
+        self.shared_static_position_ids[:batch_size].copy_(position_ids)
+        self.shared_static_batch_indices[:batch_size].copy_(batch_indices)
+        self.shared_static_batch_positions[:batch_size].copy_(batch_positions)
 
-        # 4. Replay
-        (
-             graph,
-             static_hidden,
-             static_position_ids,
-             static_kv_indptr,
-             static_kv_last_page_lens,
-             static_batch_indices,
-             static_batch_positions,
-             static_output
-        ) = self.cuda_graph_img[bin_size]
-        
-        # Copy inputs to static buffers
-        static_hidden.copy_(padded_hidden)
-        static_position_ids.copy_(padded_position_ids)
-        static_kv_indptr.copy_(padded_indptr)
-        static_kv_last_page_lens.copy_(padded_last_page_lens)
-        static_batch_indices.copy_(padded_batch_indices)
-        static_batch_positions.copy_(padded_batch_positions)
-        
-        # Copy indices to shared buffer -> Redundant, wrapper.plan does this!
-        
+        # 2. Handle Padding
+        if batch_size < bin_size:
+            # Pad Indptr
+            remainder = bin_size - batch_size
+            padding = torch.arange(1, remainder + 1, device=self.runtime_config.device, dtype=torch.int32)
+            padding.add_(total_pages_cpu)
+            indptr_view[batch_size+1:].copy_(padding)
+            
+            # Pad Last Len
+            last_len_view[batch_size:].fill_(1)
+            
+            # Pad Position IDs
+            self.shared_static_position_ids[batch_size:].zero_()
+            
+            # Pad Batch Indices / Positions
+            self.shared_static_batch_indices[batch_size:].zero_()
+            self.shared_static_batch_positions[batch_size:].zero_()
+            
+        # 3. Replay
+        graph = self.cuda_graph_img[bin_size][0]
         graph.replay()
         
-        # 5. Unpad output
-        return static_output[:batch_size].clone()
+        # 4. Return Output Slice
+        return self.shared_static_hidden[:batch_size].clone()
 
 
 def create_kv_cache(model_config: ModelConfig, runtime_config: RuntimeConfig) -> list[torch.Tensor]:

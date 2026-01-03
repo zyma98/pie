@@ -254,7 +254,20 @@ def init_process(
         
         # Use NCCL for CUDA, GLOO for CPU
         backend = "nccl" if torch.cuda.is_available() else "gloo"
-        dist.init_process_group(backend, rank=rank, world_size=world_size)
+        
+        pg_options = None
+        if backend == "nccl":
+            try:
+                from torch.distributed import ProcessGroupNCCL
+                pg_options = ProcessGroupNCCL.Options()
+                pg_options.config.capture_safe = True
+            except (ImportError, AttributeError):
+                pass
+
+        if pg_options:
+             dist.init_process_group(backend, rank=rank, world_size=world_size, pg_options=pg_options)
+        else:
+             dist.init_process_group(backend, rank=rank, world_size=world_size)
         
         # Create a separate GLOO process group for CPU control messages
         # This allows metadata broadcasts without GPU spin
