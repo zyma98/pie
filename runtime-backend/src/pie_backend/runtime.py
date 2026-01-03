@@ -20,6 +20,8 @@ import numpy as np
 from . import utils
 import torch
 import torch.distributed as dist
+import queue
+import threading
 
 from .config import RuntimeConfig
 from .batching import BatchBuilder, Batch
@@ -69,8 +71,19 @@ class Runtime:
         """
         self.config = config
         self.log_queue = log_queue
+        self.log_queue = log_queue
         self.adapters = {}
         self.batch = None
+        
+        # Async Execution
+        self.execution_queue = queue.Queue()
+        self.response_callback = None
+        
+        self.execution_thread = threading.Thread(
+            target=self.execution_loop,
+            daemon=True
+        )
+        self.execution_thread.start()
 
         # Initialize seeds
         msg = f"Initializing with random seed: {config.random_seed}"
@@ -337,6 +350,112 @@ class Runtime:
 
         # Execute the batch and return responses
         return self._execute_batch()
+
+    def set_response_callback(self, callback):
+        """Set callback for sending async responses."""
+        self.response_callback = callback
+
+    def forward_pass_handler_v2(
+        self, reqs: list[message.ForwardPassRequest], metadata: tuple
+    ) -> None:
+        """
+        Async handler for batched forward pass inference requests.
+        Enqueues requests for the execution thread.
+        """
+        # Enqueue requests to be processed by execution thread
+        self.execution_queue.put((reqs, metadata))
+
+    @torch.inference_mode()
+    def execution_loop(self):
+        """
+        Continuous loop for executing batched requests.
+        """
+        while True:
+            # 1. Fetch next work item (blocking)
+            try:
+                item = self.execution_queue.get()
+            except Exception:
+                break
+                
+            if item is None:
+                break
+
+            # Start collecting items to process
+            pending_items = [item]
+            
+            # Drain queue to fill batch as much as possible
+            while True:
+                try:
+                    next_item = self.execution_queue.get_nowait()
+                    if next_item is None:
+                        break
+                    pending_items.append(next_item)
+                except queue.Empty:
+                    break
+            
+            # Execution state for current batch of items
+            item_cursors = [0] * len(pending_items)
+            item_results = [[] for _ in pending_items]
+            item_done = [False] * len(pending_items)
+            
+            any_pending = True
+            while any_pending:
+                batch_mapping = [] # (item_idx, req_idx)
+                
+                # Fill batch
+                for item_idx, (reqs, _) in enumerate(pending_items):
+                    if item_done[item_idx]:
+                        continue
+                        
+                    start_idx = item_cursors[item_idx]
+                    reqs_to_process = reqs[start_idx:]
+                    
+                    for i, req in enumerate(reqs_to_process):
+                        real_idx = start_idx + i
+                        
+                        self.batch_builder.add_request(req)
+                        batch_mapping.append((item_idx, real_idx))
+                        
+                        # Check if batch is full
+                        if (self.batch_builder.current_batch and 
+                            self.batch_builder.current_batch.total_tokens >= (self.config.max_batch_tokens or 10240)):
+                            break
+                        
+                    # Update cursor
+                    # The inner loop ran for `len(batch_mapping) - pre_existing_len`.
+                    # Actually, better to just use batch_mapping logic.
+                    
+                    # Recalculate how many were added for this item based on batch_mapping
+                    added_count = sum(1 for (i, _) in batch_mapping if i == item_idx and _ >= start_idx)
+                    item_cursors[item_idx] += added_count
+                    
+                    if (self.batch_builder.current_batch and 
+                        self.batch_builder.current_batch.total_tokens >= (self.config.max_batch_tokens or 10240)):
+                        break
+                
+                # Execute if we have anything
+                if not self.batch_builder.is_empty():
+                    responses = self._execute_batch()
+                    
+                    for resp, (item_idx, req_idx) in zip(responses, batch_mapping):
+                        item_results[item_idx].append(resp)
+                
+                # Check status and send completed responses
+                any_pending = False
+                for i, (reqs, meta) in enumerate(pending_items):
+                    if not item_done[i]:
+                        if len(item_results[i]) == len(reqs):
+                            # Done, send response
+                             if self.response_callback:
+                                self.response_callback(*meta, item_results[i])
+                             item_done[i] = True
+                        else:
+                            any_pending = True
+                            
+            # Verify all done
+            if not all(item_done):
+                # Should not happen if logic is correct
+                print("Warning: execution loop finished batch but some items incomplete")
 
     def embed_image(self, reqs: list[message.EmbedImageRequest]) -> None:
         """Handle image embedding requests."""
