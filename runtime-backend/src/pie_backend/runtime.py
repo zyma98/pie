@@ -35,6 +35,20 @@ from . import hf_utils
 __all__ = ["Runtime", "RuntimeConfig"]
 
 
+# Helper class for result tracking
+class PendingResult:
+    def __init__(self, total, metadata):
+        self.total = total
+        self.received = 0
+        self.metadata = metadata
+        self.resps = [None] * total
+
+    def add_response(self, idx, resp):
+        self.resps[idx] = resp
+        self.received += 1
+        return self.received == self.total
+
+
 class Runtime:
     """
     Main runtime orchestrator for PIE inference.
@@ -75,8 +89,10 @@ class Runtime:
         self.adapters = {}
         self.batch = None
         
-        # Async Execution
-        self.execution_queue = queue.Queue()
+        # Async Execution - 2 Stage Pipeline
+        # Stage 1: worker_thread (in server.py) receives requests and enqueues
+        # Stage 2: execution_loop drains queue, builds batch, executes
+        self.request_queue = queue.Queue()
         self.response_callback = None
         
         self.execution_thread = threading.Thread(
@@ -360,20 +376,20 @@ class Runtime:
     ) -> None:
         """
         Async handler for batched forward pass inference requests.
-        Enqueues requests for the execution thread.
+        Enqueues raw requests for the preparation thread.
         """
-        # Enqueue requests to be processed by execution thread
-        self.execution_queue.put((reqs, metadata))
+        self.request_queue.put((reqs, metadata))
+
 
     @torch.inference_mode()
     def execution_loop(self):
         """
-        Continuous loop for executing batched requests.
+        Unified execution loop: drains request queue, builds batches on GPU, executes.
+        This runs in a single thread to avoid GIL contention.
         """
         while True:
-            # 1. Fetch next work item (blocking)
             try:
-                item = self.execution_queue.get()
+                item = self.request_queue.get()
             except Exception:
                 break
                 
@@ -383,79 +399,86 @@ class Runtime:
             # Start collecting items to process
             pending_items = [item]
             
-            # Drain queue to fill batch as much as possible
+            # Drain queue to accumulate more requests for better batching
             while True:
                 try:
-                    next_item = self.execution_queue.get_nowait()
+                    next_item = self.request_queue.get_nowait()
                     if next_item is None:
                         break
                     pending_items.append(next_item)
                 except queue.Empty:
                     break
             
-            # Execution state for current batch of items
-            item_cursors = [0] * len(pending_items)
-            item_results = [[] for _ in pending_items]
-            item_done = [False] * len(pending_items)
+            # Create Result Objects
+            pending_results = []
+            for (reqs, metadata) in pending_items:
+                pending_results.append(PendingResult(len(reqs), metadata))
+
+            # Build and execute batches
+            curr_cursor_per_item = [0] * len(pending_items)
             
-            any_pending = True
-            while any_pending:
-                batch_mapping = [] # (item_idx, req_idx)
+            while True:
+                batch_mapping = []  # (PendingResult, req_idx)
+                batch_full = False
                 
-                # Fill batch
                 for item_idx, (reqs, _) in enumerate(pending_items):
-                    if item_done[item_idx]:
+                    start_idx = curr_cursor_per_item[item_idx]
+                    if start_idx >= len(reqs):
                         continue
                         
-                    start_idx = item_cursors[item_idx]
-                    reqs_to_process = reqs[start_idx:]
-                    
-                    for i, req in enumerate(reqs_to_process):
-                        real_idx = start_idx + i
-                        
+                    for i, req in enumerate(reqs[start_idx:]):
                         self.batch_builder.add_request(req)
-                        batch_mapping.append((item_idx, real_idx))
+                        batch_mapping.append((pending_results[item_idx], start_idx + i))
                         
-                        # Check if batch is full
                         if (self.batch_builder.current_batch and 
                             self.batch_builder.current_batch.total_tokens >= (self.config.max_batch_tokens or 10240)):
+                            batch_full = True
                             break
-                        
-                    # Update cursor
-                    # The inner loop ran for `len(batch_mapping) - pre_existing_len`.
-                    # Actually, better to just use batch_mapping logic.
                     
-                    # Recalculate how many were added for this item based on batch_mapping
-                    added_count = sum(1 for (i, _) in batch_mapping if i == item_idx and _ >= start_idx)
-                    item_cursors[item_idx] += added_count
+                    items_added = sum(1 for (pr, _) in batch_mapping if pr is pending_results[item_idx] and _ >= start_idx)
+                    curr_cursor_per_item[item_idx] += items_added
                     
-                    if (self.batch_builder.current_batch and 
-                        self.batch_builder.current_batch.total_tokens >= (self.config.max_batch_tokens or 10240)):
+                    if batch_full:
                         break
                 
-                # Execute if we have anything
                 if not self.batch_builder.is_empty():
+                    # Execute batch directly (on GPU)
                     responses = self._execute_batch()
                     
-                    for resp, (item_idx, req_idx) in zip(responses, batch_mapping):
-                        item_results[item_idx].append(resp)
+                    # Send responses
+                    if self.response_callback:
+                        for resp, (pending_result, req_idx) in zip(responses, batch_mapping):
+                            if pending_result.add_response(req_idx, resp):
+                                self.response_callback(*pending_result.metadata, pending_result.resps)
+                else:
+                    break
                 
-                # Check status and send completed responses
-                any_pending = False
-                for i, (reqs, meta) in enumerate(pending_items):
-                    if not item_done[i]:
-                        if len(item_results[i]) == len(reqs):
-                            # Done, send response
-                             if self.response_callback:
-                                self.response_callback(*meta, item_results[i])
-                             item_done[i] = True
-                        else:
-                            any_pending = True
-                            
-            # Verify all done
-            if not all(item_done):
-                # Should not happen if logic is correct
-                print("Warning: execution loop finished batch but some items incomplete")
+                if not batch_full:
+                    break
+                    
+
+
+    @torch.inference_mode()
+    def _execute_prepared_batch(self, inputs, sampling_metadata, batch) -> list[message.ForwardPassResponse]:
+        """
+        Execute a batch that has already been prepared.
+        """
+        # Broadcast if needed
+        if self.config.world_size > 1:
+            msg = {
+                "type": "STEP",
+                "inputs": inputs,
+                "sampling_metadata": sampling_metadata
+            }
+            utils.broadcast_struct(msg, src=0, device=self.config.device)
+
+        # Execute step
+        sampling_results = self._run_step(inputs, sampling_metadata)
+
+        # Package responses
+        responses = batch.create_responses(sampling_results)
+
+        return responses
 
     def embed_image(self, reqs: list[message.EmbedImageRequest]) -> None:
         """Handle image embedding requests."""
