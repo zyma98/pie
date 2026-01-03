@@ -436,10 +436,20 @@ class Runtime:
                         self.batch_builder.add_request(req)
                         batch_mapping.append((pending_results[item_idx], start_idx + i))
                         
-                        if (self.batch_builder.current_batch and 
-                            self.batch_builder.current_batch.total_tokens >= (self.config.max_batch_tokens or 10240)):
-                            batch_full = True
-                            break
+                        current_batch = self.batch_builder.current_batch
+                        if current_batch:
+                            # Check 1: Max tokens
+                            limit_tokens = self.config.max_batch_tokens or 10240
+                            is_full_tokens = current_batch.total_tokens >= limit_tokens
+                            
+                            # Check 2: Max requests (batch size)
+                            is_full_size = False
+                            if self.config.max_batch_size:
+                                is_full_size = len(current_batch.requests) >= self.config.max_batch_size
+                                
+                            if is_full_tokens or is_full_size:
+                                batch_full = True
+                                break
                     
                     items_added = sum(1 for (pr, _) in batch_mapping if pr is pending_results[item_idx] and _ >= start_idx)
                     curr_cursor_per_item[item_idx] += items_added

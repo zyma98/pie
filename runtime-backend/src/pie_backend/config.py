@@ -38,6 +38,7 @@ class RuntimeConfig:
     max_dist_size: int
     max_num_embeds: int
     max_batch_tokens: int | None
+    max_batch_size: int | None
     max_num_adapters: int
     max_adapter_rank: int
     gpu_mem_utilization: float
@@ -109,6 +110,7 @@ class RuntimeConfig:
         max_dist_size: int = 64,
         max_num_embeds: int = 128,
         max_batch_tokens: int = 10240,
+        max_batch_size: int = 128,
         max_num_adapters: int = 48,
         max_adapter_rank: int = 8,
         gpu_mem_utilization: float = 0.9,
@@ -194,6 +196,7 @@ class RuntimeConfig:
             max_dist_size=max_dist_size,
             max_num_embeds=max_num_embeds,
             max_batch_tokens=max_batch_tokens,
+            max_batch_size=max_batch_size,
             max_num_adapters=max_num_adapters,
             max_adapter_rank=max_adapter_rank,
             gpu_mem_utilization=gpu_mem_utilization,
