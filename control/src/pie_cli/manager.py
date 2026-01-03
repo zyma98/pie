@@ -162,6 +162,7 @@ def spawn_python_backend(
         "weight_dtype": model_config.get("weight_dtype"),
         "enable_profiling": model_config.get("enable_profiling", False),
         "random_seed": model_config.get("random_seed", 42),
+        "use_cuda_graphs": model_config.get("use_cuda_graphs", True),
         "log_queue": log_queue,
     }
     

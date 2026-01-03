@@ -42,6 +42,7 @@ class RuntimeConfig:
     max_adapter_rank: int
     gpu_mem_utilization: float
     random_seed: int
+    use_cuda_graphs: bool
 
     # Evaluated at runtime
     max_num_kv_pages: int | None
@@ -119,6 +120,7 @@ class RuntimeConfig:
         weight_dtype: str = "auto",
         enable_profiling: bool = False,
         random_seed: int = 42,
+        use_cuda_graphs: bool = True,
     ) -> "RuntimeConfig":
         """
         Factory method to build a validated and resolved RuntimeConfig.
@@ -196,6 +198,7 @@ class RuntimeConfig:
             max_adapter_rank=max_adapter_rank,
             gpu_mem_utilization=gpu_mem_utilization,
             random_seed=random_seed,
+            use_cuda_graphs=use_cuda_graphs,
             max_num_kv_pages=None,  # Populated by runtime based on memory
             devices=resolved_devices,
             rank=rank,

@@ -46,6 +46,7 @@ def create_default_config_content() -> str:
                 "gpu_mem_utilization": 0.9,
                 "enable_profiling": False,
                 "random_seed": 42,
+                "use_cuda_graphs": True,
             }
         ],
     }
@@ -151,6 +152,9 @@ def config_update(
     model_random_seed: Optional[int] = typer.Option(
         None, "--random-seed", help="Random seed for model"
     ),
+    model_use_cuda_graphs: Optional[bool] = typer.Option(
+        None, "--use-cuda-graphs/--no-use-cuda-graphs", help="Enable/disable CUDA graphs"
+    ),
     path: Optional[str] = typer.Option(None, "--path", help="Custom config path"),
 ) -> None:
     """Update the entries of the config file."""
@@ -186,6 +190,7 @@ def config_update(
             "gpu_mem_utilization": model_gpu_mem_utilization,
             "enable_profiling": model_enable_profiling,
             "random_seed": model_random_seed,
+            "use_cuda_graphs": model_use_cuda_graphs,
         }.items()
         if v is not None
     }

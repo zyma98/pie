@@ -134,6 +134,9 @@ class Runtime:
                 # Create model config
                 self.model_config = llama3.ModelConfig.from_dict(normalized_arch)
                 
+                # Evaluate and store max_num_kv_pages in config FIRST (needed for ForwardPass)
+                config.max_num_kv_pages = self.model_config.eval_max_num_kv_pages(config)
+                
                 # Create forward pass with weights
                 self.engine = llama3.ForwardPass(
                     self.model_config,
@@ -144,18 +147,22 @@ class Runtime:
                 self.adapter_at_layer = llama3.create_adapter_cache(
                     self.model_config, config
                 )
-                # Evaluate and store max_num_kv_pages in config
-                config.max_num_kv_pages = self.model_config.eval_max_num_kv_pages(config)
                 # Create KV cache
                 self.kv_cache_at_layer = llama3.create_kv_cache(
                     self.model_config, config
                 )
+                
+                # Warmup CUDA graphs
+                self.engine.warmup_cuda_graphs(self.kv_cache_at_layer)
                 
                 
 
             case "qwen2":
                 # Create model config
                 self.model_config = qwen2.ModelConfig.from_dict(normalized_arch)
+                
+                # Evaluate and store max_num_kv_pages in config FIRST
+                config.max_num_kv_pages = self.model_config.eval_max_num_kv_pages(config)
                 
                 # Create forward pass with weights
                 self.engine = qwen2.ForwardPass(
@@ -167,8 +174,6 @@ class Runtime:
                 self.adapter_at_layer = qwen2.create_adapter_cache(
                     self.model_config, config
                 )
-                # Evaluate and store max_num_kv_pages in config
-                config.max_num_kv_pages = self.model_config.eval_max_num_kv_pages(config)
                 # Create KV cache
                 self.kv_cache_at_layer = qwen2.create_kv_cache(
                     self.model_config, config
@@ -180,7 +185,9 @@ class Runtime:
                 # Create model config
                 self.model_config = qwen3.ModelConfig.from_dict(normalized_arch)
                 
-                # Create forward pass with weights
+                # Evaluate and store max_num_kv_pages in config FIRST
+                config.max_num_kv_pages = self.model_config.eval_max_num_kv_pages(config)
+                
                 # Create forward pass with weights
                 self.engine = qwen3.ForwardPass(
                     self.model_config,
@@ -192,8 +199,6 @@ class Runtime:
                 self.adapter_at_layer = qwen3.create_adapter_cache(
                     self.model_config, config
                 )
-                # Evaluate and store max_num_kv_pages in config
-                config.max_num_kv_pages = self.model_config.eval_max_num_kv_pages(config)
                 # Create KV cache
                 self.kv_cache_at_layer = qwen3.create_kv_cache(
                     self.model_config, config
@@ -205,6 +210,9 @@ class Runtime:
                 # Create model config
                 self.model_config = gpt_oss.ModelConfig.from_dict(normalized_arch)
                 
+                # Evaluate and store max_num_kv_pages in config FIRST
+                config.max_num_kv_pages = self.model_config.eval_max_num_kv_pages(config)
+                
                 # Create forward pass with weights
                 self.engine = gpt_oss.ForwardPass(
                     self.model_config,
@@ -215,8 +223,6 @@ class Runtime:
                 self.adapter_at_layer = gpt_oss.create_adapter_cache(
                     self.model_config, config
                 )
-                # Evaluate and store max_num_kv_pages in config
-                config.max_num_kv_pages = self.model_config.eval_max_num_kv_pages(config)
                 # Create KV cache
                 self.kv_cache_at_layer = gpt_oss.create_kv_cache(
                     self.model_config, config
@@ -797,6 +803,7 @@ class Runtime:
             custom_mask=inputs["custom_mask"],
             single_token_inference_mode=inputs["single_token_inference_mode"],
             adapter_subpass=adapter_subpass,
+            total_pages_cpu=inputs.get("total_pages_cpu", 0),
         )
         
         # 4. Sampling Pass

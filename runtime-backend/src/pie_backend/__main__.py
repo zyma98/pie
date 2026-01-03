@@ -34,6 +34,7 @@ def main(
     weight_dtype: str | None = None,
     enable_profiling: bool = False,
     random_seed: int = 42,
+    use_cuda_graphs: bool = True,
     test: bool = False,
     log_queue: object | None = None,  # multiprocessing.Queue, using object to avoid type issues with fire
 ):
@@ -127,6 +128,7 @@ def main(
                 weight_dtype,
                 enable_profiling,
                 random_seed,
+                use_cuda_graphs,
                 test,
                 log_queue,
             ),
@@ -186,6 +188,7 @@ def main(
             weight_dtype,
             enable_profiling,
             random_seed,
+            use_cuda_graphs,
             test,
             log_queue,
         )
@@ -211,6 +214,7 @@ def init_process(
     weight_dtype: str | None,
     enable_profiling: bool,
     random_seed: int,
+    use_cuda_graphs: bool,
     test: bool,
     log_queue: object | None,
 ):
@@ -274,6 +278,7 @@ def init_process(
         weight_dtype=weight_dtype,
         enable_profiling=enable_profiling,
         random_seed=random_seed,
+        use_cuda_graphs=use_cuda_graphs,
         rank=rank,
         world_size=world_size,
     )
