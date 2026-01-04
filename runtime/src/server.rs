@@ -789,7 +789,11 @@ impl Session {
 
     async fn handle_list_instances(&self, corr_id: u32) {
         let (evt_tx, evt_rx) = oneshot::channel();
-        runtime::Command::ListInstances { event: evt_tx }.dispatch();
+        runtime::Command::ListInstances {
+            username: self.username.clone(),
+            event: evt_tx,
+        }
+        .dispatch();
 
         let instances = evt_rx.await.unwrap();
 
@@ -907,6 +911,7 @@ impl Session {
         let (evt_tx, evt_rx) = oneshot::channel();
 
         runtime::Command::LaunchInstance {
+            username: self.username.clone(),
             program_hash,
             arguments,
             detached,
@@ -1092,6 +1097,7 @@ impl Session {
     ) {
         let (evt_tx, evt_rx) = oneshot::channel();
         runtime::Command::LaunchServerInstance {
+            username: self.username.clone(),
             program_hash,
             port,
             arguments,
