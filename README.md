@@ -105,7 +105,7 @@ cd sdk/examples && cargo build --target wasm32-wasip2 --release
    Run an inferlet directly with the engine. Due to JIT compilation of FlashInfer kernels, the first run will have **very long** latency.
    ```bash
    pie run \
-       --path sdk/examples/target/wasm32-wasip2/release/text_completion.wasm \
+       --path std/text-completion/target/wasm32-wasip2/release/text_completion.wasm \
        -- \
        --prompt "Where is the capital of France?"
    ```

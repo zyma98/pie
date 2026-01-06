@@ -41,14 +41,17 @@ def run(
     - By registry: pie run std/text-completion@0.1.0
     - By path: pie run --path ./my_inferlet.wasm
     """
-    # Validate mutually exclusive options
+    # Validate at least one of inferlet or path is provided
     if inferlet is None and path is None:
         console.print("[red]✗[/red] Specify an inferlet name or --path")
         raise typer.Exit(1)
 
+    # Handle the case where --path is used with -- separator
+    # Positional args after -- get captured as `inferlet` first, so
+    # prepend it to `arguments` instead
     if inferlet is not None and path is not None:
-        console.print("[red]✗[/red] Cannot use both inferlet name and --path")
-        raise typer.Exit(1)
+        arguments = [inferlet] + (arguments or [])
+        inferlet = None
 
     # Verify inferlet exists if using path
     if path is not None and not path.exists():
