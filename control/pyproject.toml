@@ -17,7 +17,6 @@ dependencies = [
     "huggingface_hub>=1.2.4",
     "pie-client",
     "pie-backend",
-    "huggingface-hub>=1.2",
 ]
 
 [project.optional-dependencies]
