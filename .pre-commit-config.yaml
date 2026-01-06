@@ -8,10 +8,6 @@ repos:
       - id: black
         language_version: python3.12
 
-  # Rust formatting
-  - repo: https://github.com/doublify/pre-commit-rust
-    rev: v1.0
-    hooks:
-      - id: fmt
-        args: ["--all", "--"]
-      - id: cargo-check
+  # Note: Rust formatting is handled in CI (ci-rust.yml) since
+  # the Rust crates are in subdirectories without a workspace root.
+  # Run manually with: cd runtime && cargo fmt
