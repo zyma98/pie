@@ -29,7 +29,7 @@ host = "127.0.0.1"
 port = 8080
 
 # Authentication
-enable_auth = true
+enable_auth = false
 
 # Model configuration (can have multiple [[model]] sections)
 [[model]]

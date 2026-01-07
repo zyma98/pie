@@ -69,8 +69,19 @@ def config_show(
 
     content = config_path.read_text()
     syntax = Syntax(content, "toml", theme="monokai", line_numbers=False)
+    display_path = str(config_path)
+    try:
+        display_path = f"~/{config_path.relative_to(Path.home())}"
+    except ValueError:
+        pass
+
     console.print(
-        Panel(syntax, title="Configuration", title_align="left", border_style="dim")
+        Panel(
+            syntax,
+            title=f"Configuration ({display_path})",
+            title_align="left",
+            border_style="dim",
+        )
     )
 
 
