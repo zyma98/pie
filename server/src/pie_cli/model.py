@@ -33,9 +33,16 @@ import typing
 
 
 class TqdmProgress:
-    """Adapter to map tqdm calls to a global rich Progress instance."""
+    """Adapter to map tqdm calls to a global rich Progress instance.
+    
+    Aggregates all byte downloads into a single master progress bar.
+    """
 
     _progress: typing.Optional[Progress] = None
+    _master_task_id: typing.Optional[int] = None
+    _total_bytes: int = 0
+    _completed_bytes: int = 0
+    _lock: typing.Optional["threading.Lock"] = None
 
     def __init__(
         self,
@@ -48,30 +55,41 @@ class TqdmProgress:
         ncols: int | None = None,
         **kwargs,
     ):
+        import threading
         self.iterable = iterable
         self.desc = desc
-        self.total = total
-        self.task_id = None
+        self.total = total or 0
+        self.unit = unit
+        self.task_id = None  # Individual tasks are hidden
+        self._is_byte_task = (unit == "B")
 
-        # Filter out questionable HF bars that don't progress
-        if desc and "incomplete total" in desc:
+        # We only care about byte tasks (actual file downloads)
+        # Skip "Fetching X files" bar and other non-byte bars
+        if not self._is_byte_task:
             return
 
-        if self._progress:
-            self.task_id = self._progress.add_task(
-                description=desc or "",
-                total=total,
-                visible=True,
-                unit=unit,
-            )
+        # Update master task total
+        if self._progress and TqdmProgress._master_task_id is not None:
+            with self.get_lock():
+                TqdmProgress._total_bytes += int(self.total)
+                self._progress.update(
+                    TqdmProgress._master_task_id,
+                    total=TqdmProgress._total_bytes,
+                )
 
     def update(self, n: float = 1) -> None:
-        if self._progress and self.task_id is not None:
-            self._progress.update(self.task_id, advance=n)
+        if not self._is_byte_task:
+            return
+        if self._progress and TqdmProgress._master_task_id is not None:
+            with self.get_lock():
+                TqdmProgress._completed_bytes += int(n)
+                self._progress.update(
+                    TqdmProgress._master_task_id,
+                    completed=TqdmProgress._completed_bytes,
+                )
 
     def close(self) -> None:
-        if self._progress and self.task_id is not None:
-            self._progress.update(self.task_id, visible=False)
+        pass  # Master task is closed by the context manager
 
     def __iter__(self):
         if self.iterable:
@@ -81,11 +99,8 @@ class TqdmProgress:
 
     @classmethod
     def get_lock(cls):
-        # Rich is thread-safe, but tqdm expects a lock.
-        # We return a dummy context manager or a real lock.
-        # huggingface_hub uses this to acquire lock before printing sometimes.
         import threading
-        if not hasattr(cls, "_lock"):
+        if cls._lock is None:
             cls._lock = threading.Lock()
         return cls._lock
 
@@ -98,27 +113,16 @@ class TqdmProgress:
             self._progress.refresh()
 
     def reset(self, total=None):
-        if self._progress and self.task_id is not None:
-            self._progress.update(self.task_id, total=total, completed=0)
+        pass  # Not applicable for aggregated progress
 
     @classmethod
     def write(cls, s, file=None, end="\n", nolock=False):
-        # rich Console print is thread safe
-        # console is global here
         console.print(s, end=end)
 
     def set_description(self, desc=None, refresh=True):
-        self.desc = desc
-        if self._progress and self.task_id is not None:
-            self._progress.update(self.task_id, description=desc or "")
-            if refresh:
-                self.refresh()
+        pass  # Description is fixed for master task
 
     def set_postfix(self, ordered_dict=None, refresh=True, **kwargs):
-        # rich handles speed and other metrics automatically.
-        # If we really want postfix, we could append to description or use a custom column.
-        # For now, we'll ignore it to keep the bar clean, as HF usually puts speed/size here 
-        # which rich already shows.
         pass
 
     def disable(self):
@@ -232,27 +236,36 @@ def model_download(
     try:
         # Configuration for the progress bar
         progress = Progress(
-            SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
             BarColumn(),
             TaskProgressColumn(),
-            SmartDownloadColumn(),
-            SmartTransferSpeedColumn(),
+            DownloadColumn(),
+            TransferSpeedColumn(),
             TimeRemainingColumn(),
             console=console,
         )
 
+        # Reset aggregation state
         TqdmProgress._progress = progress
+        TqdmProgress._total_bytes = 0
+        TqdmProgress._completed_bytes = 0
 
         with progress:
+            # Create master task for aggregated byte progress
+            TqdmProgress._master_task_id = progress.add_task(
+                description="Downloading...",
+                total=None,  # Unknown until files start downloading
+            )
+
             local_path = snapshot_download(
                 repo_id,
                 local_files_only=False,
                 tqdm_class=TqdmProgress,
             )
-        
-        # Cleanup global reference
+
+        # Cleanup global references
         TqdmProgress._progress = None
+        TqdmProgress._master_task_id = None
 
         console.print(f"[green]✓[/green] Downloaded to {local_path}")
 
