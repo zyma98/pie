@@ -50,9 +50,3 @@ This document provides a concise overview of the key directories and components 
 **Client Libraries.**
 *   **Path**: `client/`
 *   **Description**: Contains client-side libraries for connecting to a serving Pie instance.
-
-### `client/cli`
-**Standalone Client CLI (`pie-client`).**
-*   **Path**: `client/cli/`
-*   **Language**: Python (`pie-client-cli`)
-*   **Description**: A lightweight CLI (`pie-client`) for interacting with a remote Pie server. It allows submitting tasks and streaming results without needing the full server stack installed.

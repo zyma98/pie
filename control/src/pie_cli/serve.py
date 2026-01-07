@@ -1,6 +1,6 @@
 """Serve command implementation for Pie CLI.
 
-Implements: pie-server serve
+Implements: pie serve
 Starts the Pie engine and optionally provides an interactive shell session.
 """
 
@@ -12,7 +12,8 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
-from . import path as pie_path
+from pie import path as pie_path
+from pie import manager
 
 console = Console()
 
@@ -71,9 +72,6 @@ def serve(
     except typer.Exit:
         raise
 
-    # Import here to avoid circular imports and allow module to load without Rust
-    from . import manager
-
     console.print()
 
     # Show config summary
@@ -100,20 +98,15 @@ def serve(
 
     try:
         # Start engine and backends
-        # manager.start_engine_and_backend handles the spinner UI
         server_handle, backend_processes = manager.start_engine_and_backend(
             engine_config, model_configs, console=console
         )
-
-        # console.print("[green]✓[/green] Engine running. [dim]Press Ctrl+C to stop[/dim]")
 
         if interactive:
             console.print("[dim]Type 'help' for commands, ↑/↓ for history[/dim]")
             console.print()
             manager.run_interactive_shell(engine_config, server_handle.internal_token)
         else:
-            import signal
-
             import time
 
             try:
@@ -143,6 +136,9 @@ def serve(
         with console.status("[dim]Shutting down...[/dim]"):
             manager.terminate_engine_and_backend(server_handle, backend_processes)
         console.print("[green]✓[/green] Shutdown complete")
+    except manager.EngineError as e:
+        console.print(f"[red]✗[/red] {e}")
+        raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]✗[/red] Error: {e}")
         manager.terminate_engine_and_backend(server_handle, backend_processes)
