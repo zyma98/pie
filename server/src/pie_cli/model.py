@@ -13,6 +13,7 @@ from rich.progress import (
     BarColumn,
     DownloadColumn,
     Progress,
+    ProgressColumn,
     SpinnerColumn,
     TaskProgressColumn,
     TextColumn,
@@ -52,11 +53,16 @@ class TqdmProgress:
         self.total = total
         self.task_id = None
 
+        # Filter out questionable HF bars that don't progress
+        if desc and "incomplete total" in desc:
+            return
+
         if self._progress:
             self.task_id = self._progress.add_task(
                 description=desc or "",
                 total=total,
                 visible=True,
+                unit=unit,
             )
 
     def update(self, n: float = 1) -> None:
@@ -117,6 +123,34 @@ class TqdmProgress:
 
     def disable(self):
         pass
+
+
+class SmartDownloadColumn(ProgressColumn):
+    """Renders file size if unit is 'B', otherwise 'completed/total unit'."""
+
+    def render(self, task: "Task") -> Text:
+        unit = task.fields.get("unit", "it")
+        if unit == "B":
+            return DownloadColumn().render(task)
+        
+        if task.total is None:
+            return Text(f"{int(task.completed)} {unit}", style="progress.download")
+        
+        return Text(f"{int(task.completed)}/{int(task.total)} {unit}", style="progress.download")
+
+
+class SmartTransferSpeedColumn(ProgressColumn):
+    """Renders transfer speed if unit is 'B', otherwise 'speed unit/s'."""
+
+    def render(self, task: "Task") -> Text:
+        unit = task.fields.get("unit", "it")
+        if unit == "B":
+            return TransferSpeedColumn().render(task)
+        
+        if task.speed is None:
+            return Text("?", style="progress.data.speed")
+        
+        return Text(f"{task.speed:.1f} {unit}/s", style="progress.data.speed")
 
 
 
@@ -202,8 +236,8 @@ def model_download(
             TextColumn("[progress.description]{task.description}"),
             BarColumn(),
             TaskProgressColumn(),
-            DownloadColumn(),
-            TransferSpeedColumn(),
+            SmartDownloadColumn(),
+            SmartTransferSpeedColumn(),
             TimeRemainingColumn(),
             console=console,
         )
