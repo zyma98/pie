@@ -165,6 +165,9 @@ def normalize_hf_config(config: dict) -> dict:
     # QKV bias (some models have it, some don't)
     normalized["use_qkv_bias"] = config.get("attention_bias", False)
 
+    # Tied embeddings
+    normalized["tie_word_embeddings"] = config.get("tie_word_embeddings", True)
+
     return normalized
 
 
