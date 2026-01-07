@@ -67,11 +67,10 @@ class TqdmProgress:
 
         # Create a task for this progress bar
         if self._progress is not None:
-            # Use a cleaner description and the known total if available
-            clean_desc = "Downloading..."
+            # No description needed - header already shows "Downloading: repo_id"
             total_to_use = TqdmProgress._known_total if TqdmProgress._known_total > 0 else None
             self.task_id = self._progress.add_task(
-                description=clean_desc,
+                description="",
                 total=total_to_use,
             )
 
@@ -113,11 +112,8 @@ class TqdmProgress:
         console.print(s, end=end)
 
     def set_description(self, desc=None, refresh=True):
-        self.desc = desc
-        if self._progress is not None and self.task_id is not None:
-            self._progress.update(self.task_id, description=desc or "")
-            if refresh:
-                self.refresh()
+        # Ignore HF's description updates to keep UI clean
+        pass
 
     def set_postfix(self, ordered_dict=None, refresh=True, **kwargs):
         pass
