@@ -28,6 +28,7 @@ def run(
     config: Optional[Path] = typer.Option(
         None, "--config", "-c", help="Path to TOML configuration file"
     ),
+    log: Optional[Path] = typer.Option(None, "--log", help="Path to log file"),
     arguments: Optional[list[str]] = typer.Argument(
         None, help="Arguments to pass to the inferlet"
     ),
@@ -60,7 +61,9 @@ def run(
         raise typer.Exit(1)
 
     try:
-        engine_config, model_configs = serve_module.load_config(config)
+        engine_config, model_configs = serve_module.load_config(
+            config, log_dir=str(log.parent) if log else None
+        )
     except typer.Exit:
         raise
 
