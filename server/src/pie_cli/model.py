@@ -231,18 +231,23 @@ def model_download(
     console.print(f"[bold]Downloading:[/bold] {repo_id}")
 
     try:
-        # First, do a dry run to get total download size
-        with console.status("[dim]Calculating download size...[/dim]"):
-            dry_run_info = snapshot_download(
-                repo_id,
-                local_files_only=False,
-                dry_run=True,
-            )
-            # Only count files that will actually be downloaded
-            total_size = sum(
-                f.file_size for f in dry_run_info 
-                if f.file_size is not None and f.will_download
-            )
+        # First, do a dry run to get total download size (silently)
+        from huggingface_hub.utils import disable_progress_bars, enable_progress_bars
+        disable_progress_bars()
+        try:
+            with console.status("[dim]Calculating download size...[/dim]"):
+                dry_run_info = snapshot_download(
+                    repo_id,
+                    local_files_only=False,
+                    dry_run=True,
+                )
+                # Only count files that will actually be downloaded
+                total_size = sum(
+                    f.file_size for f in dry_run_info 
+                    if f.file_size is not None and f.will_download
+                )
+        finally:
+            enable_progress_bars()
 
         # Configuration for the progress bar
         progress = Progress(
