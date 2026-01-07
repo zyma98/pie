@@ -34,6 +34,24 @@ else:
     NUM_SM = 108
 
 
+@torch.compile(mode="reduce-overhead")
+def safe_scaled_softmax(logits, temperatures, greedy_threshold=1e-5):
+    """
+    Optimized Approach: Branchless safe_scaled_softmax
+    """
+    greedy_mask = temperatures < greedy_threshold
+    
+    # Branchless logic
+    safe_temps = torch.where(greedy_mask, 1.0, temperatures)
+    scaled_logits = logits / safe_temps
+    probs_sampling = torch.softmax(scaled_logits, dim=-1)
+    
+    greedy_indices = logits.argmax(dim=-1)
+    probs_greedy = torch.nn.functional.one_hot(greedy_indices, num_classes=logits.shape[-1])
+    probs_greedy = probs_greedy.to(dtype=logits.dtype)
+    
+    return torch.where(greedy_mask, probs_greedy, probs_sampling)
+
 def sample_common(
     hidden_states: torch.Tensor,
     sampling_metadata: dict,
@@ -63,41 +81,9 @@ def sample_common(
     logits_input = hidden_states[indices_for_logits]
     logits = lm_head_fn(logits_input)
 
-    # Stage 2: Apply temperature scaling with special handling for greedy decoding
-    # Following vLLM convention: temperature < 1e-5 is considered greedy
-    _SAMPLING_EPS = 1e-5
     temperatures = sampling_metadata["temperatures"]
+    probs = safe_scaled_softmax(logits, temperatures)
 
-    # Identify greedy vs non-greedy requests
-    greedy_mask = temperatures.squeeze() < _SAMPLING_EPS
-    has_greedy = greedy_mask.any().item()
-    has_non_greedy = (~greedy_mask).any().item()
-
-    # Initialize probs tensor - will be filled based on sampling type
-    probs = torch.empty_like(logits)
-
-    # For non-greedy requests: apply temperature scaling and softmax
-    if has_non_greedy:
-        non_greedy_indices = (~greedy_mask).nonzero(as_tuple=True)[0]
-        non_greedy_temps = temperatures[non_greedy_indices]
-        non_greedy_logits = logits[non_greedy_indices]
-        scaled_logits = non_greedy_logits / non_greedy_temps
-        probs[non_greedy_indices] = torch.softmax(scaled_logits, dim=-1)
-
-    # For greedy requests: create one-hot probabilities from argmax on raw logits
-    # This avoids numerical instability from dividing by near-zero temperature
-    if has_greedy:
-        greedy_indices = greedy_mask.nonzero(as_tuple=True)[0]
-        greedy_logits = logits[greedy_indices]
-        greedy_argmax = greedy_logits.argmax(dim=-1)
-        greedy_probs = torch.zeros_like(greedy_logits)
-        greedy_probs.scatter_(1, greedy_argmax.unsqueeze(1), 1.0)
-        probs[greedy_indices] = greedy_probs
-
-    if not torch.isfinite(probs).all():
-        raise RuntimeError("Non-finite probabilities produced by LM head")
-
-    # Stage 4: Execute sampling for each group
     num_logit_requests = len(indices_for_logits)
     final_dists = [None] * num_logit_requests
     final_tokens_tensor = torch.empty(
