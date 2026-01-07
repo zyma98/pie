@@ -148,7 +148,6 @@ def _initialize_mps_backend(page_size: int = 16) -> bool:
     try:
         compiler = get_mps_compiler(page_size=page_size)
         if compiler.can_use_mps_kernels():
-            print("✅ flashinfer_metal initialized")
             return True
     except (RuntimeError, ImportError, AttributeError) as e:
         print(f"❌ MPS shader initialization failed: {e}")
