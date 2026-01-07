@@ -8,6 +8,17 @@ import typer
 from huggingface_hub import scan_cache_dir, snapshot_download
 from rich.console import Console
 from rich.panel import Panel
+
+from rich.progress import (
+    BarColumn,
+    DownloadColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+    TimeRemainingColumn,
+    TransferSpeedColumn,
+)
 from rich.text import Text
 
 from pie.model import (
@@ -15,7 +26,101 @@ from pie.model import (
     parse_repo_id_from_dirname,
     get_model_config,
     check_pie_compatibility,
+
 )
+import typing
+
+
+class TqdmProgress:
+    """Adapter to map tqdm calls to a global rich Progress instance."""
+
+    _progress: typing.Optional[Progress] = None
+
+    def __init__(
+        self,
+        iterable=None,
+        desc: str | None = None,
+        total: float | None = None,
+        unit: str = "it",
+        unit_scale: bool = False,
+        miniters: int | None = None,
+        ncols: int | None = None,
+        **kwargs,
+    ):
+        self.iterable = iterable
+        self.desc = desc
+        self.total = total
+        self.task_id = None
+
+        if self._progress:
+            self.task_id = self._progress.add_task(
+                description=desc or "",
+                total=total,
+                visible=True,
+            )
+
+    def update(self, n: float = 1) -> None:
+        if self._progress and self.task_id is not None:
+            self._progress.update(self.task_id, advance=n)
+
+    def close(self) -> None:
+        if self._progress and self.task_id is not None:
+            self._progress.update(self.task_id, visible=False)
+
+    def __iter__(self):
+        if self.iterable:
+            for item in self.iterable:
+                yield item
+                self.update(1)
+
+    @classmethod
+    def get_lock(cls):
+        # Rich is thread-safe, but tqdm expects a lock.
+        # We return a dummy context manager or a real lock.
+        # huggingface_hub uses this to acquire lock before printing sometimes.
+        import threading
+        if not hasattr(cls, "_lock"):
+            cls._lock = threading.Lock()
+        return cls._lock
+
+    @classmethod
+    def set_lock(cls, lock):
+        cls._lock = lock
+
+    def refresh(self, nolock=False, lock_args=None):
+        if self._progress:
+            self._progress.refresh()
+
+    def reset(self, total=None):
+        if self._progress and self.task_id is not None:
+            self._progress.update(self.task_id, total=total, completed=0)
+
+    @classmethod
+    def write(cls, s, file=None, end="\n", nolock=False):
+        # rich Console print is thread safe
+        # console is global here
+        console.print(s, end=end)
+
+    def set_description(self, desc=None, refresh=True):
+        self.desc = desc
+        if self._progress and self.task_id is not None:
+            self._progress.update(self.task_id, description=desc or "")
+            if refresh:
+                self.refresh()
+
+    def set_postfix(self, ordered_dict=None, refresh=True, **kwargs):
+        # rich handles speed and other metrics automatically.
+        # If we really want postfix, we could append to description or use a custom column.
+        # For now, we'll ignore it to keep the bar clean, as HF usually puts speed/size here 
+        # which rich already shows.
+        pass
+
+    def disable(self):
+        pass
+
+
+
+
 
 console = Console()
 app = typer.Typer(help="Manage models from HuggingFace")
@@ -91,11 +196,29 @@ def model_download(
     console.print(f"[bold]Downloading:[/bold] {repo_id}")
 
     try:
-        with console.status("[dim]Downloading from HuggingFace...[/dim]"):
+        # Configuration for the progress bar
+        progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            DownloadColumn(),
+            TransferSpeedColumn(),
+            TimeRemainingColumn(),
+            console=console,
+        )
+
+        TqdmProgress._progress = progress
+
+        with progress:
             local_path = snapshot_download(
                 repo_id,
                 local_files_only=False,
+                tqdm_class=TqdmProgress,
             )
+        
+        # Cleanup global reference
+        TqdmProgress._progress = None
 
         console.print(f"[green]✓[/green] Downloaded to {local_path}")
 
