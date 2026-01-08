@@ -179,7 +179,9 @@ class Brle:
 
             if head_last_is_true == tail_first_is_true:
                 # Merge the runs
-                tail_first_run_len = tail.buffer[1] if tail_first_is_true else tail.buffer[0]
+                tail_first_run_len = (
+                    tail.buffer[1] if tail_first_is_true else tail.buffer[0]
+                )
                 tail_slice_start = 2 if tail_first_is_true else 1
 
                 new_buffer = head.buffer.copy()
@@ -194,7 +196,6 @@ class Brle:
                     self.buffer = head.buffer + tail.buffer
 
             self.total_size = head.total_size + tail.total_size
-
 
     def is_empty(self) -> bool:
         """Check if the sequence is empty."""

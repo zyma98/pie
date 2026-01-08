@@ -193,9 +193,7 @@ class KvPageManager:
         """
         ptrs = self.page_ptrs
         if ptrs:
-            self._queue.export_resources(
-                self._queue.KV_PAGE_TYPE, ptrs, name
-            )
+            self._queue.export_resources(self._queue.KV_PAGE_TYPE, ptrs, name)
 
     def import_pages(self, name: str) -> list[KvPage]:
         """

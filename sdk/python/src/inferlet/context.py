@@ -408,7 +408,10 @@ class Context:
         """Flush messages to tokens if needed."""
         if self._messages:
             formatted = self._formatter.format(
-                [{"role": role, "content": content} for role, content in self._messages],
+                [
+                    {"role": role, "content": content}
+                    for role, content in self._messages
+                ],
                 add_generation_prompt=True,
             )
             self._messages.clear()
@@ -498,7 +501,9 @@ class Context:
                 break
 
         text = self._tokenizer.decode(generated_tokens)
-        return GenerateResult(text=text, tokens=generated_tokens, finish_reason=finish_reason)
+        return GenerateResult(
+            text=text, tokens=generated_tokens, finish_reason=finish_reason
+        )
 
     def _generate_stream(
         self,
@@ -561,7 +566,9 @@ class Context:
         if sampler.temperature == 0:
             fwd.output_tokens(output_idx, 0.0)
         elif sampler.top_k > 0 and sampler.top_p < 1.0:
-            fwd.output_tokens_top_k_top_p(output_idx, sampler.temperature, sampler.top_k, sampler.top_p)
+            fwd.output_tokens_top_k_top_p(
+                output_idx, sampler.temperature, sampler.top_k, sampler.top_p
+            )
         elif sampler.top_k > 0:
             fwd.output_tokens_top_k(output_idx, sampler.temperature, sampler.top_k)
         elif sampler.top_p < 1.0:
@@ -756,7 +763,7 @@ class Context:
                 return True
             for seq in stop_sequences:
                 if len(seq) > 0 and len(generated) >= len(seq):
-                    if generated[-len(seq):] == seq:
+                    if generated[-len(seq) :] == seq:
                         return True
             return False
 
