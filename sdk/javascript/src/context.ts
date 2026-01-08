@@ -1,13 +1,14 @@
 // Context class for managing conversation state and generation.
 // Mirrors the Rust Context from inferlet/src/context.rs
 
-import { Model, Queue } from './model.js';
+import { Model, Queue, _bindContextClass } from './model.js';
 import { Tokenizer } from './tokenizer.js';
 import { ChatFormatter } from './chat.js';
 import { Brle } from './brle.js';
 import { KvPage, ForwardPass, type Distribution } from './forward.js';
 import { toSamplerType, type SamplerType, type SamplingConfig } from './sampler.js';
 import { KvPageManager } from './kv-page-manager.js';
+import type { Drafter } from './drafter.js';
 
 
 
@@ -719,4 +720,112 @@ export class Context {
       beams = nextBeams.slice(0, beamSize);
     }
   }
+
+  /**
+   * Generates text using speculative decoding with a drafter model.
+   *
+   * Speculative decoding accelerates generation by using a small, fast drafter
+   * to propose candidate tokens that are then verified by the main model.
+   *
+   * @param drafter - The drafter that proposes candidate tokens
+   * @param options - Generation options
+   * @returns The generated text
+   *
+   * @example
+   * ```ts
+   * const drafter = new MyDrafter(smallModel);
+   * const result = await ctx.generateWithDrafter(drafter, {
+   *   sampling: { topP: 0.95, temperature: 0.6 },
+   *   stop: { maxTokens: 256, sequences: model.eosTokens }
+   * });
+   * ```
+   */
+  async generateWithDrafter(
+    drafter: Drafter,
+    options: GenerateOptions
+  ): Promise<string> {
+    // Initialize drafter with current context
+    drafter.update([...this._tokenIds, ...this.tokenIdsPending]);
+
+    const samplerType = toSamplerType(options.sampling);
+    const { maxTokens, sequences } = options.stop;
+
+    if (maxTokens === undefined && (sequences === undefined || sequences.length === 0)) {
+      throw new Error('At least one stop condition (maxTokens or sequences) must be specified');
+    }
+
+    const generatedTokenIds: number[] = [];
+
+    while (true) {
+      // Get draft tokens
+      const [draftTokens, draftPosIds] = drafter.draft();
+
+      if (draftTokens.length === 0) {
+        // No drafts - fall back to regular decode
+        const nextTokenId = await this.decodeStep(samplerType);
+        this.fillToken(nextTokenId);
+        generatedTokenIds.push(nextTokenId);
+        drafter.update([nextTokenId]);
+      } else {
+        // Verify drafts with main model
+        const acceptedTokens = await this.verifyDrafts(
+          draftTokens,
+          draftPosIds,
+          samplerType
+        );
+
+        for (const token of acceptedTokens) {
+          this.fillToken(token);
+          generatedTokenIds.push(token);
+        }
+        drafter.update(acceptedTokens);
+      }
+
+      // Check stop conditions
+      if (maxTokens !== undefined && generatedTokenIds.length >= maxTokens) {
+        break;
+      }
+      if (sequences !== undefined && this.endsWithAny(generatedTokenIds, sequences)) {
+        break;
+      }
+    }
+
+    return this.tokenizer.detokenize(new Uint32Array(generatedTokenIds));
+  }
+
+  /**
+   * Verify draft tokens with the main model.
+   * Returns the tokens that were accepted.
+   *
+   * This uses a simple sequential verification strategy where drafts are
+   * verified one by one until a rejection occurs.
+   */
+  private async verifyDrafts(
+    draftTokens: number[],
+    _draftPosIds: number[],
+    _samplerType: SamplerType
+  ): Promise<number[]> {
+    const accepted: number[] = [];
+
+    for (let i = 0; i < draftTokens.length; i++) {
+      const dist = await this.decodeStepDist();
+      const predictedToken = dist.ids[0]; // Most likely token
+
+      if (predictedToken === draftTokens[i]) {
+        // Draft accepted
+        accepted.push(predictedToken);
+        this.fillToken(predictedToken);
+      } else {
+        // Draft rejected - use model's prediction instead
+        accepted.push(predictedToken);
+        this.fillToken(predictedToken);
+        break;
+      }
+    }
+
+    return accepted;
+  }
 }
+
+// Bind Context class to model.js to enable Model.createContext()
+_bindContextClass(Context);

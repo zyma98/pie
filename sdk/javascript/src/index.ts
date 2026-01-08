@@ -16,7 +16,8 @@ export {
 export { toSamplerType } from './sampler.js';
 export type { SamplerType, SamplingConfig } from './sampler.js';
 
-
+// Re-export Drafter
+export { Drafter, EmptyDrafter } from './drafter.js';
 
 // Re-export Tokenizer
 export { Tokenizer } from './tokenizer.js';
