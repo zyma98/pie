@@ -288,38 +288,45 @@ class ModelConfig(ModelConfigBase):
 
     @staticmethod
     def from_dict(spec: dict) -> "ModelConfig":
-        moe = spec.get("moe", {})
-        rope = spec.get("rope", {})
+        """
+        Load ModelConfig from a dictionary strict to the provided JSON format.
+        No default values are used; the dictionary must contain all required fields.
+        """
+        # Ensure model_type is gpt_oss
+        if spec.get("model_type") != "gpt_oss":
+             raise ValueError(f"Expected model_type='gpt_oss', got {spec.get('model_type')}")
+        
+        # Extract sub-configs
+        quant_config = spec["quantization_config"]
+        rope_config = spec["rope_scaling"]
 
         return ModelConfig(
-            num_layers=int(spec["num_layers"]),
-            num_q_heads=int(spec["num_query_heads"]),
+            # Base ModelConfig fields
+            num_layers=int(spec["num_hidden_layers"]),
+            num_q_heads=int(spec["num_attention_heads"]),
             num_kv_heads=int(spec["num_key_value_heads"]),
-            dim_head=int(spec["head_size"]),
+            num_vocabs=int(spec["vocab_size"]),
+            dim_head=int(spec["head_dim"]),
             dim_hidden=int(spec["hidden_size"]),
             dim_mlp=int(spec["intermediate_size"]),
-            num_vocabs=int(spec["vocab_size"]),
-            rms_norm_eps=float(spec.get("rms_norm_eps", 1e-6)),
-            # MoE
-            num_experts=int(moe.get("num_experts", spec.get("num_experts", 8))),
-            experts_per_token=int(
-                moe.get("experts_per_token", spec.get("experts_per_token", 2))
-            ),
-            # YaRN RoPE
-            rope_theta=float(rope.get("theta", spec.get("rope_theta", 10000.0))),
-            rope_scaling_factor=float(
-                rope.get("scaling_factor", spec.get("rope_scaling_factor", 1.0))
-            ),
-            rope_ntk_alpha=float(
-                rope.get("ntk_alpha", spec.get("rope_ntk_alpha", 1.0))
-            ),
-            rope_ntk_beta=float(rope.get("ntk_beta", spec.get("rope_ntk_beta", 32.0))),
-            # Model specific
-            initial_context_length=int(spec.get("initial_context_length", 4096)),
-            sliding_window=int(spec.get("sliding_window", 4096)),
-            swiglu_alpha=float(spec.get("swiglu_alpha", 1.0)),
-            swiglu_beta=float(spec.get("swiglu_beta", 1.0)),
-            swiglu_limit=float(spec.get("swiglu_limit", 20.0)),
+            rms_norm_eps=float(spec["rms_norm_eps"]),
+            
+            # MoE configuration
+            num_experts=int(spec["num_local_experts"]),
+            experts_per_token=int(spec["num_experts_per_tok"]),
+            
+            # YaRN RoPE configuration
+            rope_theta=float(spec["rope_theta"]),
+            rope_scaling_factor=float(rope_config["factor"]),
+            rope_ntk_alpha=float(rope_config["beta_slow"]),
+            rope_ntk_beta=float(rope_config["beta_fast"]),
+
+            # Model specific parameters
+            initial_context_length=int(spec["initial_context_length"]),
+            sliding_window=int(spec["sliding_window"]),
+            swiglu_alpha=1.702, 
+            swiglu_beta=1.0, 
+            swiglu_limit=float(spec["swiglu_limit"]),
         )
 
     def eval_max_num_kv_pages(self, runtime_config: RuntimeConfig) -> int:
@@ -372,6 +379,9 @@ class ForwardPass:
         self.runtime_config = runtime_config
         self.weights = weights
 
+        print("Model config:", model_config)
+        
+
         # Compute padded dimensions for MoE
         self.padded_hidden_size = pad_to_multiple(model_config.dim_hidden, ALIGNMENT)
         self.padded_intermediate_size = pad_to_multiple(model_config.dim_mlp, ALIGNMENT)
@@ -379,17 +389,16 @@ class ForwardPass:
         # Pre-compute YaRN RoPE cos/sin cache
         self._rope_cos_sin_cache = self._compute_rope_cache()
 
-        # Create workspace buffers for FlashInfer wrappers
-        workspace_window = torch.empty(
+        self.workspace_window = torch.empty(
             128 * 1024 * 1024, dtype=torch.uint8, device=runtime_config.device
         )
-        workspace_full = torch.empty(
+        self.workspace_full = torch.empty(
             128 * 1024 * 1024, dtype=torch.uint8, device=runtime_config.device
         )
 
         # Wrapper for even layers (sliding window attention)
         self.wrapper_window = BatchAttentionWithAttentionSinkWrapper(
-            float_workspace_buffer=workspace_window,
+            float_workspace_buffer=self.workspace_window,  # Pass self.workspace_window
             kv_layout="NHD",
             window_left=model_config.sliding_window - 1,
             q_data_type=runtime_config.activation_dtype,
@@ -400,7 +409,7 @@ class ForwardPass:
 
         # Wrapper for odd layers (full attention)
         self.wrapper_full = BatchAttentionWithAttentionSinkWrapper(
-            float_workspace_buffer=workspace_full,
+            float_workspace_buffer=self.workspace_full,    # Pass self.workspace_full
             kv_layout="NHD",
             window_left=-1,
             q_data_type=runtime_config.activation_dtype,

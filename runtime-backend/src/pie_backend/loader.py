@@ -486,7 +486,7 @@ class ModelLoader:
         Load the model weights and return components.
 
         Returns:
-            Tuple of (weights, normalized_arch, model_info)
+            Tuple of (weights, arch, model_info)
         """
         # Get HuggingFace snapshot directory
         self.snapshot_dir = hf_utils.get_hf_snapshot_dir(self.config.hf_repo)
@@ -494,22 +494,29 @@ class ModelLoader:
         # Load config from HuggingFace config.json
         hf_config = hf_utils.load_hf_config(self.snapshot_dir)
 
-        # Normalize the HF config to PIE format
-        normalized_arch = hf_utils.normalize_hf_config(hf_config)
-
         # Derive architecture from HF model_type
         hf_model_type = hf_config.get("model_type", "")
+        # Handle case where model_type might be mapped (e.g. llama -> llama3)
+        # We need hf_utils.HF_TO_PIE_ARCH to map it.
+        # If it's not in the map, check if it's already a valid PIE type (less likely but possible)
         arch_type = hf_utils.HF_TO_PIE_ARCH.get(hf_model_type)
+        
         if arch_type is None:
-            raise ValueError(
-                f"Unsupported HuggingFace model_type: '{hf_model_type}'. "
-                f"Supported types: {list(hf_utils.HF_TO_PIE_ARCH.keys())}"
-            )
-        normalized_arch["type"] = arch_type
+             # Basic fallback or error
+             if hf_model_type in hf_utils.HF_TO_PIE_ARCH.values():
+                 arch_type = hf_model_type
+             else:
+                raise ValueError(
+                    f"Unsupported HuggingFace model_type: '{hf_model_type}'. "
+                    f"Supported types: {list(hf_utils.HF_TO_PIE_ARCH.keys())}"
+                )
+        
+        # Inject PIE type into config for runtime to use
+        hf_config["type"] = arch_type
 
         # Store info for later (tokenizer, template, etc.)
         self.info = {
-            "architecture": normalized_arch,
+            "architecture": hf_config,
             "hf_config": hf_config,
         }
 
@@ -517,27 +524,36 @@ class ModelLoader:
         match arch_type:
             case "llama3":
                 from .model import llama3
-
-                schema = llama3.create_schema(normalized_arch)
-                num_layers = int(normalized_arch["num_layers"])
+                
+                # from_dict now expects raw HF config
+                model_config = llama3.ModelConfig.from_dict(hf_config)
+                schema = llama3.create_schema(model_config)
+                num_layers = model_config.num_layers
 
             case "qwen2":
                 from .model import qwen2
 
+                model_config = qwen2.ModelConfig.from_dict(hf_config)
+                # Qwen2 schema currently uses a static constant QWEN2_SCHEMA, 
+                # but we usually need to pass dimensions for fusion/quantization if they were dynamic.
+                # Looking at qwen2.py, QWEN2_SCHEMA is a global variable.
+                # However, usually schemas might need to know about quantization or specific layer counts?
+                # Actually QWEN2_SCHEMA in the file is defined using "layers.*..." which handles any number of layers.
+                # So we just use it.
                 schema = qwen2.QWEN2_SCHEMA
-                num_layers = int(normalized_arch["num_layers"])
+                num_layers = model_config.num_layers
 
             case "qwen3":
                 from .model import qwen3
 
+                model_config = qwen3.ModelConfig.from_dict(hf_config)
                 schema = qwen3.QWEN3_SCHEMA
-                num_layers = int(normalized_arch["num_layers"])
+                num_layers = model_config.num_layers
 
             case "gptoss":
                 from .model import gpt_oss
 
-                # GPT-OSS uses a factory function because MoE transforms need dimensions
-                model_config = gpt_oss.ModelConfig.from_dict(normalized_arch)
+                model_config = gpt_oss.ModelConfig.from_dict(hf_config)
                 schema = gpt_oss.create_gpt_oss_schema(model_config)
                 num_layers = model_config.num_layers
 
@@ -547,7 +563,7 @@ class ModelLoader:
         # Load weights using schema
         weights = self.load_weights(schema, num_layers)
 
-        return weights, normalized_arch, self.info
+        return weights, hf_config, self.info
 
     def load_weights(self, schema: Schema, num_layers: int) -> WeightStore:
         """

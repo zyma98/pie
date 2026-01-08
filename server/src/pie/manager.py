@@ -25,7 +25,7 @@ class EngineError(Exception):
 def start_engine_and_backend(
     engine_config: dict,
     model_configs: list[dict],
-    timeout: float = 60.0,
+    timeout: float = 300.0,
     console: Optional[Any] = None,
     on_status: Optional[callable] = None,
     on_message: Optional[callable] = None,
