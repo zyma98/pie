@@ -313,6 +313,7 @@ class Schema:
         reader: ReaderFn,
         config: "RuntimeConfig",
         num_layers: int = 0,
+        log_queue: object | None = None,
     ) -> WeightStore:
         """
         Load all weights according to the schema.
@@ -321,29 +322,83 @@ class Schema:
             reader: Function to read tensors by name
             config: Runtime configuration (device, sharding, quantization)
             num_layers: Number of layers (for expanding '*' patterns)
+            log_queue: Optional queue to send progress updates to CLI
 
         Returns:
             WeightStore with all loaded weights
         """
         store = WeightStore()
 
+        # Calculate total number of weight operations for progress tracking
+        total_ops = 0
         for defn in self._definitions:
             if defn.has_layer_pattern():
-                # Expand for each layer
-                for layer_idx in range(num_layers):
-                    logical_name = defn.expand_for_layer(layer_idx)
-                    physical_names = defn.expand_source_for_layer(layer_idx)
-                    tensor = self._load_single(
-                        reader, config, defn.source, physical_names
-                    )
-                    store.put(logical_name, tensor)
+                total_ops += num_layers
             else:
-                # Single tensor (not per-layer)
-                tensor = self._load_single(
-                    reader, config, defn.source, defn.source.patterns
-                )
-                store.put(defn.name, tensor)
-        # print("Loaded", len(store), flush=True)
+                total_ops += 1
+
+        # Only show progress on rank 0
+        show_progress = config.rank == 0
+
+        # If log_queue is provided, send progress to CLI instead of local tqdm
+        use_queue_progress = log_queue is not None and show_progress
+
+        def send_progress(current: int, total: int, desc: str):
+            """Send progress update to CLI via log queue."""
+            if use_queue_progress:
+                log_queue.put({
+                    "level": "PROGRESS",
+                    "current": current,
+                    "total": total,
+                    "description": desc,
+                })
+
+        # Send initial progress
+        if use_queue_progress:
+            send_progress(0, total_ops, "Starting weight loading...")
+
+        # Use local tqdm only if not using queue progress
+        with tqdm(
+            total=total_ops,
+            desc="\033[1;36m Loading weights\033[0m",
+            unit="tensors",
+            disable=use_queue_progress or not show_progress,
+            bar_format="{desc} │{bar:40}│ {percentage:3.0f}% • {n_fmt}/{total_fmt} • {rate_fmt} • ETA: {remaining}",
+            colour="cyan",
+            dynamic_ncols=True,
+        ) as pbar:
+            current_op = 0
+            for defn in self._definitions:
+                if defn.has_layer_pattern():
+                    # Expand for each layer
+                    for layer_idx in range(num_layers):
+                        logical_name = defn.expand_for_layer(layer_idx)
+                        physical_names = defn.expand_source_for_layer(layer_idx)
+                        desc = f"layer {layer_idx + 1}/{num_layers}"
+                        pbar.set_postfix_str(desc, refresh=False)
+                        tensor = self._load_single(
+                            reader, config, defn.source, physical_names
+                        )
+                        store.put(logical_name, tensor)
+                        current_op += 1
+                        pbar.update(1)
+                        send_progress(current_op, total_ops, desc)
+                else:
+                    # Single tensor (not per-layer)
+                    desc = defn.name
+                    pbar.set_postfix_str(desc, refresh=False)
+                    tensor = self._load_single(
+                        reader, config, defn.source, defn.source.patterns
+                    )
+                    store.put(defn.name, tensor)
+                    current_op += 1
+                    pbar.update(1)
+                    send_progress(current_op, total_ops, desc)
+
+        # Send completion
+        if use_queue_progress:
+            log_queue.put({"level": "PROGRESS_DONE", "message": "Weight loading complete"})
+
         return store
 
     def _load_single(
@@ -473,16 +528,18 @@ class ModelLoader:
     is responsible for creating the ForwardPass and KV cache.
     """
 
-    def __init__(self, config: "RuntimeConfig"):
+    def __init__(self, config: "RuntimeConfig", log_queue: object | None = None):
         """
         Initialize the model loader.
 
         Args:
             config: Runtime configuration with repo_id and arch
+            log_queue: Optional queue for sending progress updates to CLI
         """
         self.config = config
         self.info: dict = {}
         self.snapshot_dir: Path | None = None
+        self.log_queue = log_queue
 
     def load(self) -> tuple[WeightStore, dict, dict]:
         """
@@ -629,6 +686,7 @@ class ModelLoader:
                 reader=reader,
                 config=self.config,
                 num_layers=num_layers,
+                log_queue=self.log_queue,
             )
 
         return weights

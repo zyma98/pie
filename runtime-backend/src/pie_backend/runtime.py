@@ -122,7 +122,7 @@ class Runtime:
             torch.cuda.manual_seed_all(config.random_seed)
 
         # Load model weights using ModelLoader
-        loader = ModelLoader(config)
+        loader = ModelLoader(config, log_queue=log_queue)
 
         msg = "Loading model weights"
         self.log_queue.put({"message": msg, "level": "DEBUG"})

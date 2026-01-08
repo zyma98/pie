@@ -111,8 +111,6 @@ def main(
         from .control_channel import create_control_channels
         control_queues = create_control_channels(world_size)
 
-        print(f"Spawning {world_size} processes for devices: {device_list}")
-
         ctx = mp.spawn(
             init_process,
             args=(
