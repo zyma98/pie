@@ -19,6 +19,7 @@ import torch.nn.functional as fun
 import torch.distributed as dist
 
 from . import ModelConfig as ModelConfigBase
+from . import common
 from .gpt_oss_utils import (
     ALIGNMENT,
     TUNE_MAX_NUM_TOKENS,
@@ -200,7 +201,7 @@ def create_gpt_oss_schema(model_config: "ModelConfig") -> Schema:
                     "model.layers.*.mlp.experts.gate_up_proj_scales",
                     "model.layers.*.mlp.experts.gate_up_proj_bias",
                 ]
-            ).transform(gate_up_transform, output_type="bias"),
+            ).transform(gate_up_transform, output_type="bias").dtype(torch.float32),
         )
         # MoE down weights (complex transform)
         .define(
@@ -231,7 +232,7 @@ def create_gpt_oss_schema(model_config: "ModelConfig") -> Schema:
                     "model.layers.*.mlp.experts.down_proj_scales",
                     "model.layers.*.mlp.experts.down_proj_bias",
                 ]
-            ).transform(down_transform, output_type="bias"),
+            ).transform(down_transform, output_type="bias").dtype(torch.float32),
         )
         # Final layer norm
         .define(
@@ -429,6 +430,32 @@ class ForwardPass:
             model_config.swiglu_limit,
             device=device,
             dtype=torch.float32,
+        )
+
+    def sample(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        """
+        Execute sampling using the model's LM head.
+
+        Args:
+            hidden_states: Output hidden states.
+            sampling_metadata: Metadata for sampling.
+
+        Returns:
+            Sampling results (tokens, distributions).
+        """
+        # Define a lambda to call self.lm_head passing parameters correctly
+        lm_head_fn = lambda x: self.lm_head(x)
+
+        return common.sample_common(
+            hidden_states=hidden_states,
+            sampling_metadata=sampling_metadata,
+            lm_head_fn=lm_head_fn,
+            device=self.runtime_config.device,
+            dtype=self.runtime_config.activation_dtype,
         )
 
     def _compute_rope_cache(self) -> torch.Tensor:

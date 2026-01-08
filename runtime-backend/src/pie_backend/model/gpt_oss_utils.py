@@ -243,6 +243,15 @@ def dequantize_from_mxfp4(
     Returns:
         Converted tensor in the target dtype
     """
+    # CRITICAL FIX: If scales are loaded as float8 (e.g. from safetensors), we must
+    # view them as uint8 to interpret them as raw exponent bits. Converting float8
+    # directly to int32 would convert the *value* (approx 1.0 -> 1), not the bit
+    # representation (e.g., 127), destroying the exponent information.
+    if scales.dtype == torch.float8_e4m3fn:
+        scales = scales.view(torch.uint8)
+
+    # Convert raw exponent bits to int32 and subtract bias
+    # We must do this on the source device to avoid dtype mismatch issues during copy
     scales = scales.to(torch.int32) - 127
 
     assert (
@@ -254,6 +263,7 @@ def dequantize_from_mxfp4(
     *prefix_shape, g, b = blocks.shape
     rows_total = math.prod(prefix_shape) * g
 
+    # Move to target device
     blocks = blocks.reshape(rows_total, b).to(device)
     scales = scales.reshape(rows_total, 1).to(device)
 
@@ -280,13 +290,17 @@ def quantize_into_mxfp4(
 
     num_experts = a.shape[0]
     sf_vec_size = 32  # MXFP4 uses 32-element blocks
+    device = a.device
 
     quant_a = []
     sfs = []
-    a_global_sf = torch.tensor(1.0, dtype=torch.float32).cuda()
+    # Ensure scale factor is on the same device as the input
+    a_global_sf = torch.tensor(1.0, dtype=torch.float32, device=device)
+
     for i in range(num_experts):
+        # Input 'a' is likely already on GPU from dequantize step
         a_fp4, a_sf = fp4_quantize(
-            a[i].cuda(), a_global_sf, sf_vec_size, True, is_sf_swizzled_layout
+            a[i], a_global_sf, sf_vec_size, True, is_sf_swizzled_layout
         )
         quant_a.append(a_fp4)
         sfs.append(a_sf)

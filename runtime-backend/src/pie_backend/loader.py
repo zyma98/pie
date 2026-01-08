@@ -217,6 +217,10 @@ class Source:
     def should_quantize(self) -> bool:
         return self._should_quantize
 
+    @property
+    def target_dtype(self) -> torch.dtype | None:
+        return self._dtype
+
 
 @dataclass
 class Definition:
@@ -437,9 +441,13 @@ class Schema:
         # Apply quantization (lazy import to avoid dependency issues)
         if source.should_quantize and config.quantization is not None:
             tensor = quantize(tensor, config.quantization)
-        else:
+        elif source.target_dtype is not None:
+            # Respect explicit dtype override from source definition
+            tensor = tensor.to(source.target_dtype)
+        elif tensor.dtype not in (torch.uint8, torch.float8_e4m3fn):
             # Apply dtype casting for float weight types (including 'auto')
             # This handles: auto -> activation_dtype, float32/float16/bfloat16 -> specified dtype
+            # Skip casting for uint8/float8_e4m3fn tensors (FP4 packed MoE weights)
             tensor = tensor.to(config.compute_dtype)
 
         # Move to device

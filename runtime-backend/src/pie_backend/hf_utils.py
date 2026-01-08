@@ -169,6 +169,30 @@ def normalize_hf_config(config: dict) -> dict:
     # Tied embeddings
     normalized["tie_word_embeddings"] = config.get("tie_word_embeddings", True)
 
+    # MoE (Mixture of Experts) configuration
+    # HuggingFace uses various field names for MoE configs
+    moe_config = {}
+    
+    # num_experts (also called num_local_experts in some configs)
+    if "num_experts" in config:
+        moe_config["num_experts"] = config["num_experts"]
+    elif "num_local_experts" in config:
+        moe_config["num_experts"] = config["num_local_experts"]
+    
+    # experts_per_token (also called num_experts_per_tok)
+    if "experts_per_token" in config:
+        moe_config["experts_per_token"] = config["experts_per_token"]
+    elif "num_experts_per_tok" in config:
+        moe_config["experts_per_token"] = config["num_experts_per_tok"]
+    
+    # Pass through other MoE-related fields
+    for key in ["router_aux_loss_coef", "router_jitter_noise"]:
+        if key in config:
+            moe_config[key] = config[key]
+    
+    if moe_config:
+        normalized["moe"] = moe_config
+
     return normalized
 
 
@@ -270,6 +294,80 @@ def load_hf_tokenizer(snapshot_dir: Path) -> dict:
 
         # Get chat template (already in Jinja format)
         chat_template = config_data.get("chat_template", "")
+        if not chat_template:
+            # Default fallback for base models: Use sophisticated template provided for GPT-OSS
+            chat_template = """{#- Simplified Template that Removed Tool Calls to Work With MiniJinja #}
+{#- Main Template Logic ================================================= #}
+{#- Set defaults #}
+{#- Render system message #}
+{{- "<|start|>system<|message|>" }}
+{%- if model_identity is not defined %}
+    {%- set model_identity = "You are ChatGPT, a large language model trained by OpenAI." %}
+{%- endif %}
+{{- model_identity + "\\n" }}
+{{- "Knowledge cutoff: 2024-06\\n" }}
+{{- "Current date: %2025-09-24\\n\\n" }}
+{%- if reasoning_effort is not defined %}
+    {%- set reasoning_effort = "medium" %}
+{%- endif %}
+{{- "Reasoning: " + reasoning_effort + "\\n\\n" }}
+{{- "# Valid channels: analysis, commentary, final. Channel must be included for every message." }}
+{{- "<|end|>" }}
+{#- Extract developer message #}
+{%- if messages[0].role == "developer" or messages[0].role == "system" %}
+    {%- set developer_message = messages[0].content %}
+    {%- set loop_messages = messages[1:] %}
+{%- else %}
+    {%- set developer_message = "" %}
+    {%- set loop_messages = messages %}
+{%- endif %}
+{#- Render developer message #}
+{%- if developer_message %}
+    {{- "<|start|>developer<|message|>" }}
+    {%- if developer_message %}
+        {{- "# Instructions\\n\\n" }}
+        {{- developer_message }}
+        {{- "\\n\\n" }}
+    {%- endif %}
+    {{- "<|end|>" }}
+{%- endif %}
+{#- Render messages #}
+{%- for message in loop_messages -%}
+    {#- At this point only assistant/user messages should remain #}
+    {%- if message.role == 'assistant' -%}
+        {#- Checks to ensure the messages are being passed in the format we expect #}
+        {%- if "content" in message %}
+            {%- if "<|channel|>analysis<|message|>" in message.content or "<|channel|>final<|message|>" in message.content %}
+                {{- raise("You have passed a message containing <|channel|> tags in the content field. Instead of doing this, you should pass analysis messages (the string between '<|message|>' and '<|end|>') in the 'thinking' field, and final messages (the string between '<|message|>' and '<|end|>') in the 'content' field.") }}
+            {%- endif %}
+        {%- endif %}
+        {%- if "thinking" in message %}
+            {%- if "<|channel|>analysis<|message|>" in message.thinking or "<|channel|>final<|message|>" in message.thinking %}
+                {{- raise("You have passed a message containing <|channel|> tags in the thinking field. Instead of doing this, you should pass analysis messages (the string between '<|message|>' and '<|end|>') in the 'thinking' field, and final messages (the string between '<|message|>' and '<|end|>') in the 'content' field.") }}
+            {%- endif %}
+        {%- endif %}
+        {%- if loop.last and not add_generation_prompt %}
+            {#- Only render the CoT if the final turn is an assistant turn and add_generation_prompt is false #}
+            {#- This is a situation that should only occur in training, never in inference. #}
+            {%- if "thinking" in message %}
+                {{- "<|start|>assistant<|channel|>analysis<|message|>" + message.thinking + "<|end|>" }}
+            {%- endif %}
+            {#- <|return|> indicates the end of generation, but <|end|> does not #}
+            {#- <|return|> should never be an input to the model, but we include it as the final token #}
+            {#- when training, so the model learns to emit it. #}
+            {{- "<|start|>assistant<|channel|>final<|message|>" + message.content + "<|return|>" }}
+        {%- else %}
+            {#- CoT is dropped during all previous turns, so we never render it for inference #}
+            {{- "<|start|>assistant<|channel|>final<|message|>" + message.content + "<|end|>" }}
+        {%- endif %}
+    {%- elif message.role == 'user' -%}
+        {{- "<|start|>user<|message|>" + message.content + "<|end|>" }}
+    {%- endif -%}
+{%- endfor -%}
+{#- Generation prompt #}
+{%- if add_generation_prompt -%}
+<|start|>assistant
+{%- endif -%}"""
         result["chat_template"] = _sanitize_chat_template(chat_template)
 
         # Additional special tokens from added_tokens_decoder
