@@ -98,18 +98,6 @@ class Runtime:
         self.log_queue = log_queue
         self.log_queue = log_queue
         self.adapters = {}
-        # Profiling stats
-        self.last_batch_end_time = time.perf_counter()
-        self.last_batch_end_time = time.perf_counter()
-        self.perf_stats = {
-            "total_idle": 0.0,
-            "total_compute": 0.0,
-            "total_wait": 0.0,
-            "total_drain": 0.0,
-            "total_build": 0.0,
-            "total_response": 0.0,
-            "steps": 0,
-        }
         self.batch = None
 
         # Async Execution - 2 Stage Pipeline
@@ -125,8 +113,7 @@ class Runtime:
 
         # Initialize seeds
         msg = f"Initializing with random seed: {config.random_seed}"
-        if self.log_queue:
-            self.log_queue.put({"message": msg, "level": "DEBUG"})
+        self.log_queue.put({"message": msg, "level": "DEBUG"})
 
         random.seed(config.random_seed)
         np.random.seed(config.random_seed)
@@ -138,8 +125,7 @@ class Runtime:
         loader = ModelLoader(config, log_queue=log_queue)
 
         msg = "Loading model weights"
-        if self.log_queue:
-            self.log_queue.put({"message": msg, "level": "DEBUG"})
+        self.log_queue.put({"message": msg, "level": "DEBUG"})
 
         weights, normalized_arch, self.info = loader.load()
 
@@ -147,8 +133,7 @@ class Runtime:
         self.snapshot_dir = loader.snapshot_dir
 
         msg = "Loaded model weights"
-        if self.log_queue:
-            self.log_queue.put({"message": msg, "level": "DEBUG"})
+        self.log_queue.put({"message": msg, "level": "DEBUG"})
 
         # Store architecture type
         self.type = self.info["architecture"]["type"]
@@ -426,8 +411,6 @@ class Runtime:
             except Exception:
                 break
 
-            t_after_wait = time.perf_counter()
-
             if item is None:
                 break
 
@@ -443,8 +426,6 @@ class Runtime:
                     pending_items.append(next_item)
                 except queue.Empty:
                     break
-
-            t_after_drain = time.perf_counter()
 
             # Create Result Objects
             pending_results = []
@@ -499,20 +480,9 @@ class Runtime:
 
                 if not self.batch_builder.is_empty():
                     # Execute batch directly (on GPU)
-                    t0 = time.perf_counter()
-
-                    idle_time = t0 - self.last_batch_end_time
-                    wait_time = t_after_wait - self.last_batch_end_time
-                    drain_time = t_after_drain - t_after_wait
-                    build_time = t0 - t_after_drain
-
                     responses = self._execute_batch()
 
-                    t1 = time.perf_counter()
-                    compute_time = t1 - t0
-
                     # Send responses
-                    t2 = time.perf_counter()
                     if self.response_callback:
                         for resp, (pending_result, req_idx) in zip(
                             responses, batch_mapping
@@ -521,37 +491,6 @@ class Runtime:
                                 self.response_callback(
                                     *pending_result.metadata, pending_result.resps
                                 )
-                    t3 = time.perf_counter()
-                    response_time = t3 - t2
-                    self.last_batch_end_time = t3  # Update to include response time
-
-                    # Print stats
-                    self.perf_stats["steps"] += 1
-
-                    if self.perf_stats["steps"] > 10:
-                        self.perf_stats["total_idle"] += idle_time
-                        self.perf_stats["total_compute"] += compute_time
-                        self.perf_stats["total_wait"] += wait_time
-                        self.perf_stats["total_drain"] += drain_time
-                        self.perf_stats["total_build"] += build_time
-                        self.perf_stats["total_response"] += response_time
-
-                        count = self.perf_stats["steps"] - 10
-                        if self.perf_stats["steps"] % 10 == 0:
-                            avg_idle = (self.perf_stats["total_idle"] / count) * 1000
-                            avg_compute = (
-                                self.perf_stats["total_compute"] / count
-                            ) * 1000
-                            avg_wait = (self.perf_stats["total_wait"] / count) * 1000
-                            avg_drain = (self.perf_stats["total_drain"] / count) * 1000
-                            avg_build = (self.perf_stats["total_build"] / count) * 1000
-                            avg_response = (
-                                self.perf_stats["total_response"] / count
-                            ) * 1000
-                            print(
-                                f"[Profile] Step: {self.perf_stats['steps']}, Idle: {idle_time*1000:.2f}ms (Avg: {avg_idle:.2f}ms) [Wait: {avg_wait:.2f}ms, Drain: {avg_drain:.2f}ms, Build: {avg_build:.2f}ms], Compute: {compute_time*1000:.2f}ms (Avg: {avg_compute:.2f}ms), Response: {response_time*1000:.2f}ms (Avg: {avg_response:.2f}ms)"
-                            )
-
                 else:
                     break
 
