@@ -91,7 +91,7 @@ def create_schema(config: dict) -> Schema:
     )
 
     # Handle untied embeddings (lm_head separate from embed_token)
-    if not config.get("tie_word_embeddings", True):
+    if not config.tie_word_embeddings:
         # LM Head (column-parallel, like embed_token but for output)
         # Actually in `lm_head` method we treat it as linear: [hidden, vocab]
         # In column parallel: split hidden? No.
