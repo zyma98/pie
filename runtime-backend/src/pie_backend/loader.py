@@ -363,6 +363,9 @@ class Schema:
             # Build kwargs for transform function
             transform_kwargs = dict(source._transform_kwargs or {})
             transform_kwargs["device"] = str(config.device)
+            # Inject distributed info for transforms that need custom sharding (like MoE)
+            transform_kwargs["rank"] = config.rank
+            transform_kwargs["world_size"] = config.world_size
 
             # Call the transform function
             result = source._transform_fn(tensors, transform_kwargs)  # type: ignore[misc]
