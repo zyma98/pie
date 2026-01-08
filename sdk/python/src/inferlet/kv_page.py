@@ -297,7 +297,9 @@ class KvPageManager:
         new_total_tokens = self.total_tokens
         last_page_len = new_total_tokens % self._page_size
         self._last_page_len = (
-            self._page_size if last_page_len == 0 and new_total_tokens > 0 else last_page_len
+            self._page_size
+            if last_page_len == 0 and new_total_tokens > 0
+            else last_page_len
         )
 
     def recalculate_last_page_len(self, total_tokens: int) -> None:
@@ -311,7 +313,9 @@ class KvPageManager:
         """
         last_page_len = total_tokens % self._page_size
         self._last_page_len = (
-            self._page_size if last_page_len == 0 and total_tokens > 0 else last_page_len
+            self._page_size
+            if last_page_len == 0 and total_tokens > 0
+            else last_page_len
         )
 
     def __enter__(self) -> "KvPageManager":
