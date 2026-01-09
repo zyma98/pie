@@ -39,6 +39,8 @@ pub struct SchedulerConfig {
     pub min_batch_for_optimization: usize,
     /// Maximum wait time before forcing a batch fire (safety limit).
     pub max_wait_time: Duration,
+    /// Maximum number of concurrent in-flight batches.
+    pub max_in_flight_batches: usize,
 }
 
 impl Default for SchedulerConfig {
@@ -48,6 +50,7 @@ impl Default for SchedulerConfig {
             latency_ema_alpha: 0.2,
             min_batch_for_optimization: 8,
             max_wait_time: Duration::from_millis(50),
+            max_in_flight_batches: 3,
         }
     }
 }
@@ -72,18 +75,22 @@ impl ArrivalRateEstimator {
     }
 
     /// Record a new request arrival and update the EMA.
-    fn record_arrival(&mut self) {
-        let now = Instant::now();
+    /// Uses the provided arrival time rather than Instant::now() to avoid
+    /// measurement distortion when requests queue behind the in-flight limit.
+    fn record_arrival(&mut self, arrival_time: Instant) {
         if let Some(last) = self.last_arrival {
-            let delta = now.duration_since(last).as_secs_f64();
-            if self.ema_inter_arrival == 0.0 {
-                self.ema_inter_arrival = delta;
-            } else {
-                self.ema_inter_arrival =
-                    self.alpha * delta + (1.0 - self.alpha) * self.ema_inter_arrival;
+            let delta = arrival_time.duration_since(last).as_secs_f64();
+            // Skip negative deltas (can happen with out-of-order arrivals)
+            if delta > 0.0 {
+                if self.ema_inter_arrival == 0.0 {
+                    self.ema_inter_arrival = delta;
+                } else {
+                    self.ema_inter_arrival =
+                        self.alpha * delta + (1.0 - self.alpha) * self.ema_inter_arrival;
+                }
             }
         }
-        self.last_arrival = Some(now);
+        self.last_arrival = Some(arrival_time);
     }
 
     /// Get estimated arrival rate (requests per second).
@@ -183,9 +190,9 @@ impl AdaptiveScheduler {
         }
     }
 
-    /// Record a request arrival.
-    fn on_request_arrival(&mut self) {
-        self.arrival_estimator.record_arrival();
+    /// Record a request arrival using the true arrival time.
+    fn on_request_arrival(&mut self, arrival_time: Instant) {
+        self.arrival_estimator.record_arrival(arrival_time);
         if self.batch_start_time.is_none() {
             self.batch_start_time = Some(Instant::now());
         }
@@ -543,6 +550,7 @@ impl Model {
             max_batch_tokens,
             max_batch_size,
             Arc::clone(&scheduler),
+            scheduler_config.max_in_flight_batches,
         ));
 
         let tokenizer = Arc::new(BytePairEncoder::new(
@@ -612,10 +620,10 @@ impl Model {
         max_batch_tokens: usize,
         max_batch_size: usize,
         scheduler: SharedScheduler,
+        max_in_flight_batches: usize,
     ) {
         const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
         const SCHEDULER_POLL_INTERVAL: Duration = Duration::from_millis(1);
-        const MAX_IN_FLIGHT_BATCHES: usize = 3; // Limit concurrent batches to avoid memory pressure
 
         let mut batch: Vec<(ForwardPassRequest, Option<oneshot::Sender<ForwardPassResponse>>)> = Vec::new();
         let mut total_tokens = 0usize;
@@ -647,7 +655,8 @@ impl Model {
                 // Record arrival and add to batch
                 {
                     let mut sched = scheduler.lock().unwrap();
-                    sched.on_request_arrival();
+                    let arrival_time = first_request.0.arrival_time.unwrap_or_else(Instant::now);
+                    sched.on_request_arrival(arrival_time);
                 }
                 total_tokens = first_request.0.input_tokens.len();
                 batch.push(first_request);
@@ -659,7 +668,8 @@ impl Model {
                     Ok(req) => {
                         {
                             let mut sched = scheduler.lock().unwrap();
-                            sched.on_request_arrival();
+                            let arrival_time = req.0.arrival_time.unwrap_or_else(Instant::now);
+                            sched.on_request_arrival(arrival_time);
                         }
                         total_tokens += req.0.input_tokens.len();
                         batch.push(req);
@@ -682,7 +692,7 @@ impl Model {
             };
 
             // Also check if we're at in-flight limit - if so, must wait for completion
-            if should_fire && in_flight < MAX_IN_FLIGHT_BATCHES {
+            if should_fire && in_flight < max_in_flight_batches {
                 // Fire the batch concurrently (non-blocking)
                 let batch_to_fire = std::mem::take(&mut batch);
                 let batch_size = batch_to_fire.len();
@@ -706,7 +716,7 @@ impl Model {
                     // Report completion for scheduler feedback
                     completion_tx_clone.send((batch_size, tokens_in_batch, latency)).ok();
                 });
-            } else if in_flight >= MAX_IN_FLIGHT_BATCHES {
+            } else if in_flight >= max_in_flight_batches {
                 // At in-flight limit - wait for a batch to complete before continuing
                 tokio::select! {
                     _ = shutdown_rx.recv() => break,
@@ -728,7 +738,8 @@ impl Model {
                             Some(req) => {
                                 {
                                     let mut sched = scheduler.lock().unwrap();
-                                    sched.on_request_arrival();
+                                    let arrival_time = req.0.arrival_time.unwrap_or_else(Instant::now);
+                                    sched.on_request_arrival(arrival_time);
                                 }
                                 total_tokens += req.0.input_tokens.len();
                                 batch.push(req);
@@ -795,7 +806,10 @@ impl Model {
 
     pub fn submit(&self, _cmd_queue_id: CmdQueueId, _priority: u32, req: Request) {
         match req {
-            Request::ForwardPass(fp_req, resp_tx) => {
+            Request::ForwardPass(mut fp_req, resp_tx) => {
+                // Capture arrival time before queuing to avoid measurement distortion
+                // when requests pile up behind the in-flight limit.
+                fp_req.arrival_time = Some(Instant::now());
                 if self.forward_pass_tx.send((fp_req, resp_tx)).is_err() {
                     eprintln!("[Error] Forward pass channel closed");
                 }

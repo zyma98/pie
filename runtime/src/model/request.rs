@@ -2,6 +2,7 @@ use anyhow::{Result, bail};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::time::Instant;
 use tokio::sync::oneshot;
 
 pub static HANDSHAKE_ID: u32 = 0;
@@ -164,6 +165,9 @@ pub struct ForwardPassRequest {
     pub output_token_samplers: Vec<HashMap<String, rmpv::Value>>,
     pub output_embed_ptrs: Vec<u32>,
     pub output_embed_indices: Vec<u32>,
+    /// Arrival time for scheduler estimation (not serialized).
+    #[serde(skip)]
+    pub arrival_time: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
