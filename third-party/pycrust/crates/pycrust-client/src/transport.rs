@@ -17,15 +17,13 @@ use tokio::sync::oneshot;
 const MAX_MESSAGE_SIZE: usize = 4194304;
 
 /// Maximum buffer size for subscribers (handles concurrent requests).
-const SUBSCRIBER_BUFFER_SIZE: usize = 256;
+// const SUBSCRIBER_BUFFER_SIZE: usize = 256;
 
 /// Number of spin iterations per poll cycle.
 /// With ~1ns per spin_loop hint, 100 spins ≈ 100ns of spinning.
 const SPIN_ITERATIONS: u32 = 300;
 
-/// Number of idle loops before sleeping (spin budget).
-/// After this many consecutive empty polls, we sleep briefly.
-const IDLE_THRESHOLD: u32 = 10000;
+
 
 /// Message to send to the transport thread.
 pub enum TransportCommand {
@@ -109,6 +107,7 @@ impl Drop for TransportHandle {
     }
 }
 
+
 /// Run the transport loop in a dedicated thread.
 ///
 /// This thread does busy-spinning on iceoryx2 and directly dispatches
@@ -118,50 +117,51 @@ fn run_transport_loop(
     cmd_rx: mpsc::Receiver<TransportCommand>,
     shared: Arc<TransportShared>,
 ) -> Result<()> {
-    use iceoryx2::port::publisher::Publisher;
-    use iceoryx2::port::subscriber::Subscriber;
+    // use iceoryx2::port::client::Client;
     use iceoryx2::prelude::*;
 
     let node = NodeBuilder::new()
         .create::<ipc::Service>()
         .map_err(|e| RpcError::ConnectionFailed(format!("Failed to create node: {}", e)))?;
 
-    // Create request topic: {service_name}_req
-    let req_service_name = format!("{}_req", service_name);
-    let req_service = node
-        .service_builder(&req_service_name.as_str().try_into().unwrap())
-        .publish_subscribe::<[u8]>()
+    // Create Request-Response Service
+    let service = node
+        .service_builder(&service_name.try_into().unwrap())
+        .request_response::<[u8], [u8]>()
+        .max_active_requests_per_client(256)
+        .max_loaned_requests(256)
         .open_or_create()
         .map_err(|e| {
-            RpcError::ConnectionFailed(format!("Failed to create request service: {}", e))
+            RpcError::ConnectionFailed(format!("Failed to create service: {}", e))
         })?;
 
-    let req_publisher: Publisher<ipc::Service, [u8], ()> = req_service
-        .publisher_builder()
-        .initial_max_slice_len(MAX_MESSAGE_SIZE)
-        .create()
-        .map_err(|e| {
-            RpcError::ConnectionFailed(format!("Failed to create request publisher: {}", e))
-        })?;
+    let client: iceoryx2::port::client::Client<
+        iceoryx2::service::ipc::Service,
+        [u8],
+        (),
+        [u8],
+        (),
+    > = service.client_builder()
+        .initial_max_slice_len(1024)
+        .allocation_strategy(iceoryx2::prelude::AllocationStrategy::PowerOfTwo)
+        .create().map_err(|e| {
+        RpcError::ConnectionFailed(format!("Failed to create client: {}", e))
+    })?;
 
-    // Create response topic: {service_name}_res
-    let res_service_name = format!("{}_res", service_name);
-    let res_service = node
-        .service_builder(&res_service_name.as_str().try_into().unwrap())
-        .publish_subscribe::<[u8]>()
-        .subscriber_max_buffer_size(SUBSCRIBER_BUFFER_SIZE)
-        .open_or_create()
-        .map_err(|e| {
-            RpcError::ConnectionFailed(format!("Failed to create response service: {}", e))
-        })?;
+    // Store active pending requests we are polling
+    let mut active_requests: Vec<(
+        u64,
+        iceoryx2::pending_response::PendingResponse<
+            iceoryx2::service::ipc::Service,
+            [u8],
+            (),
+            [u8],
+            (),
+        >,
+    )> = Vec::with_capacity(256);
 
-    let res_subscriber: Subscriber<ipc::Service, [u8], ()> = res_service
-        .subscriber_builder()
-        .buffer_size(SUBSCRIBER_BUFFER_SIZE)
-        .create()
-        .map_err(|e| {
-            RpcError::ConnectionFailed(format!("Failed to create response subscriber: {}", e))
-        })?;
+    // Reusable buffer to prevent heap thrashing
+    let mut serial_buf = Vec::with_capacity(4096); 
 
     // Track consecutive idle iterations for adaptive sleeping
     let mut idle_count: u32 = 0;
@@ -169,65 +169,114 @@ fn run_transport_loop(
     while shared.running.load(Ordering::Relaxed) {
         let mut had_activity = false;
 
-        // Check for commands (non-blocking)
-        match cmd_rx.try_recv() {
-            Ok(TransportCommand::SendRequest(request)) => {
-                if let Err(e) = send_request(&req_publisher, &request) {
-                    eprintln!("[pycrust] Failed to send request: {}", e);
-                }
-                had_activity = true;
-            }
-            Ok(TransportCommand::Shutdown) => {
-                break;
-            }
-            Err(mpsc::TryRecvError::Empty) => {}
-            Err(mpsc::TryRecvError::Disconnected) => {
-                break;
-            }
-        }
-
-        // Check for responses (non-blocking) and dispatch directly
-        match res_subscriber.receive() {
-            Ok(Some(sample)) => {
-                let payload = sample.payload();
-                match rmp_serde::from_slice::<RpcResponse>(payload) {
-                    Ok(response) => {
-                        // Directly dispatch to the waiting future - no Tokio involved!
-                        if let Some((_, sender)) = shared.pending.remove(&response.id) {
-                            let _ = sender.send(Ok(response));
+        // 1. Process Commands
+        loop {
+            match cmd_rx.try_recv() {
+                Ok(TransportCommand::SendRequest(request)) => {
+                    serial_buf.clear();
+                    // Serialize directly to reusable buffer
+                    if let Err(e) = rmp_serde::encode::write_named(&mut serial_buf, &request) {
+                        eprintln!("[pycrust] Failed to serialize request: {}", e);
+                         if let Some((_, sender)) = shared.pending.remove(&request.id) {
+                            let _ = sender.send(Err(RpcError::SerializationError(e)));
+                         }
+                    } else {
+                        if serial_buf.len() > MAX_MESSAGE_SIZE {
+                            eprintln!("[pycrust] Request too large: {}", serial_buf.len());
+                            if let Some((_, sender)) = shared.pending.remove(&request.id) {
+                                let _ = sender.send(Err(RpcError::TransportError(format!("Request too large: {}", serial_buf.len()))));
+                            }
+                        } else {
+                            match client.loan_slice_uninit(serial_buf.len()) {
+                                Ok(sample) => {
+                                    let sample = sample.write_from_slice(&serial_buf);
+                                    match sample.send() {
+                                        Ok(pending) => {
+                                            if request.id != 0 {
+                                                active_requests.push((request.id, pending));
+                                            }
+                                            // If id == 0, it's a notification. Worker won't reply. 
+                                            // We drop 'pending' immediately.
+                                            had_activity = true;
+                                        }
+                                        Err(e) => {
+                                            eprintln!("[pycrust] Failed to send request: {}", e);
+                                            if let Some((_, sender)) = shared.pending.remove(&request.id) {
+                                                let _ = sender.send(Err(RpcError::TransportError(format!("Failed to send request: {}", e))));
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                     eprintln!("[pycrust] Failed to loan sample: {}", e);
+                                     if let Some((_, sender)) = shared.pending.remove(&request.id) {
+                                         let _ = sender.send(Err(RpcError::TransportError(format!("Failed to loan sample: {}", e))));
+                                     }
+                                }
+                            }
                         }
                     }
-                    Err(e) => {
-                        // Log deserialization error - this is a protocol error
-                        eprintln!(
-                            "[pycrust] Failed to deserialize response ({} bytes): {}",
-                            payload.len(),
-                            e
-                        );
-                    }
                 }
-                had_activity = true;
-            }
-            Ok(None) => {}
-            Err(e) => {
-                eprintln!("[pycrust] Receive error: {}", e);
+                Ok(TransportCommand::Shutdown) => {
+                    return Ok(());
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => return Ok(()),
             }
         }
 
-        // Tight spinning for minimum latency
+        // 2. Poll Active Requests
+        if !active_requests.is_empty() {
+            active_requests.retain_mut(|(req_id, pending_request)| {
+                // Orphan Check: If client timed out, req_id is removed from pending.
+                // We must stop polling to avoid unlimited zombie buildup.
+                if !shared.pending.contains_key(req_id) {
+                    return false;
+                }
+                match pending_request.receive() {
+                    Ok(Some(sample)) => {
+                         let payload: &[u8] = sample.payload();
+                         match rmp_serde::from_slice::<RpcResponse>(payload) {
+                            Ok(response) => {
+                                // Dispatch
+                                if let Some((_, sender)) = shared.pending.remove(&response.id) {
+                                    let _ = sender.send(Ok(response));
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("[pycrust] Failed to deserialize response: {}", e);
+                                if let Some((_, sender)) = shared.pending.remove(req_id) {
+                                    let _ = sender.send(Err(RpcError::ProtocolError(format!("Deserialization failed: {}", e))));
+                                }
+                            }
+                        }
+                        had_activity = true;
+                        false // Remove from list, request completed
+                    },
+                    Ok(None) => true, // Keep polling
+                    Err(e) => {
+                        eprintln!("[pycrust] Receive error for req {}: {}", req_id, e);
+                         if let Some((_, sender)) = shared.pending.remove(req_id) {
+                            let _ = sender.send(Err(RpcError::TransportError(format!("Receive error: {}", e))));
+                         }
+                        false // Remove on error
+                    }
+                }
+            });
+        }
+
+        // 3. Adaptive Spin/Sleep
         if had_activity {
             idle_count = 0;
         } else {
             idle_count = idle_count.saturating_add(1);
 
-            if idle_count < IDLE_THRESHOLD {
+            if idle_count < SPIN_ITERATIONS {
                 // Spin-wait: tight loop for minimum latency
-                for _ in 0..SPIN_ITERATIONS {
-                    std::hint::spin_loop();
-                }
+                std::hint::spin_loop();
             } else {
-                // After many idle iterations, sleep briefly to save CPU
-                std::thread::sleep(std::time::Duration::from_micros(1));
+                // Short sleep to yield CPU if we are truly idle
+                std::thread::sleep(std::time::Duration::from_micros(50));
             }
         }
     }
@@ -235,21 +284,4 @@ fn run_transport_loop(
     Ok(())
 }
 
-/// Send a request using the publisher.
-fn send_request(
-    publisher: &iceoryx2::port::publisher::Publisher<iceoryx2::service::ipc::Service, [u8], ()>,
-    request: &RpcRequest,
-) -> Result<()> {
-    let encoded = rmp_serde::to_vec_named(request)?;
 
-    let sample = publisher
-        .loan_slice_uninit(encoded.len())
-        .map_err(|e| RpcError::TransportError(format!("Failed to loan sample: {}", e)))?;
-
-    let sample = sample.write_from_slice(&encoded);
-    sample
-        .send()
-        .map_err(|e| RpcError::TransportError(format!("Failed to send request: {}", e)))?;
-
-    Ok(())
-}
