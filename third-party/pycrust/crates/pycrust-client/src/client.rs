@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::oneshot;
 
 /// Maximum payload size (must match transport MAX_MESSAGE_SIZE).
-const MAX_PAYLOAD_SIZE: usize = 65536;
+const MAX_PAYLOAD_SIZE: usize = 4194304;
 
 /// RPC client for communicating with Python workers.
 ///

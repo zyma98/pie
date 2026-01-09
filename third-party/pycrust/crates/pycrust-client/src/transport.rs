@@ -13,8 +13,8 @@ use std::sync::Arc;
 use std::thread;
 use tokio::sync::oneshot;
 
-/// Maximum message size in bytes (64KB).
-const MAX_MESSAGE_SIZE: usize = 65536;
+/// Maximum message size in bytes (4MB).
+const MAX_MESSAGE_SIZE: usize = 4194304;
 
 /// Number of spin iterations per poll cycle.
 /// With ~1ns per spin_loop hint, 100 spins ≈ 100ns of spinning.

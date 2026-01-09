@@ -5,8 +5,8 @@ use iceoryx2::prelude::*;
 use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};
 
-/// Maximum message size in bytes (64KB).
-const MAX_MESSAGE_SIZE: usize = 65536;
+/// Maximum message size in bytes (4MB).
+const MAX_MESSAGE_SIZE: usize = 4194304;
 
 /// Number of spin iterations per idle loop.
 const SPIN_ITERATIONS: u32 = 1000;
