@@ -18,7 +18,7 @@ const MAX_MESSAGE_SIZE: usize = 65536;
 
 /// Number of spin iterations per poll cycle.
 /// With ~1ns per spin_loop hint, 100 spins ≈ 100ns of spinning.
-const SPIN_ITERATIONS: u32 = 100;
+const SPIN_ITERATIONS: u32 = 300;
 
 /// Number of idle loops before sleeping (spin budget).
 /// After this many consecutive empty polls, we sleep briefly.
