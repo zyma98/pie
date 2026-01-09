@@ -46,7 +46,7 @@ impl Default for SchedulerConfig {
         Self {
             arrival_rate_ema_alpha: 0.3,
             latency_ema_alpha: 0.2,
-            min_batch_for_optimization: 2,
+            min_batch_for_optimization: 8,
             max_wait_time: Duration::from_millis(50),
         }
     }
@@ -205,12 +205,14 @@ impl AdaptiveScheduler {
     /// Returns true if we should fire immediately.
     ///
     /// Optimizes for throughput: throughput = batch_size / latency
+    /// Uses arrival rate estimation to predict if waiting will improve throughput.
     fn should_fire(
         &self,
         current_batch_size: usize,
         current_total_tokens: usize,
         max_batch_size: usize,
         max_batch_tokens: usize,
+        in_flight_batches: usize,
     ) -> bool {
         // Always fire if at capacity
         if current_batch_size >= max_batch_size || current_total_tokens >= max_batch_tokens {
@@ -224,14 +226,48 @@ impl AdaptiveScheduler {
             }
         }
 
-        // Skip optimization for small batches (fire immediately)
-        if current_batch_size < self.config.min_batch_for_optimization {
+        // If no batches are in flight, we should fire to keep GPU busy
+        // (pipeline is empty - need to start it)
+        if in_flight_batches == 0 {
             return true;
         }
 
-        // TEMPORARY: Always fire immediately for debugging
-        // TODO: Re-enable throughput optimization after debugging
-        true
+        // Skip optimization for small batches when pipeline is full
+        if current_batch_size < self.config.min_batch_for_optimization {
+            // But don't fire if we have batches in flight - wait for more requests
+            return false;
+        }
+
+        // Throughput optimization: compare firing now vs waiting for one more request
+        // Current throughput if we fire now: batch_size / estimated_latency
+        let current_latency = self.latency_model.estimate_latency(current_batch_size, current_total_tokens);
+        let current_throughput = current_batch_size as f64 / current_latency;
+
+        // Expected throughput if we wait for one more request:
+        // (batch_size + 1) / (estimated_latency + expected_wait_time)
+        if let Some(expected_wait) = self.arrival_estimator.expected_wait_time() {
+            let wait_secs = expected_wait.as_secs_f64();
+            // Estimate tokens for next request (use average: total_tokens / batch_size)
+            let avg_tokens_per_request = if current_batch_size > 0 {
+                current_total_tokens as f64 / current_batch_size as f64
+            } else {
+                1.0
+            };
+            let future_tokens = current_total_tokens + avg_tokens_per_request as usize;
+            let future_latency = self.latency_model.estimate_latency(current_batch_size + 1, future_tokens);
+            let future_throughput = (current_batch_size + 1) as f64 / (future_latency + wait_secs);
+
+            // Fire if waiting would decrease throughput
+            if current_throughput >= future_throughput {
+                return true;
+            }
+        } else {
+            // No arrival rate data yet - be conservative and fire
+            return true;
+        }
+
+        // Wait for more requests
+        false
     }
 }
 
@@ -566,8 +602,9 @@ impl Model {
     ///
     /// Design:
     /// - Uses adaptive scheduler to decide when to fire batches (optimizing for throughput)
-    /// - Multiple batches can execute concurrently (fire prematurely)
+    /// - Multiple batches execute concurrently via spawned tasks (pipelining)
     /// - Scheduler tracks arrival rate and latency to make optimal decisions
+    /// - Overlaps batch accumulation with GPU inference for maximum utilization
     async fn inference_worker(
         rpc_client: Arc<RpcClient>,
         mut req_rx: mpsc::UnboundedReceiver<(ForwardPassRequest, Option<oneshot::Sender<ForwardPassResponse>>)>,
@@ -578,11 +615,23 @@ impl Model {
     ) {
         const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
         const SCHEDULER_POLL_INTERVAL: Duration = Duration::from_millis(1);
+        const MAX_IN_FLIGHT_BATCHES: usize = 3; // Limit concurrent batches to avoid memory pressure
 
         let mut batch: Vec<(ForwardPassRequest, Option<oneshot::Sender<ForwardPassResponse>>)> = Vec::new();
         let mut total_tokens = 0usize;
 
+        // Track in-flight batch tasks for concurrent execution
+        let in_flight_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (completion_tx, mut completion_rx) = mpsc::unbounded_channel::<(usize, usize, Duration)>();
+
         loop {
+            // Process any completed batches (non-blocking)
+            while let Ok((batch_size, tokens_in_batch, latency)) = completion_rx.try_recv() {
+                in_flight_counter.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                let mut sched = scheduler.lock().unwrap();
+                sched.on_batch_complete(batch_size, tokens_in_batch, latency);
+            }
+
             // If batch is empty, wait for at least one request
             if batch.is_empty() {
                 let first_request = tokio::select! {
@@ -624,34 +673,50 @@ impl Model {
                 }
             }
 
+            let in_flight = in_flight_counter.load(std::sync::atomic::Ordering::SeqCst);
+
             // Check if scheduler recommends firing
             let should_fire = {
                 let sched = scheduler.lock().unwrap();
-                sched.should_fire(batch.len(), total_tokens, max_batch_size, max_batch_tokens)
+                sched.should_fire(batch.len(), total_tokens, max_batch_size, max_batch_tokens, in_flight)
             };
 
-            if should_fire {
-                // Fire the batch (blocking - wait for completion)
+            // Also check if we're at in-flight limit - if so, must wait for completion
+            if should_fire && in_flight < MAX_IN_FLIGHT_BATCHES {
+                // Fire the batch concurrently (non-blocking)
                 let batch_to_fire = std::mem::take(&mut batch);
                 let batch_size = batch_to_fire.len();
                 let tokens_in_batch = total_tokens;
                 total_tokens = 0;
 
-                // Mark batch as fired
+                // Mark batch as fired and increment in-flight counter
                 {
                     let mut sched = scheduler.lock().unwrap();
                     sched.on_batch_fired();
                 }
+                in_flight_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
-                // Execute batch (blocking - no concurrent execution for now)
-                let start_time = Instant::now();
-                Self::execute_forward_pass_batch(&rpc_client, batch_to_fire, REQUEST_TIMEOUT).await;
-                let latency = start_time.elapsed();
-
-                // Record latency for scheduler feedback
-                {
-                    let mut sched = scheduler.lock().unwrap();
-                    sched.on_batch_complete(batch_size, tokens_in_batch, latency);
+                // Spawn batch execution as a background task (concurrent pipelining)
+                let rpc_client_clone = Arc::clone(&rpc_client);
+                let completion_tx_clone = completion_tx.clone();
+                tokio::spawn(async move {
+                    let start_time = Instant::now();
+                    Self::execute_forward_pass_batch(&rpc_client_clone, batch_to_fire, REQUEST_TIMEOUT).await;
+                    let latency = start_time.elapsed();
+                    // Report completion for scheduler feedback
+                    completion_tx_clone.send((batch_size, tokens_in_batch, latency)).ok();
+                });
+            } else if in_flight >= MAX_IN_FLIGHT_BATCHES {
+                // At in-flight limit - wait for a batch to complete before continuing
+                tokio::select! {
+                    _ = shutdown_rx.recv() => break,
+                    maybe_completion = completion_rx.recv() => {
+                        if let Some((batch_size, tokens_in_batch, latency)) = maybe_completion {
+                            in_flight_counter.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                            let mut sched = scheduler.lock().unwrap();
+                            sched.on_batch_complete(batch_size, tokens_in_batch, latency);
+                        }
+                    }
                 }
             } else {
                 // Wait briefly for more requests before checking again
@@ -675,9 +740,18 @@ impl Model {
             }
         }
 
-        // On shutdown, fire any remaining batch
+        // On shutdown, fire any remaining batch and wait for in-flight batches
         if !batch.is_empty() {
             Self::execute_forward_pass_batch(&rpc_client, batch, REQUEST_TIMEOUT).await;
+        }
+
+        // Wait for all in-flight batches to complete
+        while in_flight_counter.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+            if completion_rx.recv().await.is_some() {
+                in_flight_counter.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            } else {
+                break;
+            }
         }
     }
 

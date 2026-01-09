@@ -69,6 +69,8 @@ class Batch:
         Returns:
             Dictionary containing input tensors for the model engine.
         """
+
+        self.adapter_subpass_needed = False
         # Create batched attention mask
         batched_attention_mask = (
             np.concatenate(self.attention_masks)
