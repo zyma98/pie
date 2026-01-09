@@ -296,6 +296,7 @@ class Runtime:
             prompt_stop_tokens=template["stop_tokens"],
             kv_page_size=self.config.kv_page_size,
             max_batch_tokens=self.config.max_batch_tokens or 10240,
+            max_batch_size=self.config.max_batch_size or 128,
             resources={
                 0: self.config.max_num_kv_pages or 0,
                 1: self.config.max_num_embeds,
@@ -614,6 +615,7 @@ class Runtime:
             "prompt_stop_tokens": resp.prompt_stop_tokens,
             "kv_page_size": resp.kv_page_size,
             "max_batch_tokens": resp.max_batch_tokens,
+            "max_batch_size": resp.max_batch_size,
             "resources": resp.resources,
             "tokenizer_num_vocab": resp.tokenizer_num_vocab,
             "tokenizer_merge_table": resp.tokenizer_merge_table,

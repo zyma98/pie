@@ -1,10 +1,8 @@
 pub mod actor;
-pub mod batching;
 pub mod request;
 pub mod resource;
 pub mod tokenizer;
 
-use super::model::batching::{BatchPolicySelector, BatchScheduler, ThresholdPolicy};
 use super::model::request::{
     BatchedForwardPassRequest, BatchedForwardPassResponse, ForwardPassRequest, ForwardPassResponse,
     HandshakeRequest, HandshakeResponse, QueryRequest, QueryResponse, Request,
@@ -20,9 +18,9 @@ use futures::future;
 use pycrust_client::RpcClient;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::{broadcast, mpsc, oneshot, Notify};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::{self, JoinHandle};
 
 pub type HandlerId = u32;
@@ -251,10 +249,12 @@ pub struct Model {
     resource_manager: ResourceManager,
     shutdown_tx: broadcast::Sender<()>,
     rpc_client: Arc<RpcClient>,
-    /// Channel for forward pass requests (only forward pass is batched)
+    /// Batch limits from handshake
+    max_batch_tokens: usize,
+    max_batch_size: usize,
+    /// Channel for forward pass requests
     forward_pass_tx: mpsc::UnboundedSender<(ForwardPassRequest, Option<oneshot::Sender<ForwardPassResponse>>)>,
-    scheduling_worker_handle: Option<JoinHandle<()>>,
-    backend_worker_handle: Option<JoinHandle<()>>,
+    worker_handle: Option<JoinHandle<()>>,
 }
 
 impl Model {
@@ -267,28 +267,18 @@ impl Model {
 
         let handshake_info = Self::handshake(&rpc_client).await?;
 
-        let forward_pass_policy = ThresholdPolicy::t_only(Duration::from_micros(50));
-        let batch_policy = BatchPolicySelector::new(forward_pass_policy);
-
         let (forward_pass_tx, forward_pass_rx) = mpsc::unbounded_channel();
-        let (batch_tx, batch_rx) = mpsc::unbounded_channel();
         let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
 
-        let scheduler_notify = Arc::new(Notify::new());
+        let max_batch_tokens = handshake_info.max_batch_tokens;
+        let max_batch_size = handshake_info.max_batch_size;
 
-        let backend_worker_handle = tokio::spawn(Self::backend_worker(
+        let worker_handle = tokio::spawn(Self::inference_worker(
             Arc::clone(&rpc_client),
-            batch_rx,
-            scheduler_notify.clone(),
-            shutdown_rx,
-        ));
-
-        let scheduling_worker_handle = tokio::spawn(Self::scheduling_worker(
-            batch_policy,
             forward_pass_rx,
-            batch_tx,
-            scheduler_notify,
-            shutdown_tx.subscribe(),
+            shutdown_rx,
+            max_batch_tokens,
+            max_batch_size,
         ));
 
         let tokenizer = Arc::new(BytePairEncoder::new(
@@ -317,10 +307,11 @@ impl Model {
             info,
             resource_manager,
             rpc_client,
+            max_batch_tokens,
+            max_batch_size,
             forward_pass_tx,
             shutdown_tx,
-            scheduling_worker_handle: Some(scheduling_worker_handle),
-            backend_worker_handle: Some(backend_worker_handle),
+            worker_handle: Some(worker_handle),
         })
     }
 
@@ -336,73 +327,58 @@ impl Model {
 
     pub async fn shutdown(mut self) -> Result<()> {
         self.shutdown_tx.send(())?;
-        if let Some(handle) = self.scheduling_worker_handle.take() {
-            handle.await?;
-        }
-        if let Some(handle) = self.backend_worker_handle.take() {
+        if let Some(handle) = self.worker_handle.take() {
             handle.await?;
         }
         Ok(())
     }
 
-    /// Scheduling worker - batches only ForwardPass requests
-    async fn scheduling_worker(
-        batch_policy: BatchPolicySelector,
-        mut req_rx: mpsc::UnboundedReceiver<(ForwardPassRequest, Option<oneshot::Sender<ForwardPassResponse>>)>,
-        batch_tx: mpsc::UnboundedSender<Vec<(ForwardPassRequest, Option<oneshot::Sender<ForwardPassResponse>>)>>,
-        scheduler_notify: Arc<Notify>,
-        mut shutdown_rx: broadcast::Receiver<()>,
-    ) {
-        let mut sched: BatchScheduler<(ForwardPassRequest, Option<oneshot::Sender<ForwardPassResponse>>)> =
-            BatchScheduler::new(batch_policy);
-        let mut next_poll_duration: Option<Duration> = None;
-        const IDLE_TIMEOUT: Duration = Duration::from_secs(1);
-
-        loop {
-            let sleep_duration = next_poll_duration.unwrap_or(IDLE_TIMEOUT);
-
-            tokio::select! {
-                _ = shutdown_rx.recv() => break,
-                maybe_msg = req_rx.recv() => {
-                    if let Some((req, resp_tx)) = maybe_msg {
-                        sched.push(0, 0, (req, resp_tx), Instant::now());
-                    } else {
-                        break;
-                    }
-                },
-                _ = scheduler_notify.notified() => {},
-                _ = tokio::time::sleep(sleep_duration) => {}
-            }
-
-            let batches = sched.schedule(Instant::now());
-            for batch in batches {
-                batch_tx.send(batch).ok();
-            }
-            next_poll_duration = sched.next_poll_in(Instant::now());
-        }
-    }
-
-    /// Backend worker - handles only batched ForwardPass requests
-    async fn backend_worker(
+    /// Unified inference worker with GPU-availability based batching.
+    ///
+    /// Design:
+    /// - When GPU is idle and a request arrives → fire immediately
+    /// - While GPU is busy (during RPC call) → requests accumulate in channel
+    /// - After RPC completes → drain channel up to batch limits and fire again
+    async fn inference_worker(
         rpc_client: Arc<RpcClient>,
-        mut batch_rx: mpsc::UnboundedReceiver<Vec<(ForwardPassRequest, Option<oneshot::Sender<ForwardPassResponse>>)>>,
-        scheduler_notify: Arc<Notify>,
+        mut req_rx: mpsc::UnboundedReceiver<(ForwardPassRequest, Option<oneshot::Sender<ForwardPassResponse>>)>,
         mut shutdown_rx: broadcast::Receiver<()>,
+        max_batch_tokens: usize,
+        max_batch_size: usize,
     ) {
         const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
         loop {
-            tokio::select! {
+            // Wait for at least one request (GPU is idle here)
+            let first_request = tokio::select! {
                 _ = shutdown_rx.recv() => break,
-                maybe_batch = batch_rx.recv() => {
-                    if let Some(requests) = maybe_batch {
-                        Self::execute_forward_pass_batch(&rpc_client, requests, REQUEST_TIMEOUT).await;
-                        scheduler_notify.notify_one();
-                    } else {
-                        break;
+                maybe_req = req_rx.recv() => {
+                    match maybe_req {
+                        Some(req) => req,
+                        None => break,
                     }
                 }
+            };
+
+            // Collect batch: start with first request, drain more up to limits
+            let mut batch = vec![first_request];
+            let mut total_tokens = batch[0].0.input_tokens.len();
+
+            // Non-blocking drain of accumulated requests
+            while batch.len() < max_batch_size && total_tokens < max_batch_tokens {
+                match req_rx.try_recv() {
+                    Ok(req) => {
+                        total_tokens += req.0.input_tokens.len();
+                        batch.push(req);
+                    }
+                    Err(_) => break,
+                }
             }
+
+            // Execute batch (GPU is busy during this await)
+            Self::execute_forward_pass_batch(&rpc_client, batch, REQUEST_TIMEOUT).await;
+
+            // Loop continues - any requests that arrived during execution are in channel
         }
     }
 
