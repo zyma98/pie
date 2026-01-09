@@ -71,13 +71,15 @@ pub fn run_worker(py: Python<'_>, service_name: &str, dispatch_callback: PyObjec
             py.check_signals()?;
         }
 
-        // Poll for incoming requests
+// ... (imports remain)
+
+                // Poll for incoming requests
         match req_subscriber.receive() {
             Ok(Some(sample)) => {
                 // Parse request without GIL
                 // Sample is not Send, so we must copy the payload bytes.
                 let payload_vec = sample.payload().to_vec();
-                let parse_result = py.allow_threads(move || {
+                let parse_result = py.allow_threads(|| {
                     parse_request(&payload_vec)
                 });
 
@@ -85,9 +87,12 @@ pub fn run_worker(py: Python<'_>, service_name: &str, dispatch_callback: PyObjec
                     Ok(parsed) => {
                         let id = parsed.id;
                         let method = parsed.method;
+
+                        // Create a slice from the original vector using the indices
+                        let payload_slice = &payload_vec[parsed.payload_start..parsed.payload_start + parsed.payload_len];
                         
                         // Convert payload to Python object (Requires GIL)
-                        let py_args_result = msgpack_to_pyobject(py, &parsed.payload);
+                        let py_args_result = msgpack_to_pyobject(py, payload_slice);
 
                         match py_args_result {
                             Ok(py_args) => {
@@ -145,7 +150,7 @@ pub fn run_worker(py: Python<'_>, service_name: &str, dispatch_callback: PyObjec
 
                 idle_count = 0;
             }
-            // ... (handle Ok(None) and Err) ...
+            // ... (rest of loop)
             Ok(None) => {
                 idle_count = idle_count.saturating_add(1);
                 if idle_count < IDLE_THRESHOLD {
@@ -175,10 +180,11 @@ struct Request<'a> {
     payload: &'a [u8],
 }
 
-struct ParsedRequest {
+struct ParsedRequestHeader {
     id: u64,
     method: String,
-    payload: Vec<u8>,
+    payload_start: usize,
+    payload_len: usize,
 }
 
 struct ParseError {
@@ -187,14 +193,21 @@ struct ParseError {
 }
 
 /// Parse the raw request bytes into structured data.
-fn parse_request(sample: &[u8]) -> Result<ParsedRequest, ParseError> {
+fn parse_request(sample: &[u8]) -> Result<ParsedRequestHeader, ParseError> {
     // Zero-copy deserialization using serde
     match rmp_serde::from_slice::<Request>(sample) {
-        Ok(request) => Ok(ParsedRequest {
-            id: request.id,
-            method: request.method.to_string(), // Copy string to own it
-            payload: request.payload.to_vec(),  // Copy bytes to own them
-        }),
+        Ok(request) => {
+            // Calculate offsets for payload to avoid copying it
+            let start = request.payload.as_ptr() as usize - sample.as_ptr() as usize;
+            let len = request.payload.len();
+            
+            Ok(ParsedRequestHeader {
+                id: request.id,
+                method: request.method.to_string(), // Copy string to own it
+                payload_start: start,
+                payload_len: len,
+            })
+        },
         Err(e) => {
             // Try to extract ID if possible, otherwise 0
             let error_msg = format!("Failed to deserialize request: {}", e);
