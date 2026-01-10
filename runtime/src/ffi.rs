@@ -136,9 +136,9 @@ impl ServerHandle {
 ///     A Runtime instance for use with the FFI queue worker
 #[pyfunction]
 fn initialize_backend(py: Python<'_>, model_config: &Bound<'_, pyo3::types::PyDict>) -> PyResult<PyObject> {
-    // Import pie_backend modules
-    let config_mod = py.import("pie_backend.config")?;
-    let runtime_mod = py.import("pie_backend.runtime")?;
+    // Import pie_worker modules
+    let config_mod = py.import("pie_worker.config")?;
+    let runtime_mod = py.import("pie_worker.runtime")?;
     
     // Create RuntimeConfig using from_args with **kwargs
     let config_cls = config_mod.getattr("RuntimeConfig")?;

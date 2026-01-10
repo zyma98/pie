@@ -97,7 +97,7 @@ def start_engine_and_backend(
         )
 
         # Initialize Python backend - returns Runtime
-        from pie_backend.server import start_ffi_worker
+        from pie_worker.server import start_ffi_worker
 
         runtime = _pie.initialize_backend(full_config)
 
