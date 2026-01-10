@@ -127,9 +127,7 @@ impl ServerHandle {
 
 /// Initialize the Python backend in-process and return a dispatcher.
 ///
-/// This creates a Runtime and dispatcher for direct FFI calls, avoiding
-/// the overhead of IPC via iceoryx2. Use this when you want ~15x lower
-/// latency at the cost of process isolation.
+/// This creates a Runtime and dispatcher for direct FFI calls, enabling\n/// low-latency communication with Python.
 ///
 /// Args:
 ///     model_config: Dictionary containing model configuration
@@ -277,7 +275,7 @@ fn start_server_with_ffi(
 
             // Create Model with FFI backend using the queue from Python
             let scheduler_config = SchedulerConfig::default();
-            let model = Model::new_with_ffi(queue, scheduler_config).await
+            let model = Model::new(queue, scheduler_config).await
                 .map_err(|e| PyRuntimeError::new_err(format!("Failed to create FFI model: {}", e)))?;
             
             // Get model name before registering
