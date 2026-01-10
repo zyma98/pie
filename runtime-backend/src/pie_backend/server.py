@@ -227,7 +227,7 @@ def poll_ffi_queue(ffi_queue, service: Runtime, poll_timeout_ms: int = 100) -> N
     Python thread that owns all CUDA state.
 
     Args:
-        ffi_queue: pie_rs.FfiQueue instance from start_server_with_ffi
+        ffi_queue: _pie.FfiQueue instance from start_server_with_ffi
         service: Runtime instance to dispatch calls to
         poll_timeout_ms: How long to block waiting for requests (ms)
     """
