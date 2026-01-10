@@ -493,7 +493,7 @@ async fn main() -> anyhow::Result<()> {
     println!("============================================================");
     println!("\nConnecting to benchmark service...");
 
-    let client = std::sync::Arc::new(RpcClient::connect("benchmark_v4").await?);
+    let client = std::sync::Arc::new(RpcClient::connect("benchmark_v5").await?);
 
     // Verify connection with handshake
     let handshake: HandshakeResponse = client

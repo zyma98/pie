@@ -1,26 +1,18 @@
 //! Worker loop implementation for PyCrust.
+//!
+//! IMPORTANT: The worker loop runs on the main Python thread to ensure
+//! compatibility with torch.compile/dynamo. The GIL is released during
+//! idle periods using py.allow_threads().
 
 use crate::convert::{msgpack_to_pyobject, pyobject_to_msgpack};
 use iceoryx2::prelude::*;
 use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
-/// Maximum message size in bytes (4MB).
-const MAX_MESSAGE_SIZE: usize = 4194304;
+/// Maximum message size (4MB).
+const MAX_MESSAGE_SIZE: usize = 4_194_304;
 
-/// Maximum buffer size for subscribers (handles concurrent requests).
-// const SUBSCRIBER_BUFFER_SIZE: usize = 256;
-
-/// Number of spin iterations per idle loop.
-const SPIN_ITERATIONS: u32 = 1000;
-
-/// Number of idle loops before sleeping (spin budget).
-const IDLE_THRESHOLD: u32 = 100;
-
-/// Check Python signals every N idle loops.
-const SIGNAL_CHECK_INTERVAL: u32 = 50;
-
-/// Status codes for RPC responses.
 mod status {
     pub const OK: u8 = 0;
     pub const METHOD_NOT_FOUND: u8 = 1;
@@ -28,174 +20,131 @@ mod status {
     pub const INTERNAL_ERROR: u8 = 3;
 }
 
-/// Run the worker loop, dispatching RPC calls to the Python callback.
-/// Run the worker loop, dispatching RPC calls to the Python callback.
 #[pyfunction]
 #[pyo3(signature = (service_name, dispatch_callback))]
 pub fn run_worker(py: Python<'_>, service_name: &str, dispatch_callback: Py<PyAny>) -> PyResult<()> {
-
-    // Create iceoryx2 node
-    let node = NodeBuilder::new()
-        .create::<ipc::Service>()
+    // Suppress iceoryx2 config warnings
+    iceoryx2::prelude::set_log_level(iceoryx2::prelude::LogLevel::Error);
+    
+    // Initialize iceoryx2 (GIL held - this is fast)
+    let node = NodeBuilder::new().create::<ipc::Service>()
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to create node: {}", e)))?;
-
-    // Create Request-Response Service
-    let service = node
-        .service_builder(&service_name.try_into().unwrap())
+    
+    let service = node.service_builder(&service_name.try_into().unwrap())
         .request_response::<[u8], [u8]>()
         .max_active_requests_per_client(256)
         .max_loaned_requests(256)
         .open_or_create()
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to create service: {}", e)))?;
 
-    let server = service
-        .server_builder()
-        .initial_max_slice_len(1024)
-        .allocation_strategy(iceoryx2::prelude::AllocationStrategy::PowerOfTwo)
+    let server = service.server_builder()
+        .initial_max_slice_len(4096)
+        .allocation_strategy(AllocationStrategy::PowerOfTwo)
         .create()
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to create server: {}", e)))?;
 
-    eprintln!("[pycrust-worker] Listening on service: {}", service_name);
+    eprintln!("[pycrust] Listening on service: {}", service_name);
 
-    let mut idle_count: u32 = 0;
-    
-    // ✅ OPTIMIZATION: Reusable buffer to prevent heap allocation churn
+    let mut err_buf = Vec::new();
     let mut serial_buf = Vec::with_capacity(4096);
+    let mut idle_count: u32 = 0;
 
-    // Main worker loop
     loop {
-        // ... (signal checks) ...
-        if idle_count % SIGNAL_CHECK_INTERVAL == 0 {
+        // Check for Ctrl+C periodically
+        if idle_count % 100 == 0 {
             py.check_signals()?;
         }
 
-        // Poll for incoming requests
+        // Poll for requests (GIL held - iceoryx2 types are !Send)
+        // The actual poll is very fast (~1us)
         match server.receive() {
             Ok(Some(active_request)) => {
-                // ✅ OPTIMIZATION: Direct access to SHM (Zero-Copy Parse)
-                // We parse directly from the shared memory slice.
-                // No `to_vec()`, no `allow_threads` overhead.
-                // Note: `unwrap_or_default` is theoretically risky if payload is empty, but payload() returns valid slice.
+                idle_count = 0;
                 let payload_shm = active_request.payload();
 
                 match rmp_serde::from_slice::<Request>(payload_shm) {
                     Ok(req) => {
-                         // `req.payload` is now a slice pointing directly into SHM
-                        // We construct the Python object directly from this slice.
-                        match msgpack_to_pyobject(py, req.payload) {
-                            Ok(py_args) => {
-                                // Dispatch to Python
-                                // The GIL is held here, which is fine as dispatching to Python requires it anyway.
-                                let result = dispatch_callback.call1(py, (req.method, py_args));
-
-                                // Handle Response
-                                // If ID is 0, this is a notification (fire-and-forget), so we skip response
-                                if req.id != 0 {
-                                    let (status, response_bytes_ref) = match result {
+                        // Call Python dispatch (GIL held - required for torch.compile)
+                        let (status_code, response_bytes_res) = {
+                            match msgpack_to_pyobject(py, req.payload) {
+                                Ok(py_args) => {
+                                    match dispatch_callback.call1(py, (req.method, py_args)) {
                                         Ok(py_res) => {
-                                            // TODO: Further optimization - pass &mut serial_buf to avoid intermediate Vec
-                                            // For now, we still rely on `pyobject_to_msgpack` returning a Vec<u8>
                                             match pyobject_to_msgpack(py_res.bind(py)) {
-                                                Ok(b) => (status::OK, b),
-                                                Err(e) => (status::INTERNAL_ERROR, rmp_serde::to_vec_named(&e.to_string()).unwrap_or_default()),
+                                                Ok(b) => (status::OK, Ok(b)),
+                                                Err(e) => (status::INTERNAL_ERROR, Err(e.to_string())),
                                             }
-                                        },
-                                        Err(e) => {
-                                             // "Method not found" check
-                                            let error_str = e.to_string();
-                                            let (status_code, error_msg) = if error_str.contains("Method not found") {
-                                                (status::METHOD_NOT_FOUND, error_str)
-                                            } else {
-                                                (status::INTERNAL_ERROR, error_str)
-                                            };
-                                            (status_code, rmp_serde::to_vec_named(&error_msg).unwrap_or_default())
                                         }
-                                    };
-
-                                    // ✅ OPTIMIZATION: Serialize direct struct to buffer
-                                    serial_buf.clear();
-                                    let response_struct = Response {
-                                        id: req.id,
-                                        status,
-                                        payload: &response_bytes_ref,
-                                    };
-                                    
-                                    if let Ok(_) = rmp_serde::encode::write_named(&mut serial_buf, &response_struct) {
-                                         if serial_buf.len() <= MAX_MESSAGE_SIZE {
-                                             if let Ok(sample) = active_request.loan_slice_uninit(serial_buf.len()) {
-                                                 let sample = sample.write_from_slice(&serial_buf);
-                                                 let _ = sample.send();
-                                             } else {
-                                                 eprintln!("[pycrust-worker] Failed to loan response slice");
-                                             }
-                                         } else {
-                                             eprintln!("[pycrust-worker] Response too large: {}", serial_buf.len());
-                                         }
-                                    }
-                                } else {
-                                    // Notification: consume result but send nothing
-                                    if let Err(e) = result {
-                                         // Log error for notifications since caller won't see it
-                                         eprintln!("[pycrust-worker] Notification error: {}", e);
+                                        Err(e) => {
+                                            let s = e.to_string();
+                                            let code = if s.contains("Method not found") { status::METHOD_NOT_FOUND } else { status::INTERNAL_ERROR };
+                                            (code, Err(s))
+                                        }
                                     }
                                 }
-                            },
-                            Err(e) => {
-                                eprintln!("[pycrust-worker] Failed to convert payload: {}", e);
-                                
-                                if req.id != 0 {
-                                    // 1. Prepare error message
-                                    let error_msg = format!("Invalid arguments: {}", e);
-                                    let error_bytes = rmp_serde::to_vec_named(&error_msg).unwrap_or_default();
-                                    
-                                    // 2. Serialize response to buffer
-                                    serial_buf.clear();
-                                    let response_struct = Response {
-                                        id: req.id,
-                                        status: status::INVALID_PARAMS,
-                                        payload: &error_bytes,
-                                    };
+                                Err(e) => (status::INVALID_PARAMS, Err(e.to_string())),
+                            }
+                        };
 
-                                    // 3. Send error response so client doesn't hang
-                                    if let Ok(_) = rmp_serde::encode::write_named(&mut serial_buf, &response_struct) {
-                                         if serial_buf.len() <= MAX_MESSAGE_SIZE {
-                                             if let Ok(sample) = active_request.loan_slice_uninit(serial_buf.len()) {
-                                                 let sample = sample.write_from_slice(&serial_buf);
-                                                 let _ = sample.send();
-                                             }
-                                         }
+                        if req.id != 0 {
+                            let payload_slice = match &response_bytes_res {
+                                Ok(bytes) => bytes.as_slice(),
+                                Err(msg) => {
+                                    err_buf.clear();
+                                    let _ = rmp_serde::encode::write_named(&mut err_buf, msg);
+                                    err_buf.as_slice()
+                                }
+                            };
+
+                            let resp = Response {
+                                id: req.id,
+                                status: status_code,
+                                payload: payload_slice,
+                            };
+
+                            serial_buf.clear();
+                            if let Ok(_) = rmp_serde::encode::write_named(&mut serial_buf, &resp) {
+                                if serial_buf.len() <= MAX_MESSAGE_SIZE {
+                                    if let Ok(sample) = active_request.loan_slice_uninit(serial_buf.len()) {
+                                        let sample = sample.write_from_slice(&serial_buf);
+                                        let _ = sample.send();
                                     }
                                 }
                             }
                         }
-                    },
-                    Err(e) => {
-                         eprintln!("[pycrust-worker] Failed to deserialize request header: {}", e);
                     }
+                    Err(e) => eprintln!("[pycrust] Bad header: {}", e),
                 }
-                
-                idle_count = 0;
             }
             Ok(None) => {
+                // No request - use tiered idle with GIL RELEASED during sleep
                 idle_count = idle_count.saturating_add(1);
-             
-                if idle_count < 100_000 {
-                   std::hint::spin_loop();
+                
+                if idle_count < 1000 {
+                    // PHASE 1: Hot Spin - Ultra-low latency (GIL held, but very short)
+                    std::hint::spin_loop();
+                } else if idle_count < 10_000 {
+                    // PHASE 2: Micro Sleep - Release GIL
+                    py.allow_threads(|| {
+                        std::thread::sleep(Duration::from_micros(5));
+                    });
+                } else if idle_count < 100_000 {
+                    // PHASE 3: Short Sleep - Release GIL
+                    py.allow_threads(|| {
+                        std::thread::sleep(Duration::from_micros(50));
+                    });
                 } else {
-                   // ✅ OPTIMIZATION: Release GIL and Sleep
-                   // If we are truly idle, release GIL so other Python threads can run,
-                   // and sleep to save CPU.
-                   py.allow_threads(|| {
-                       std::thread::sleep(std::time::Duration::from_micros(50));
-                   });
-                   // Don't reset idle count so we continue to sleep until activity?
-                   // No, we should probably loop in sleep/check. 
-                   // But `server.receive()` is fast check. 
-                   // Effectively we enter a "sleepy polling" mode.
+                    // PHASE 4: Deep Sleep - Release GIL
+                    py.allow_threads(|| {
+                        std::thread::sleep(Duration::from_millis(1));
+                    });
                 }
             }
             Err(e) => {
-                eprintln!("[pycrust-worker] Receive error: {}", e);
+                eprintln!("[pycrust] Receive error: {}", e);
+                py.allow_threads(|| {
+                    std::thread::sleep(Duration::from_millis(50));
+                });
             }
         }
     }
@@ -216,5 +165,3 @@ struct Response<'a> {
     #[serde(with = "serde_bytes")]
     payload: &'a [u8],
 }
-
-

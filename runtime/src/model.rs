@@ -1,10 +1,13 @@
 pub mod actor;
 pub mod batching;
+pub mod ffi_bridge;
+pub mod ffi_queue;
 pub mod request;
 pub mod resource;
 pub mod tokenizer;
 
 use super::model::batching::{AdaptiveScheduler, SharedScheduler};
+use super::model::ffi_bridge::AsyncFfiClient;
 use super::model::request::{
     BatchedForwardPassRequest, BatchedForwardPassResponse, ForwardPassRequest, ForwardPassResponse,
     HandshakeRequest, HandshakeResponse, QueryRequest, QueryResponse, Request,
@@ -18,6 +21,7 @@ use anyhow::Result;
 use bytes::Bytes;
 use futures::future;
 use pycrust_client::RpcClient;
+use serde::{de::DeserializeOwned, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
@@ -27,6 +31,66 @@ use tokio::task::{self, JoinHandle};
 
 // Re-export SchedulerConfig for public API
 pub use batching::SchedulerConfig;
+
+/// Backend abstraction for RPC calls to Python.
+/// Supports both IPC (iceoryx2) and FFI (direct calls) modes.
+#[derive(Clone)]
+pub enum RpcBackend {
+    /// IPC mode using pycrust-client (iceoryx2 shared memory)
+    Ipc(Arc<RpcClient>),
+    /// FFI mode using direct Python calls
+    Ffi(AsyncFfiClient),
+}
+
+impl RpcBackend {
+    /// Call a remote method with typed arguments and return value.
+    pub async fn call<T, R>(&self, method: &str, args: &T) -> Result<R>
+    where
+        T: Serialize + Send + Sync + Clone + 'static,
+        R: DeserializeOwned + Send + 'static,
+    {
+        match self {
+            RpcBackend::Ipc(client) => client
+                .call(method, args)
+                .await
+                .map_err(|e| anyhow::anyhow!("IPC call failed: {}", e)),
+            RpcBackend::Ffi(client) => client.call(method, args).await,
+        }
+    }
+
+    /// Call with timeout.
+    pub async fn call_with_timeout<T, R>(
+        &self,
+        method: &str,
+        args: &T,
+        timeout: Duration,
+    ) -> Result<R>
+    where
+        T: Serialize + Send + Sync + Clone + 'static,
+        R: DeserializeOwned + Send + 'static,
+    {
+        match self {
+            RpcBackend::Ipc(client) => client
+                .call_with_timeout(method, args, timeout)
+                .await
+                .map_err(|e| anyhow::anyhow!("IPC call failed: {}", e)),
+            RpcBackend::Ffi(client) => client.call_with_timeout(method, args, timeout).await,
+        }
+    }
+
+    /// Fire-and-forget notification.
+    pub async fn notify<T>(&self, method: &str, args: &T) -> Result<()>
+    where
+        T: Serialize + Send + Sync + Clone + 'static,
+    {
+        match self {
+            RpcBackend::Ipc(client) => client
+                .notify(method, args)
+                .map_err(|e| anyhow::anyhow!("IPC notify failed: {}", e)),
+            RpcBackend::Ffi(client) => client.notify(method, args).await,
+        }
+    }
+}
 
 pub type HandlerId = u32;
 pub type CmdQueueId = u32;
@@ -253,7 +317,7 @@ pub struct Model {
     info: ModelInfo,
     resource_manager: ResourceManager,
     shutdown_tx: broadcast::Sender<()>,
-    rpc_client: Arc<RpcClient>,
+    backend: RpcBackend,
     /// Batch limits from handshake
     max_batch_tokens: usize,
     max_batch_size: usize,
@@ -265,6 +329,11 @@ pub struct Model {
 }
 
 impl Model {
+    /// Get the model name.
+    pub fn name(&self) -> &str {
+        &self.info.name
+    }
+
     pub async fn new(service_name: &str) -> Result<Self> {
         Self::new_with_config(service_name, SchedulerConfig::default()).await
     }
@@ -275,8 +344,23 @@ impl Model {
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to connect to pycrust service: {}", e))?,
         );
+        let backend = RpcBackend::Ipc(rpc_client);
+        Self::new_with_backend(backend, scheduler_config).await
+    }
 
-        let handshake_info = Self::handshake(&rpc_client).await?;
+    /// Create a new Model with an FFI backend using a queue.
+    ///
+    /// The queue should be shared with Python which polls it for requests.
+    /// FfiQueue uses internal Arc so cloning shares state.
+    pub async fn new_with_ffi(queue: ffi_queue::FfiQueue, scheduler_config: SchedulerConfig) -> Result<Self> {
+        let ffi_client = AsyncFfiClient::new_with_queue(queue);
+        let backend = RpcBackend::Ffi(ffi_client);
+        Self::new_with_backend(backend, scheduler_config).await
+    }
+
+    /// Internal constructor that works with any backend.
+    async fn new_with_backend(backend: RpcBackend, scheduler_config: SchedulerConfig) -> Result<Self> {
+        let handshake_info = Self::handshake(&backend).await?;
 
         let (forward_pass_tx, forward_pass_rx) = mpsc::unbounded_channel();
         let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
@@ -291,7 +375,7 @@ impl Model {
         )));
 
         let worker_handle = tokio::spawn(Self::inference_worker(
-            Arc::clone(&rpc_client),
+            backend.clone(),
             forward_pass_rx,
             shutdown_rx,
             max_batch_tokens,
@@ -325,7 +409,7 @@ impl Model {
         Ok(Model {
             info,
             resource_manager,
-            rpc_client,
+            backend,
             max_batch_tokens,
             max_batch_size,
             forward_pass_tx,
@@ -335,13 +419,12 @@ impl Model {
         })
     }
 
-    async fn handshake(rpc_client: &RpcClient) -> Result<HandshakeResponse> {
+    async fn handshake(backend: &RpcBackend) -> Result<HandshakeResponse> {
         const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
         let req = HandshakeRequest { version: "0.1.0".to_string() };
-        let response: HandshakeResponse = rpc_client
+        let response: HandshakeResponse = backend
             .call_with_timeout("handshake", &req, HANDSHAKE_TIMEOUT)
-            .await
-            .map_err(|e| anyhow::anyhow!("Handshake failed: {}", e))?;
+            .await?;
         Ok(response)
     }
 
@@ -361,7 +444,7 @@ impl Model {
     /// - Scheduler tracks arrival rate and latency to make optimal decisions
     /// - Overlaps batch accumulation with GPU inference for maximum utilization
     async fn inference_worker(
-        rpc_client: Arc<RpcClient>,
+        backend: RpcBackend,
         mut req_rx: mpsc::UnboundedReceiver<(ForwardPassRequest, Option<oneshot::Sender<ForwardPassResponse>>)>,
         mut shutdown_rx: broadcast::Receiver<()>,
         max_batch_tokens: usize,
@@ -454,11 +537,11 @@ impl Model {
                 in_flight_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
                 // Spawn batch execution as a background task (concurrent pipelining)
-                let rpc_client_clone = Arc::clone(&rpc_client);
+                let backend_clone = backend.clone();
                 let completion_tx_clone = completion_tx.clone();
                 tokio::spawn(async move {
                     let start_time = Instant::now();
-                    Self::execute_forward_pass_batch(&rpc_client_clone, batch_to_fire, REQUEST_TIMEOUT).await;
+                    Self::execute_forward_pass_batch(&backend_clone, batch_to_fire, REQUEST_TIMEOUT).await;
                     let latency = start_time.elapsed();
                     // Report completion for scheduler feedback
                     completion_tx_clone.send((batch_size, tokens_in_batch, latency)).ok();
@@ -500,7 +583,7 @@ impl Model {
 
         // On shutdown, fire any remaining batch and wait for in-flight batches
         if !batch.is_empty() {
-            Self::execute_forward_pass_batch(&rpc_client, batch, REQUEST_TIMEOUT).await;
+            Self::execute_forward_pass_batch(&backend, batch, REQUEST_TIMEOUT).await;
         }
 
         // Wait for all in-flight batches to complete
@@ -515,7 +598,7 @@ impl Model {
 
     /// Execute a batch of forward pass requests via fire_batch RPC
     async fn execute_forward_pass_batch(
-        rpc_client: &RpcClient,
+        backend: &RpcBackend,
         requests: Vec<(ForwardPassRequest, Option<oneshot::Sender<ForwardPassResponse>>)>,
         timeout: Duration,
     ) {
@@ -524,7 +607,7 @@ impl Model {
             batch_req.add_request(fp_req);
         }
 
-        let result: Result<BatchedForwardPassResponse, _> = rpc_client
+        let result: Result<BatchedForwardPassResponse, _> = backend
             .call_with_timeout("fire_batch", &batch_req, timeout)
             .await;
 
@@ -546,9 +629,9 @@ impl Model {
     }
 
     /// Execute eager RPC calls (non-batched)
-    async fn execute_query(rpc_client: &RpcClient, req: QueryRequest) -> Option<QueryResponse> {
+    async fn execute_query(backend: &RpcBackend, req: QueryRequest) -> Option<QueryResponse> {
         const TIMEOUT: Duration = Duration::from_secs(30);
-        rpc_client.call_with_timeout("query", &req, TIMEOUT).await.ok()
+        backend.call_with_timeout("query", &req, TIMEOUT).await.ok()
     }
 
     pub fn submit(&self, _cmd_queue_id: CmdQueueId, _priority: u32, req: Request) {
@@ -562,49 +645,49 @@ impl Model {
                 }
             }
             Request::Query(query_req, resp_tx) => {
-                let rpc_client = Arc::clone(&self.rpc_client);
+                let backend_clone = self.backend.clone();
                 tokio::spawn(async move {
-                    if let Some(resp) = Self::execute_query(&rpc_client, query_req).await {
+                    if let Some(resp) = Self::execute_query(&backend_clone, query_req).await {
                         resp_tx.send(resp).ok();
                     }
                 });
             }
             Request::EmbedImage(req) => {
-                let rpc_client = Arc::clone(&self.rpc_client);
+                let backend = self.backend.clone();
                 tokio::spawn(async move {
-                    let _: Result<(), _> = rpc_client
-                        .call_with_timeout("embed_image", &req, Duration::from_secs(60))
-                        .await;
+                    if let Err(e) = backend.notify("embed_image", &req).await {
+                        eprintln!("[Error] embed_image failed: {:?}", e);
+                    }
                 });
             }
             Request::InitializeAdapter(req) => {
-                let rpc_client = Arc::clone(&self.rpc_client);
+                let backend = self.backend.clone();
                 tokio::spawn(async move {
-                    let _: Result<(), _> = rpc_client
-                        .call_with_timeout("initialize_adapter", &req, Duration::from_secs(60))
-                        .await;
+                    if let Err(e) = backend.notify("initialize_adapter", &req).await {
+                        eprintln!("[Error] initialize_adapter failed: {:?}", e);
+                    }
                 });
             }
             Request::UpdateAdapter(req) => {
-                let rpc_client = Arc::clone(&self.rpc_client);
+                let backend = self.backend.clone();
                 tokio::spawn(async move {
-                    let _: Result<(), _> = rpc_client
-                        .call_with_timeout("update_adapter", &req, Duration::from_secs(60))
-                        .await;
+                    if let Err(e) = backend.notify("update_adapter", &req).await {
+                        eprintln!("[Error] update_adapter failed: {:?}", e);
+                    }
                 });
             }
             Request::UploadAdapter(req) => {
-                let rpc_client = Arc::clone(&self.rpc_client);
+                let backend = self.backend.clone();
                 tokio::spawn(async move {
-                    let _: Result<(), _> = rpc_client
-                        .call_with_timeout("upload_adapter", &req, Duration::from_secs(60))
-                        .await;
+                    if let Err(e) = backend.notify("upload_adapter", &req).await {
+                        eprintln!("[Error] upload_adapter failed: {:?}", e);
+                    }
                 });
             }
             Request::DownloadAdapter(req, resp_tx) => {
-                let rpc_client = Arc::clone(&self.rpc_client);
+                let backend = self.backend.clone();
                 tokio::spawn(async move {
-                    let result: Result<Vec<u8>, _> = rpc_client
+                    let result: Result<Vec<u8>, _> = backend
                         .call_with_timeout("download_adapter", &req, Duration::from_secs(60))
                         .await;
                     if let Ok(data) = result {
