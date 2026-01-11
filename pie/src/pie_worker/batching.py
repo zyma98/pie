@@ -204,8 +204,6 @@ class Batch:
             Dictionary containing input tensors for the model engine.
         """
 
-        self.adapter_subpass_needed = False
-
         return {
             "token_ids": torch.as_tensor(
                 self.token_ids, device=device, dtype=torch.long
