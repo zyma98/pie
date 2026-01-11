@@ -14,7 +14,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Rust",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
-]
+] 
 
 # Base dependencies (CPU compatible / PyPI available)
 dependencies = [
@@ -144,7 +144,7 @@ cache-keys = [{file = "pyproject.toml"}, {file = "../runtime/Cargo.toml"}, {file
 
 # Declare CUDA/Metal extras as mutually exclusive
 conflicts = [
-    [
+    [ 
         { extra = "cu126" },
         { extra = "cu128" },
         { extra = "cu130" },
