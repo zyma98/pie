@@ -1,0 +1,5 @@
+core = "../../sdk/interfaces/core/wit"
+adapter = "../../sdk/interfaces/adapter/wit"
+image = "../../sdk/interfaces/image/wit"
+zo = "../../sdk/interfaces/zo/wit"
+actor = "../../sdk/interfaces/actor/wit"

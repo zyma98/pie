@@ -192,7 +192,7 @@ configure_client() {
     local username=$(whoami)
 
     # Initialize config (will prompt if exists, so check first)
-    if [ ! -f ~/.pie_cli/config.toml ]; then
+    if [ ! -f ~/.pie/cli_config.toml ]; then
         echo "Creating new pie-cli config..."
         pie-cli config init --enable-auth true
     else
@@ -239,8 +239,8 @@ copy_inferlets() {
     echo "=== Copying Inferlets from Container ==="
     echo ""
 
-    sudo docker cp pie-test-server:/workspace/example-apps/echo.wasm ./echo.wasm
-    sudo docker cp pie-test-server:/workspace/example-apps/text_completion.wasm ./text_completion.wasm
+    sudo docker cp pie-test-server:/workspace/sdk/inferlet-examples/echo.wasm ./echo.wasm
+    sudo docker cp pie-test-server:/workspace/sdk/inferlet-examples/text_completion.wasm ./text_completion.wasm
 
     if [ -f ./echo.wasm ] && [ -f ./text_completion.wasm ]; then
         echo "✅ Inferlets copied:"
