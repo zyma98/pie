@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "pie-server"
-version = "0.2.1"
+version = "0.2.4"
 description = "Programmable Inference Engine"
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
@@ -43,7 +43,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# --- CUDA Variants ---
+
+cuda = [
+    "torch>=2.7.1",
+    "torchao>=0.14.1",  
+    "flashinfer-python>=0.6.0",
+    "flashinfer-cubin>=0.6.0",
+]
+
+# for uv only
 cu126 = [
     "torch>=2.7.1",
     "torchao>=0.14.1",  
@@ -51,6 +59,7 @@ cu126 = [
     "flashinfer-cubin>=0.6.0",
 ]
 
+# for uv only
 cu128 = [
     "torch>=2.7.1",
     "torchao>=0.14.1",  
@@ -59,6 +68,7 @@ cu128 = [
     "flashinfer-jit-cache>=0.6.0",
 ]
 
+# for uv only
 cu130 = [
     "torch>=2.7.1",
     "torchao>=0.14.1",  
