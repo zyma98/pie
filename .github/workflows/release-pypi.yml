@@ -104,8 +104,6 @@ jobs:
           target: ${{ matrix.target }}-apple-darwin
           args: --release --out dist
           working-directory: ${{ needs.setup.outputs.package_path }}
-      - uses: actions/upload-artifact@v4
-          args: --release --out dist -m ${{ needs.setup.outputs.package_path }}/pyproject.toml
       - uses: actions/upload-artifact@v6
         with:
           name: wheels-macos-${{ matrix.target }}
@@ -125,8 +123,6 @@ jobs:
         with:
           args: --release --out dist
           working-directory: ${{ needs.setup.outputs.package_path }}
-      - uses: actions/upload-artifact@v4
-          args: --release --out dist -m ${{ needs.setup.outputs.package_path }}/pyproject.toml
       - uses: actions/upload-artifact@v6
         with:
           name: wheels-windows
@@ -144,8 +140,6 @@ jobs:
           command: sdist
           args: --out dist
           working-directory: ${{ needs.setup.outputs.package_path }}
-      - uses: actions/upload-artifact@v4
-          args: --out dist -m ${{ needs.setup.outputs.package_path }}/pyproject.toml
       - uses: actions/upload-artifact@v6
         with:
           name: wheels-sdist
