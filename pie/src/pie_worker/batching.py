@@ -61,6 +61,8 @@ class Batch:
         def _decode_u32(data):
             if isinstance(data, bytes):
                 return np.frombuffer(data, dtype=np.uint32)
+
+            print("Decoding u32 from list")
             return np.array(data, dtype=np.uint32)
 
         # Helper to decode bytes as i64 array
@@ -69,6 +71,8 @@ class Batch:
                 # Assume input is u32/i32 for now as input is from msgpack
                 # but we need i64 for token_ids in torch
                 return np.frombuffer(data, dtype=np.uint32).astype(np.int64)
+
+            print("Decoding i64 from list")
             return np.array(data, dtype=np.int64)
 
         # Direct assignments - decode bytes as u32 arrays

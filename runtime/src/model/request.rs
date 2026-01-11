@@ -213,36 +213,49 @@ pub struct DownloadAdapterRequest {
     pub name: String,
 }
 
-// ============================================================================
-// Batched Request/Response types for pycrust RPC
-// ============================================================================
+/// Wrapper for Vec<u32> that serializes as raw bytes for zero-copy Python deserialization.
+/// Python can then use `np.frombuffer(data, dtype=np.uint32)` for O(1) deserialization.
+#[derive(Debug, Clone, Default)]
+pub struct ByteVec(pub Vec<u32>);
+
+impl serde::Serialize for ByteVec {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let bytes: &[u8] = bytemuck::cast_slice(&self.0);
+        serializer.serialize_bytes(bytes)
+    }
+}
 
 /// Batched forward pass request sent to Python via pycrust.
 /// Rust performs partial batch formation (concatenating arrays),
 /// while Python handles attention mask decoding and tensor creation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Numerical arrays use ByteVec for zero-copy deserialization in Python.
+#[derive(Debug, Clone, Serialize)]
 pub struct BatchedForwardPassRequest {
-    // Concatenated arrays from all requests in the batch
-    pub token_ids: Vec<u32>,
-    pub position_ids: Vec<u32>,
+    // Concatenated arrays from all requests in the batch (as raw bytes)
+    pub token_ids: ByteVec,
+    pub position_ids: ByteVec,
 
-    // KV cache layout (concatenated)
-    pub kv_page_indices: Vec<u32>,
-    pub kv_page_indptr: Vec<u32>, // [0, n1, n1+n2, ...] indices into kv_page_indices
-    pub kv_last_page_lens: Vec<u32>, // One per request
+    // KV cache layout (concatenated, as raw bytes)
+    pub kv_page_indices: ByteVec,
+    pub kv_page_indptr: ByteVec, // [0, n1, n1+n2, ...] indices into kv_page_indices
+    pub kv_last_page_lens: ByteVec, // One per request
 
-    // Query/Output indirection
-    pub qo_indptr: Vec<u32>, // [0, tokens1, tokens1+tokens2, ...]
+    // Query/Output indirection (as raw bytes)
+    pub qo_indptr: ByteVec, // [0, tokens1, tokens1+tokens2, ...]
 
-    // Attention masks (BRLE encoded, flattened)
-    pub flattened_masks: Vec<u32>, // Concatenation of all BRLE buffers
-    pub mask_indptr: Vec<u32>,     // Pointers into flattened_masks for each token
+    // Attention masks (BRLE encoded, flattened, as raw bytes)
+    pub flattened_masks: ByteVec, // Concatenation of all BRLE buffers
+    pub mask_indptr: ByteVec,     // Pointers into flattened_masks for each token
 
-    // Adapter info (one per request)
+    // Adapter info (one per request) - keep as Vec since these are small
     pub adapter_indices: Vec<Option<u32>>,
     pub adapter_seeds: Vec<Option<i64>>,
 
-    // Output specifications (per request)
+    // Output specifications (per request) - keep as nested Vecs since structure varies
     pub output_token_indices: Vec<Vec<u32>>,
     pub output_token_samplers: Vec<Vec<HashMap<String, rmpv::Value>>>,
     pub output_embed_ptrs: Vec<Vec<u32>>,
@@ -256,14 +269,14 @@ impl BatchedForwardPassRequest {
     /// Create a new empty batched request.
     pub fn new() -> Self {
         Self {
-            token_ids: Vec::new(),
-            position_ids: Vec::new(),
-            kv_page_indices: Vec::new(),
-            kv_page_indptr: vec![0],
-            kv_last_page_lens: Vec::new(),
-            qo_indptr: vec![0],
-            flattened_masks: Vec::new(),
-            mask_indptr: vec![0],
+            token_ids: ByteVec(Vec::new()),
+            position_ids: ByteVec(Vec::new()),
+            kv_page_indices: ByteVec(Vec::new()),
+            kv_page_indptr: ByteVec(vec![0]),
+            kv_last_page_lens: ByteVec(Vec::new()),
+            qo_indptr: ByteVec(vec![0]),
+            flattened_masks: ByteVec(Vec::new()),
+            mask_indptr: ByteVec(vec![0]),
             adapter_indices: Vec::new(),
             adapter_seeds: Vec::new(),
             output_token_indices: Vec::new(),
@@ -277,22 +290,22 @@ impl BatchedForwardPassRequest {
     /// Add a single ForwardPassRequest to the batch.
     pub fn add_request(&mut self, req: &ForwardPassRequest) {
         // Concatenate tokens and positions
-        self.token_ids.extend(&req.input_tokens);
-        self.position_ids.extend(&req.input_token_positions);
+        self.token_ids.0.extend(&req.input_tokens);
+        self.position_ids.0.extend(&req.input_token_positions);
 
         // KV cache layout
-        self.kv_page_indices.extend(&req.kv_page_ptrs);
-        self.kv_page_indptr.push(self.kv_page_indices.len() as u32);
-        self.kv_last_page_lens.push(req.kv_page_last_len);
+        self.kv_page_indices.0.extend(&req.kv_page_ptrs);
+        self.kv_page_indptr.0.push(self.kv_page_indices.0.len() as u32);
+        self.kv_last_page_lens.0.push(req.kv_page_last_len);
 
         // Query/output indirection
-        let total_tokens = self.token_ids.len() as u32;
-        self.qo_indptr.push(total_tokens);
+        let total_tokens = self.token_ids.0.len() as u32;
+        self.qo_indptr.0.push(total_tokens);
 
         // Masks (flatten nested structure)
         for token_mask in &req.mask {
-            self.flattened_masks.extend(token_mask);
-            self.mask_indptr.push(self.flattened_masks.len() as u32);
+            self.flattened_masks.0.extend(token_mask);
+            self.mask_indptr.0.push(self.flattened_masks.0.len() as u32);
         }
 
         // Adapter info
@@ -318,7 +331,7 @@ impl BatchedForwardPassRequest {
 
     /// Get the total number of tokens in this batch.
     pub fn total_tokens(&self) -> usize {
-        self.token_ids.len()
+        self.token_ids.0.len()
     }
 }
 
