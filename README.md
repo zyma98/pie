@@ -40,13 +40,9 @@ uv sync --extra cu128
 
 ### Quick Start
 
-Initialize the configuration and run a test prompt:
+Run a test prompt (you will be prompted for configuration and model download if this is your first time):
 
 ```bash
-# Initialize config
-pie config init
-
-# Run inference
 pie run text-completion -- --prompt "Hello world!"
 ```
 
