@@ -45,7 +45,7 @@ class TestFlattenedMasks(unittest.TestCase):
         kv_page_indptr = [0, 2, 3]
         kv_last_page_lens = [16, 16]
 
-        # Construct args dictionary (simulating msgpack payload)
+        # Construct args dictionary (simulating msgpack payload with SoA format)
         args = {
             "token_ids": [1, 2, 3],  # dummy
             "position_ids": [31, 31, 15],  # Use valid positions (0-indexed, < seq_len)
@@ -58,8 +58,15 @@ class TestFlattenedMasks(unittest.TestCase):
             "single_token_mode": False,
             "adapter_indices": [None, None],
             "adapter_seeds": [None, None],
-            "output_token_indices": [[], []],
-            "output_token_samplers": [[], []],
+            # SoA sampler fields (empty since no samplers in this test)
+            "sampler_temperatures": [],
+            "sampler_top_k": [],
+            "sampler_top_p": [],
+            "sampler_min_p": [],
+            "sampler_types": [],
+            "request_num_samplers": [0, 0],  # No samplers per request
+            "flat_output_token_indices": [],
+            "output_token_indptr": [0, 0, 0],  # No output indices per request
             "output_embed_ptrs": [[], []],
             "output_embed_indices": [[], []],
         }

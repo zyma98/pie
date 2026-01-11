@@ -96,14 +96,7 @@ class Batch:
         flattened_masks_u32 = _decode_u32(args["flattened_masks"]).astype(np.int32)
         mask_indptr = _decode_u32(args["mask_indptr"]).astype(np.int32)
 
-        adapter_indices = args["adapter_indices"]
-        adapter_seeds = args["adapter_seeds"]
-        output_token_indices = args["output_token_indices"]
-        output_token_samplers = args["output_token_samplers"]
-        output_embed_ptrs = args["output_embed_ptrs"]
-        output_embed_indices = args["output_embed_indices"]
-
-        num_requests = len(adapter_indices)
+        num_requests = len(args["adapter_indices"])
 
         # [OPTIMIZATION] Vectorized computation of per-request token counts
         req_token_counts = np.diff(self.qo_indptr)
@@ -141,80 +134,64 @@ class Batch:
         )
         self.timing["brle_decode"] = time.perf_counter() - t_brle
 
-        # ===== PRE-COMPUTE SAMPLER ARRAY SIZES =====
+        # Helper to decode bytes as f32 array
+        def _decode_f32(data):
+            if isinstance(data, bytes):
+                return np.frombuffer(data, dtype=np.float32)
+            print("Decoding f32 from list")
+            return np.array(data, dtype=np.float32)
+
+        # ===== ZERO-COPY SAMPLER PARAMETER LOADING (SoA from Rust) =====
         t0 = time.perf_counter()
 
-        # Count total output samplers for pre-allocation
-        total_samplers = sum(len(s) for s in output_token_samplers)
+        # Load sampler parameters zero-copy from Rust SoA arrays
+        self.temperatures = _decode_f32(args["sampler_temperatures"])
+        self.top_k_values = _decode_u32(args["sampler_top_k"]).astype(np.int32)
+        self.top_p_values = _decode_f32(args["sampler_top_p"])
+        self.min_p_values = _decode_f32(args["sampler_min_p"])
+        self.sampler_types = _decode_u32(args["sampler_types"]).tolist()
+        self.request_output_counts = _decode_u32(args["request_num_samplers"]).astype(
+            np.int32
+        )
 
-        # Pre-allocate flat sampler arrays
-        temperatures_arr = np.ones(total_samplers, dtype=np.float32)
-        top_k_arr = np.zeros(total_samplers, dtype=np.int32)
-        top_p_arr = np.ones(total_samplers, dtype=np.float32)
-        min_p_arr = np.zeros(total_samplers, dtype=np.float32)
-        sampler_types_list = []
+        # Load flattened output token indices
+        flat_output_indices = _decode_u32(args["flat_output_token_indices"]).astype(
+            np.int32
+        )
+        output_token_indptr = _decode_u32(args["output_token_indptr"]).astype(np.int32)
 
-        # Pre-allocate request output counts
-        request_output_counts_arr = np.empty(num_requests, dtype=np.int32)
+        # ===== VECTORIZED OUTPUT INDICES OFFSET CALCULATION =====
+        # Each request's indices are relative to its token range, we need global offsets
+        num_requests = len(self.request_output_counts)
 
-        sampler_cursor = 0
+        # For each index in flat_output_indices, add the corresponding request's token offset
+        # Create an array mapping each flat index to its request's token offset
+        indices_per_request = np.diff(output_token_indptr)
+        request_token_offsets = self.qo_indptr[:-1]  # Token offset for each request
 
-        # ===== PER-REQUEST LOOP (adapter/sampler/response setup) =====
-        token_offset = 0
+        # Expand offsets to match each output index
+        flat_offsets = np.repeat(request_token_offsets, indices_per_request)
+
+        # Apply offsets to get global indices
+        if len(flat_output_indices) > 0:
+            self.indices_for_logits = (flat_output_indices + flat_offsets).tolist()
+        else:
+            self.indices_for_logits = []
+
+        # ===== ADAPTER HANDLING (still needs per-request loop for now) =====
+        adapter_indices = args["adapter_indices"]
+        adapter_seeds = args["adapter_seeds"]
 
         for i in range(num_requests):
             req_token_count = int(req_token_counts[i])
-
-            # Handle adapters
             adapter_idx = adapter_indices[i]
-            if adapter_idx is not None and adapter_idx in adapters:
+            if adapter_idx is not None:
                 seed = adapter_seeds[i] if adapter_seeds[i] is not None else 0
                 self.adapter_seeds.extend([seed] * req_token_count)
                 self.adapter_indices.append(adapter_idx)
                 self.adapter_subpass_needed = True
 
-            # Handle output indices (adjust for batch offset)
-            current_token_offset = int(token_offset)
-            for idx in output_token_indices[i]:
-                self.indices_for_logits.append(idx + current_token_offset)
-
-            # Handle samplers - fill pre-allocated arrays
-            req_samplers = output_token_samplers[i]
-            num_outputs = len(req_samplers)
-            request_output_counts_arr[i] = num_outputs
-
-            for sampler_config in req_samplers:
-                sampler_idx = sampler_config.get("sampler", 1)
-                sampler_types_list.append(sampler_idx)
-
-                # Fill flat arrays directly (no dict allocation)
-                temperatures_arr[sampler_cursor] = sampler_config.get(
-                    "temperature", 1.0
-                )
-
-                if sampler_idx == 0:
-                    top_k_arr[sampler_cursor] = min(
-                        sampler_config.get("top_k", max_dist_size),
-                        max_dist_size,
-                    )
-                else:
-                    top_k_arr[sampler_cursor] = sampler_config.get("top_k", 0)
-                    top_p_arr[sampler_cursor] = sampler_config.get("top_p", 1.0)
-                    min_p_arr[sampler_cursor] = sampler_config.get("min_p", 0.0)
-
-                sampler_cursor += 1
-
-            token_offset += req_token_count
-
         self.timing["sampler_loop"] = time.perf_counter() - t0
-
-        # Store pre-allocated arrays
-        self.sampler_types = sampler_types_list
-        self.temperatures = temperatures_arr
-        self.top_k_values = top_k_arr
-        self.top_p_values = top_p_arr
-        self.min_p_values = min_p_arr
-        self.request_output_counts = request_output_counts_arr
 
     def get_model_inputs(self, device: torch.device) -> dict[str, Any]:
         """

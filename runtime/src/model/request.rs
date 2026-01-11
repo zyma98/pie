@@ -228,11 +228,26 @@ impl serde::Serialize for ByteVec {
     }
 }
 
+/// Wrapper for Vec<f32> that serializes as raw bytes for zero-copy Python deserialization.
+/// Python can then use `np.frombuffer(data, dtype=np.float32)` for O(1) deserialization.
+#[derive(Debug, Clone, Default)]
+pub struct ByteVecF32(pub Vec<f32>);
+
+impl serde::Serialize for ByteVecF32 {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let bytes: &[u8] = bytemuck::cast_slice(&self.0);
+        serializer.serialize_bytes(bytes)
+    }
+}
+
 /// Batched forward pass request sent to Python via pycrust.
 /// Rust performs partial batch formation (concatenating arrays),
 /// while Python handles attention mask decoding and tensor creation.
 ///
-/// Numerical arrays use ByteVec for zero-copy deserialization in Python.
+/// Numerical arrays use ByteVec/ByteVecF32 for zero-copy deserialization in Python.
 #[derive(Debug, Clone, Serialize)]
 pub struct BatchedForwardPassRequest {
     // Concatenated arrays from all requests in the batch (as raw bytes)
@@ -255,9 +270,20 @@ pub struct BatchedForwardPassRequest {
     pub adapter_indices: Vec<Option<u32>>,
     pub adapter_seeds: Vec<Option<i64>>,
 
-    // Output specifications (per request) - keep as nested Vecs since structure varies
-    pub output_token_indices: Vec<Vec<u32>>,
-    pub output_token_samplers: Vec<Vec<HashMap<String, rmpv::Value>>>,
+    // === SoA Sampler Parameters (flattened) ===
+    // Each sampler across all requests is flattened into these arrays
+    pub sampler_temperatures: ByteVecF32, // f32 array, one per sampler
+    pub sampler_top_k: ByteVec,           // u32 array (will cast to i32 in Python)
+    pub sampler_top_p: ByteVecF32,        // f32 array
+    pub sampler_min_p: ByteVecF32,        // f32 array
+    pub sampler_types: ByteVec,           // u32 array (0=dist, 1/2/3=sampler types)
+    pub request_num_samplers: ByteVec,    // u32 array, num samplers per request
+
+    // Output token indices (flattened with indptr)
+    pub flat_output_token_indices: ByteVec, // Concatenated indices
+    pub output_token_indptr: ByteVec,       // [0, n1, n1+n2, ...] per request
+
+    // Embed outputs (keep nested since usually empty/small)
     pub output_embed_ptrs: Vec<Vec<u32>>,
     pub output_embed_indices: Vec<Vec<u32>>,
 
@@ -279,8 +305,15 @@ impl BatchedForwardPassRequest {
             mask_indptr: ByteVec(vec![0]),
             adapter_indices: Vec::new(),
             adapter_seeds: Vec::new(),
-            output_token_indices: Vec::new(),
-            output_token_samplers: Vec::new(),
+            // SoA sampler fields
+            sampler_temperatures: ByteVecF32(Vec::new()),
+            sampler_top_k: ByteVec(Vec::new()),
+            sampler_top_p: ByteVecF32(Vec::new()),
+            sampler_min_p: ByteVecF32(Vec::new()),
+            sampler_types: ByteVec(Vec::new()),
+            request_num_samplers: ByteVec(Vec::new()),
+            flat_output_token_indices: ByteVec(Vec::new()),
+            output_token_indptr: ByteVec(vec![0]),
             output_embed_ptrs: Vec::new(),
             output_embed_indices: Vec::new(),
             single_token_mode: true,
@@ -312,9 +345,52 @@ impl BatchedForwardPassRequest {
         self.adapter_indices.push(req.adapter);
         self.adapter_seeds.push(req.adapter_seed);
 
-        // Output specifications
-        self.output_token_indices.push(req.output_token_indices.clone());
-        self.output_token_samplers.push(req.output_token_samplers.clone());
+        // Output token indices (flatten with indptr)
+        self.flat_output_token_indices.0.extend(&req.output_token_indices);
+        self.output_token_indptr.0.push(self.flat_output_token_indices.0.len() as u32);
+
+        // Extract sampler parameters (SoA flattening)
+        let num_samplers = req.output_token_samplers.len() as u32;
+        self.request_num_samplers.0.push(num_samplers);
+
+        for sampler_cfg in &req.output_token_samplers {
+            // Extract sampler type (default: 1 = standard sampling)
+            let sampler_type = sampler_cfg
+                .get("sampler")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1) as u32;
+            self.sampler_types.0.push(sampler_type);
+
+            // Extract temperature (default: 1.0)
+            let temperature = sampler_cfg
+                .get("temperature")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(1.0) as f32;
+            self.sampler_temperatures.0.push(temperature);
+
+            // Extract top_k (default: 0 = disabled)
+            let top_k = sampler_cfg
+                .get("top_k")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
+            self.sampler_top_k.0.push(top_k);
+
+            // Extract top_p (default: 1.0 = disabled)
+            let top_p = sampler_cfg
+                .get("top_p")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(1.0) as f32;
+            self.sampler_top_p.0.push(top_p);
+
+            // Extract min_p (default: 0.0 = disabled)
+            let min_p = sampler_cfg
+                .get("min_p")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0) as f32;
+            self.sampler_min_p.0.push(min_p);
+        }
+
+        // Embed outputs
         self.output_embed_ptrs.push(req.output_embed_ptrs.clone());
         self.output_embed_indices.push(req.output_embed_indices.clone());
 
