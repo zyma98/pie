@@ -78,6 +78,8 @@ jobs:
           args: --release --out dist -i python3.9 -i python3.10 -i python3.11 -i python3.12 -i python3.13
           working-directory: ${{ needs.setup.outputs.package_path }}
           manylinux: auto
+          before-script-linux: |
+            yum install -y openssl-devel pkgconfig perl-IPC-Cmd || apt-get update && apt-get install -y libssl-dev pkg-config
       - uses: actions/upload-artifact@v6
         with:
           name: wheels-linux-x86_64
@@ -100,6 +102,8 @@ jobs:
           args: --release --out dist -i python3.9 -i python3.10 -i python3.11 -i python3.12 -i python3.13
           working-directory: ${{ needs.setup.outputs.package_path }}
           manylinux: auto
+          before-script-linux: |
+            yum install -y openssl-devel pkgconfig perl-IPC-Cmd || apt-get update && apt-get install -y libssl-dev pkg-config
       - uses: actions/upload-artifact@v6
         with:
           name: wheels-linux-aarch64
