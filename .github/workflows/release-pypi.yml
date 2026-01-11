@@ -75,7 +75,7 @@ jobs:
       - uses: actions/upload-artifact@v6
         with:
           name: wheels-linux-x86_64
-          path: dist
+          path: ${{ needs.setup.outputs.package_path }}/dist
 
   build-maturin-linux-aarch64:
     needs: setup
@@ -98,7 +98,7 @@ jobs:
       - uses: actions/upload-artifact@v6
         with:
           name: wheels-linux-aarch64
-          path: dist
+          path: ${{ needs.setup.outputs.package_path }}/dist
 
   build-maturin-macos:
     needs: setup
@@ -118,7 +118,7 @@ jobs:
       - uses: actions/upload-artifact@v6
         with:
           name: wheels-macos-aarch64
-          path: dist
+          path: ${{ needs.setup.outputs.package_path }}/dist
 
   build-maturin-windows:
     needs: setup
@@ -137,7 +137,7 @@ jobs:
       - uses: actions/upload-artifact@v6
         with:
           name: wheels-windows
-          path: dist
+          path: ${{ needs.setup.outputs.package_path }}/dist
 
   build-maturin-sdist:
     needs: setup
@@ -154,7 +154,7 @@ jobs:
       - uses: actions/upload-artifact@v6
         with:
           name: wheels-sdist
-          path: dist
+          path: ${{ needs.setup.outputs.package_path }}/dist
 
   # ============================================================================
   # Pure Python builds
