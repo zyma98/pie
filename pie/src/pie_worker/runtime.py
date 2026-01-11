@@ -34,6 +34,7 @@ if torch.cuda.is_available():
     from .model import gpt_oss
 from . import message
 from . import hf_utils
+from . import telemetry
 
 import time
 from collections import deque
@@ -64,45 +65,46 @@ class StepTiming(NamedTuple):
 
 @dataclass
 class LatencyStats:
-    """Tracks latency statistics for fire_batch stages using a rolling window."""
+    """Tracks latency statistics for fire_batch stages.
 
-    print_interval: int = 10
+    When profiling is enabled, emits spans to OpenTelemetry.
+    When disabled, this is a no-op.
+    """
+
+    enabled: bool = False
     step_count: int = 0
-    history: deque = field(default_factory=lambda: deque(maxlen=10))
 
-    def __post_init__(self):
-        self.history = deque(maxlen=self.print_interval)
+    def record_span(self, timing: StepTiming, traceparent: str | None = None):
+        """Record timing as an OpenTelemetry span.
 
-    def record(self, timing: StepTiming):
-        """Record timing for one step."""
-        self.history.append(timing)
+        Args:
+            timing: Timing data for the step.
+            traceparent: Optional W3C traceparent string for cross-language propagation.
+        """
         self.step_count += 1
 
-        if self.step_count % self.print_interval == 0:
-            self._print_stats()
-
-    def _print_stats(self):
-        """Print statistics for the last N steps."""
-        n = len(self.history)
-        if n == 0:
+        if not self.enabled:
             return
 
-        # Compute averages
-        def avg(field_idx: int) -> float:
-            return sum(t[field_idx] for t in self.history) / n * 1000
-
-        print(f"\n=== fire_batch Latency (last {n} steps, step {self.step_count}) ===")
-        print(f"  build_batch:       {avg(0):.3f} ms")
-        print(f"    decode_u32:      {avg(7):.3f} ms")
-        print(f"    mask_loop:       {avg(8):.3f} ms (brle={avg(9):.3f} ms)")
-        print(f"    sampler_loop:    {avg(10):.3f} ms")
-        print(f"  get_model_inputs:  {avg(1):.3f} ms")
-        print(f"  get_sampling_meta: {avg(2):.3f} ms")
-        print(f"  broadcast:         {avg(3):.3f} ms")
-        print(f"  inference:         {avg(4):.3f} ms")
-        print(f"  create_responses:  {avg(5):.3f} ms")
-        print(f"  total:             {avg(6):.3f} ms")
-        print("=" * 60)
+        # Create a span with all timing attributes (in milliseconds)
+        # Use traceparent if provided (from Rust) to link traces across languages
+        with telemetry.start_span_with_traceparent(
+            "py.fire_batch",
+            traceparent,
+            step=self.step_count,
+            total_ms=timing.total * 1000,
+            build_batch_ms=timing.build_batch * 1000,
+            decode_u32_ms=timing.decode_u32 * 1000,
+            mask_loop_ms=timing.mask_loop * 1000,
+            brle_decode_ms=timing.brle_decode * 1000,
+            sampler_loop_ms=timing.sampler_loop * 1000,
+            get_inputs_ms=timing.get_inputs * 1000,
+            get_sampling_meta_ms=timing.get_sampling_meta * 1000,
+            broadcast_ms=timing.broadcast * 1000,
+            inference_ms=timing.inference * 1000,
+            create_responses_ms=timing.create_responses * 1000,
+        ) as span:
+            pass  # span is closed automatically
 
 
 class Runtime:
@@ -143,7 +145,16 @@ class Runtime:
         self.config = config
         self.log_queue = log_queue
         self.adapters = {}
-        self._latency_stats = LatencyStats(print_interval=10)
+
+        # Initialize telemetry (only on rank 0 to avoid duplicate spans)
+        if config.rank == 0:
+            telemetry.init_telemetry(
+                enabled=config.telemetry_enabled,
+                service_name=config.telemetry_service_name,
+                endpoint=config.telemetry_endpoint,
+            )
+
+        self._latency_stats = LatencyStats(enabled=config.telemetry_enabled)
 
         # Initialize seeds
         self._log(f"Initializing with random seed: {config.random_seed}", "DEBUG")
@@ -776,7 +787,7 @@ class Runtime:
         t_total = time.perf_counter() - t_start
 
         # Record latency stats
-        self._latency_stats.record(
+        self._latency_stats.record_span(
             StepTiming(
                 build_batch=t_build_batch,
                 get_inputs=t_get_inputs,
@@ -789,7 +800,8 @@ class Runtime:
                 mask_loop=build_timing["mask_loop"],
                 brle_decode=build_timing["brle_decode"],
                 sampler_loop=build_timing["sampler_loop"],
-            )
+            ),
+            traceparent=kwargs.get("trace_context"),  # Cross-language propagation
         )
 
         return {"results": results}

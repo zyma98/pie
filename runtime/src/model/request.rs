@@ -289,6 +289,10 @@ pub struct BatchedForwardPassRequest {
 
     // Inference mode hint
     pub single_token_mode: bool,
+
+    // Trace context for cross-language propagation (W3C traceparent)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace_context: Option<String>,
 }
 
 impl BatchedForwardPassRequest {
@@ -317,6 +321,7 @@ impl BatchedForwardPassRequest {
             output_embed_ptrs: Vec::new(),
             output_embed_indices: Vec::new(),
             single_token_mode: true,
+            trace_context: None,
         }
     }
 
@@ -408,6 +413,12 @@ impl BatchedForwardPassRequest {
     /// Get the total number of tokens in this batch.
     pub fn total_tokens(&self) -> usize {
         self.token_ids.0.len()
+    }
+
+    /// Set trace context for cross-language propagation.
+    /// The trace_context should be a W3C traceparent string.
+    pub fn set_trace_context(&mut self, trace_context: String) {
+        self.trace_context = Some(trace_context);
     }
 }
 
