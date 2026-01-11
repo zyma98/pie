@@ -721,12 +721,13 @@ class Runtime:
 
         # Build internal Batch object from pre-batched data
         t0 = time.perf_counter()
-        batch, build_timing = Batch.from_batched_request(
+        batch = Batch(
             kwargs,
             self.config.kv_page_size,
             self.config.max_dist_size,
             self.adapters,
         )
+        build_timing = batch.timing
         t_build_batch = time.perf_counter() - t0
 
         # Get model inputs and sampling metadata

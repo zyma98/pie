@@ -64,10 +64,8 @@ class TestFlattenedMasks(unittest.TestCase):
             "output_embed_indices": [[], []],
         }
 
-        # 3. Execute Batch.from_batched_request
-        batch, timing = Batch.from_batched_request(
-            args, kv_page_size=16, max_dist_size=32000, adapters={}
-        )
+        # 3. Execute Batch constructor
+        batch = Batch(args, kv_page_size=16, max_dist_size=32000, adapters={})
 
         # 4. Verify attention masks
         # Expected: Flattened mask of size 80 (32+32+16)

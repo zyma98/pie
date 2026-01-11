@@ -7,7 +7,6 @@ and handles tensor creation and response packaging.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import Any
 
 import time
@@ -18,7 +17,6 @@ from numba import njit, prange
 from . import message
 
 
-@dataclass
 class Batch:
     """
     Holds the accumulated state for a specific inference step and handles packaging.
@@ -27,62 +25,192 @@ class Batch:
     (formerly ResponsePackager) into a single unified class.
     """
 
-    # Input tokens and positions
-    token_ids: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int64))
-    position_ids: np.ndarray = field(
-        default_factory=lambda: np.empty(0, dtype=np.int32)
-    )
+    def __init__(
+        self,
+        args: dict[str, Any],
+        kv_page_size: int,
+        max_dist_size: int,
+        adapters: dict[int, Any],
+    ) -> None:
+        """
+        Initialize a Batch from BatchedForwardPassRequest dict.
 
-    # KV Cache Layout
-    kv_page_indices: np.ndarray = field(
-        default_factory=lambda: np.empty(0, dtype=np.int32)
-    )
-    kv_page_indptr: np.ndarray = field(
-        default_factory=lambda: np.array([0], dtype=np.int32)
-    )
-    kv_last_page_lens: np.ndarray = field(
-        default_factory=lambda: np.empty(0, dtype=np.int32)
-    )
+        Args:
+            args: Dictionary with batched request fields
+            kv_page_size: KV cache page size from model config
+            max_dist_size: Max distribution size from model config
+            adapters: Dictionary of active adapters
+        """
+        # Initialize timing dict as instance attribute
+        self.timing: dict[str, float] = {
+            "decode_u32": 0.0,
+            "mask_loop": 0.0,
+            "brle_decode": 0.0,
+            "sampler_loop": 0.0,
+        }
 
-    # Query/Output indirection pointers
-    qo_indptr: np.ndarray = field(default_factory=lambda: np.array([0], dtype=np.int32))
+        # Initialize mutable containers
+        self.adapter_indices: list[int] = []
+        self.adapter_seeds: list[int] = []
+        self.adapter_subpass_needed: bool = False
+        self.indices_for_logits: list[int] = []
+        self.indices_for_embed_storage: list[int] = []
+        self.embed_storage_pointers: list[int] = []
 
-    # Attention masks (one per request, flattened later)
-    attention_masks: np.ndarray = field(
-        default_factory=lambda: np.empty(0, dtype=np.bool_)
-    )
+        # Helper to decode bytes as u32 array or pass through lists
+        def _decode_u32(data):
+            if isinstance(data, bytes):
+                return np.frombuffer(data, dtype=np.uint32)
+            return np.array(data, dtype=np.uint32)
 
-    # Adapters
-    adapter_indices: list[int] = field(default_factory=list)
-    adapter_seeds: list[int] = field(default_factory=list)
-    adapter_subpass_needed: bool = False
+        # Helper to decode bytes as i64 array
+        def _decode_i64(data):
+            if isinstance(data, bytes):
+                # Assume input is u32/i32 for now as input is from msgpack
+                # but we need i64 for token_ids in torch
+                return np.frombuffer(data, dtype=np.uint32).astype(np.int64)
+            return np.array(data, dtype=np.int64)
 
-    # Output mapping for logits and embeddings
-    indices_for_logits: list[int] = field(default_factory=list)
-    indices_for_embed_storage: list[int] = field(default_factory=list)
-    embed_storage_pointers: list[int] = field(default_factory=list)
+        # Direct assignments - decode bytes as u32 arrays
+        t0 = time.perf_counter()
+        # token_ids are long (i64)
+        self.token_ids = _decode_i64(args["token_ids"])
 
-    # Sampler configuration (flat NumPy arrays for vectorized access)
-    sampler_types: list[int] = field(default_factory=list)
-    temperatures: np.ndarray = field(
-        default_factory=lambda: np.empty(0, dtype=np.float32)
-    )
-    top_k_values: np.ndarray = field(
-        default_factory=lambda: np.empty(0, dtype=np.int32)
-    )
-    top_p_values: np.ndarray = field(
-        default_factory=lambda: np.empty(0, dtype=np.float32)
-    )
-    min_p_values: np.ndarray = field(
-        default_factory=lambda: np.empty(0, dtype=np.float32)
-    )
+        self.position_ids = _decode_u32(args["position_ids"]).astype(np.int32)
+        self.kv_page_indices = _decode_u32(args["kv_page_indices"]).astype(np.int32)
+        self.kv_page_indptr = _decode_u32(args["kv_page_indptr"]).astype(np.int32)
+        self.kv_last_page_lens = _decode_u32(args["kv_last_page_lens"]).astype(np.int32)
+        self.qo_indptr = _decode_u32(args["qo_indptr"]).astype(np.int32)
+        self.single_token_mode = args["single_token_mode"]
+        self.total_tokens = int(len(self.token_ids))
+        self.timing["decode_u32"] = time.perf_counter() - t0
 
-    # Lightweight per-request metadata for response reconstruction
-    request_output_counts: np.ndarray = field(
-        default_factory=lambda: np.empty(0, dtype=np.int32)
-    )
-    total_tokens: int = 0
-    single_token_mode: bool = True
+        # ===== VECTORIZED BATCH METADATA GENERATION =====
+        t0 = time.perf_counter()
+
+        # Process per-request data
+        flattened_masks_u32 = _decode_u32(args["flattened_masks"]).astype(np.int32)
+        mask_indptr = _decode_u32(args["mask_indptr"]).astype(np.int32)
+
+        adapter_indices = args["adapter_indices"]
+        adapter_seeds = args["adapter_seeds"]
+        output_token_indices = args["output_token_indices"]
+        output_token_samplers = args["output_token_samplers"]
+        output_embed_ptrs = args["output_embed_ptrs"]
+        output_embed_indices = args["output_embed_indices"]
+
+        num_requests = len(adapter_indices)
+
+        # [OPTIMIZATION] Vectorized computation of per-request token counts
+        req_token_counts = np.diff(self.qo_indptr)
+
+        # [OPTIMIZATION] Vectorized sequence length calculation
+        # seq_len = (num_pages - 1) * kv_page_size + last_len for num_pages > 0
+        num_pages = np.diff(self.kv_page_indptr)
+        seq_lens = np.where(
+            num_pages > 0,
+            (num_pages - 1) * kv_page_size + self.kv_last_page_lens,
+            self.kv_last_page_lens,
+        )
+
+        # [OPTIMIZATION] Vectorized repeat - No Python loops!
+        all_seq_lens = np.repeat(seq_lens, req_token_counts)
+
+        # [OPTIMIZATION] Vectorized position IDs calculation
+        # Formula: global_index - request_start + context_len
+        context_lens = seq_lens - req_token_counts
+        global_indices = np.arange(self.total_tokens, dtype=np.int32)
+        request_starts = np.repeat(self.qo_indptr[:-1], req_token_counts)
+        request_contexts = np.repeat(context_lens, req_token_counts)
+        position_ids_np = global_indices - request_starts + request_contexts
+
+        # [OPTIMIZATION] Vectorized cumsum for bit offsets
+        token_acc_seq_lens_np = np.zeros(self.total_tokens + 1, dtype=np.int32)
+        np.cumsum(all_seq_lens, out=token_acc_seq_lens_np[1:])
+
+        self.timing["mask_loop"] = time.perf_counter() - t0
+
+        # Call batch decoder ONCE for all tokens
+        t_brle = time.perf_counter()
+        self.attention_masks = decode_brle_batch(
+            flattened_masks_u32, mask_indptr, position_ids_np, token_acc_seq_lens_np
+        )
+        self.timing["brle_decode"] = time.perf_counter() - t_brle
+
+        # ===== PRE-COMPUTE SAMPLER ARRAY SIZES =====
+        t0 = time.perf_counter()
+
+        # Count total output samplers for pre-allocation
+        total_samplers = sum(len(s) for s in output_token_samplers)
+
+        # Pre-allocate flat sampler arrays
+        temperatures_arr = np.ones(total_samplers, dtype=np.float32)
+        top_k_arr = np.zeros(total_samplers, dtype=np.int32)
+        top_p_arr = np.ones(total_samplers, dtype=np.float32)
+        min_p_arr = np.zeros(total_samplers, dtype=np.float32)
+        sampler_types_list = []
+
+        # Pre-allocate request output counts
+        request_output_counts_arr = np.empty(num_requests, dtype=np.int32)
+
+        sampler_cursor = 0
+
+        # ===== PER-REQUEST LOOP (adapter/sampler/response setup) =====
+        token_offset = 0
+
+        for i in range(num_requests):
+            req_token_count = int(req_token_counts[i])
+
+            # Handle adapters
+            adapter_idx = adapter_indices[i]
+            if adapter_idx is not None and adapter_idx in adapters:
+                seed = adapter_seeds[i] if adapter_seeds[i] is not None else 0
+                self.adapter_seeds.extend([seed] * req_token_count)
+                self.adapter_indices.append(adapter_idx)
+                self.adapter_subpass_needed = True
+
+            # Handle output indices (adjust for batch offset)
+            current_token_offset = int(token_offset)
+            for idx in output_token_indices[i]:
+                self.indices_for_logits.append(idx + current_token_offset)
+
+            # Handle samplers - fill pre-allocated arrays
+            req_samplers = output_token_samplers[i]
+            num_outputs = len(req_samplers)
+            request_output_counts_arr[i] = num_outputs
+
+            for sampler_config in req_samplers:
+                sampler_idx = sampler_config.get("sampler", 1)
+                sampler_types_list.append(sampler_idx)
+
+                # Fill flat arrays directly (no dict allocation)
+                temperatures_arr[sampler_cursor] = sampler_config.get(
+                    "temperature", 1.0
+                )
+
+                if sampler_idx == 0:
+                    top_k_arr[sampler_cursor] = min(
+                        sampler_config.get("top_k", max_dist_size),
+                        max_dist_size,
+                    )
+                else:
+                    top_k_arr[sampler_cursor] = sampler_config.get("top_k", 0)
+                    top_p_arr[sampler_cursor] = sampler_config.get("top_p", 1.0)
+                    min_p_arr[sampler_cursor] = sampler_config.get("min_p", 0.0)
+
+                sampler_cursor += 1
+
+            token_offset += req_token_count
+
+        self.timing["sampler_loop"] = time.perf_counter() - t0
+
+        # Store pre-allocated arrays
+        self.sampler_types = sampler_types_list
+        self.temperatures = temperatures_arr
+        self.top_k_values = top_k_arr
+        self.top_p_values = top_p_arr
+        self.min_p_values = min_p_arr
+        self.request_output_counts = request_output_counts_arr
 
     def get_model_inputs(self, device: torch.device) -> dict[str, Any]:
         """
@@ -227,194 +355,6 @@ class Batch:
             cursor += num_outputs
 
         return responses
-
-    @classmethod
-    def from_batched_request(
-        cls,
-        args: dict[str, Any],
-        kv_page_size: int,
-        max_dist_size: int,
-        adapters: dict[int, Any],
-    ) -> tuple[Batch, dict[str, float]]:
-        """
-        Convert BatchedForwardPassRequest dict to internal Batch object.
-
-        Args:
-            args: Dictionary with batched request fields
-            kv_page_size: KV cache page size from model config
-            max_dist_size: Max distribution size from model config
-            adapters: Dictionary of active adapters
-
-        Returns:
-            Tuple of (Batch object ready for inference, timing dict)
-        """
-        timing = {
-            "decode_u32": 0.0,
-            "mask_loop": 0.0,
-            "brle_decode": 0.0,
-            "sampler_loop": 0.0,
-        }
-
-        batch = cls()
-
-        # Helper to decode bytes as u32 array or pass through lists
-        def _decode_u32(data):
-            if isinstance(data, bytes):
-                return np.frombuffer(data, dtype=np.uint32)
-            return np.array(data, dtype=np.uint32)
-
-        # Helper to decode bytes as i64 array
-        def _decode_i64(data):
-            if isinstance(data, bytes):
-                # Assume input is u32/i32 for now as input is from msgpack
-                # but we need i64 for token_ids in torch
-                return np.frombuffer(data, dtype=np.uint32).astype(np.int64)
-            return np.array(data, dtype=np.int64)
-
-        # Direct assignments - decode bytes as u32 arrays
-        t0 = time.perf_counter()
-        # token_ids are long (i64)
-        batch.token_ids = _decode_i64(args["token_ids"])
-
-        batch.position_ids = _decode_u32(args["position_ids"]).astype(np.int32)
-        batch.kv_page_indices = _decode_u32(args["kv_page_indices"]).astype(np.int32)
-        batch.kv_page_indptr = _decode_u32(args["kv_page_indptr"]).astype(np.int32)
-        batch.kv_last_page_lens = _decode_u32(args["kv_last_page_lens"]).astype(
-            np.int32
-        )
-        batch.qo_indptr = _decode_u32(args["qo_indptr"]).astype(np.int32)
-        batch.single_token_mode = args["single_token_mode"]
-        batch.total_tokens = int(len(batch.token_ids))
-        timing["decode_u32"] = time.perf_counter() - t0
-
-        # ===== VECTORIZED BATCH METADATA GENERATION =====
-        t0 = time.perf_counter()
-
-        # Process per-request data
-        flattened_masks_u32 = _decode_u32(args["flattened_masks"]).astype(np.int32)
-        mask_indptr = _decode_u32(args["mask_indptr"]).astype(np.int32)
-
-        adapter_indices = args["adapter_indices"]
-        adapter_seeds = args["adapter_seeds"]
-        output_token_indices = args["output_token_indices"]
-        output_token_samplers = args["output_token_samplers"]
-        output_embed_ptrs = args["output_embed_ptrs"]
-        output_embed_indices = args["output_embed_indices"]
-
-        num_requests = len(adapter_indices)
-
-        # [OPTIMIZATION] Vectorized computation of per-request token counts
-        req_token_counts = np.diff(batch.qo_indptr)
-
-        # [OPTIMIZATION] Vectorized sequence length calculation
-        # seq_len = (num_pages - 1) * kv_page_size + last_len for num_pages > 0
-        num_pages = np.diff(batch.kv_page_indptr)
-        seq_lens = np.where(
-            num_pages > 0,
-            (num_pages - 1) * kv_page_size + batch.kv_last_page_lens,
-            batch.kv_last_page_lens,
-        )
-
-        # [OPTIMIZATION] Vectorized repeat - No Python loops!
-        all_seq_lens = np.repeat(seq_lens, req_token_counts)
-
-        # [OPTIMIZATION] Vectorized position IDs calculation
-        # Formula: global_index - request_start + context_len
-        context_lens = seq_lens - req_token_counts
-        global_indices = np.arange(batch.total_tokens, dtype=np.int32)
-        request_starts = np.repeat(batch.qo_indptr[:-1], req_token_counts)
-        request_contexts = np.repeat(context_lens, req_token_counts)
-        position_ids_np = global_indices - request_starts + request_contexts
-
-        # [OPTIMIZATION] Vectorized cumsum for bit offsets
-        token_acc_seq_lens_np = np.zeros(batch.total_tokens + 1, dtype=np.int32)
-        np.cumsum(all_seq_lens, out=token_acc_seq_lens_np[1:])
-
-        timing["mask_loop"] = time.perf_counter() - t0
-
-        # Call batch decoder ONCE for all tokens
-        t_brle = time.perf_counter()
-        batch.attention_masks = decode_brle_batch(
-            flattened_masks_u32, mask_indptr, position_ids_np, token_acc_seq_lens_np
-        )
-        timing["brle_decode"] = time.perf_counter() - t_brle
-
-        # ===== PRE-COMPUTE SAMPLER ARRAY SIZES =====
-        t0 = time.perf_counter()
-
-        # Count total output samplers for pre-allocation
-        total_samplers = sum(len(s) for s in output_token_samplers)
-
-        # Pre-allocate flat sampler arrays
-        temperatures_arr = np.ones(total_samplers, dtype=np.float32)
-        top_k_arr = np.zeros(total_samplers, dtype=np.int32)
-        top_p_arr = np.ones(total_samplers, dtype=np.float32)
-        min_p_arr = np.zeros(total_samplers, dtype=np.float32)
-        sampler_types_list = []
-
-        # Pre-allocate request output counts
-        request_output_counts_arr = np.empty(num_requests, dtype=np.int32)
-
-        sampler_cursor = 0
-
-        # ===== PER-REQUEST LOOP (adapter/sampler/response setup) =====
-        token_offset = 0
-
-        for i in range(num_requests):
-            req_token_count = int(req_token_counts[i])
-
-            # Handle adapters
-            adapter_idx = adapter_indices[i]
-            if adapter_idx is not None and adapter_idx in adapters:
-                seed = adapter_seeds[i] if adapter_seeds[i] is not None else 0
-                batch.adapter_seeds.extend([seed] * req_token_count)
-                batch.adapter_indices.append(adapter_idx)
-                batch.adapter_subpass_needed = True
-
-            # Handle output indices (adjust for batch offset)
-            current_token_offset = int(token_offset)
-            for idx in output_token_indices[i]:
-                batch.indices_for_logits.append(idx + current_token_offset)
-
-            # Handle samplers - fill pre-allocated arrays
-            req_samplers = output_token_samplers[i]
-            num_outputs = len(req_samplers)
-            request_output_counts_arr[i] = num_outputs
-
-            for sampler_config in req_samplers:
-                sampler_idx = sampler_config.get("sampler", 1)
-                sampler_types_list.append(sampler_idx)
-
-                # Fill flat arrays directly (no dict allocation)
-                temperatures_arr[sampler_cursor] = sampler_config.get(
-                    "temperature", 1.0
-                )
-
-                if sampler_idx == 0:
-                    top_k_arr[sampler_cursor] = min(
-                        sampler_config.get("top_k", max_dist_size),
-                        max_dist_size,
-                    )
-                else:
-                    top_k_arr[sampler_cursor] = sampler_config.get("top_k", 0)
-                    top_p_arr[sampler_cursor] = sampler_config.get("top_p", 1.0)
-                    min_p_arr[sampler_cursor] = sampler_config.get("min_p", 0.0)
-
-                sampler_cursor += 1
-
-            token_offset += req_token_count
-
-        timing["sampler_loop"] = time.perf_counter() - t0
-
-        # Store pre-allocated arrays in batch
-        batch.sampler_types = sampler_types_list
-        batch.temperatures = temperatures_arr
-        batch.top_k_values = top_k_arr
-        batch.top_p_values = top_p_arr
-        batch.min_p_values = min_p_arr
-        batch.request_output_counts = request_output_counts_arr
-
-        return batch, timing
 
 
 @njit(cache=True)
