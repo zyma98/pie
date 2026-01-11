@@ -241,7 +241,7 @@ def init_process(
     random_seed: int,
     use_cuda_graphs: bool,
     test: bool,
-    log_queue: object | None,
+    log_queue: object,
 ):
     """
     Initialize the distributed process and start the runtime.
