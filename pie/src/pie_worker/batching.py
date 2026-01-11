@@ -62,12 +62,25 @@ class Batch:
     indices_for_embed_storage: list[int] = field(default_factory=list)
     embed_storage_pointers: list[int] = field(default_factory=list)
 
-    # Sampler configuration
+    # Sampler configuration (flat NumPy arrays for vectorized access)
     sampler_types: list[int] = field(default_factory=list)
-    sampler_params: list[dict] = field(default_factory=list)
+    temperatures: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.float32)
+    )
+    top_k_values: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.int32)
+    )
+    top_p_values: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.float32)
+    )
+    min_p_values: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.float32)
+    )
 
-    # Metadata for tracking and reconstruction
-    requests: list[message.ForwardPassRequest] = field(default_factory=list)
+    # Lightweight per-request metadata for response reconstruction
+    request_output_counts: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.int32)
+    )
     total_tokens: int = 0
     single_token_mode: bool = True
 
@@ -137,15 +150,19 @@ class Batch:
 
         indices_for_logits = self.indices_for_logits
 
+        # Vectorized tensor creation from NumPy arrays (no list comprehension)
         temperatures = (
-            torch.tensor(
-                [p["temperature"] for p in self.sampler_params],
-                device=device,
-                dtype=dtype,
-            )
+            torch.as_tensor(self.temperatures, device=device, dtype=dtype)
             .clamp(min=1e-6)
             .unsqueeze(1)
         )
+
+        # Pre-build sampler param tensors (avoid per-group construction)
+        top_k_tensor = torch.as_tensor(
+            self.top_k_values, device=device, dtype=torch.long
+        )
+        top_p_tensor = torch.as_tensor(self.top_p_values, device=device, dtype=dtype)
+        min_p_tensor = torch.as_tensor(self.min_p_values, device=device, dtype=dtype)
 
         # Group samplers
         sampler_groups: dict[int, list[int]] = {}
@@ -158,7 +175,9 @@ class Batch:
             "indices_for_logits": indices_for_logits,
             "temperatures": temperatures,
             "sampler_groups": sampler_groups,
-            "sampler_params": self.sampler_params,
+            "top_k": top_k_tensor,
+            "top_p": top_p_tensor,
+            "min_p": min_p_tensor,
         }
 
     def create_responses(
@@ -173,10 +192,13 @@ class Batch:
         Returns:
             List of responses in the order of requests.
         """
+        num_requests = len(self.request_output_counts)
+
         # Early return if no logits needed
         if not self.indices_for_logits:
             return [
-                message.ForwardPassResponse(dists=[], tokens=[]) for _ in self.requests
+                message.ForwardPassResponse(dists=[], tokens=[])
+                for _ in range(num_requests)
             ]
 
         final_dists = sampling_results["dists"]
@@ -185,9 +207,8 @@ class Batch:
         responses = []
         cursor = 0
 
-        for req in self.requests:
-            output_token_indices = req.output_token_indices or []
-            num_outputs = len(output_token_indices)
+        for req_idx in range(num_requests):
+            num_outputs = int(self.request_output_counts[req_idx])
             request_dists = []
             request_tokens = []
 
@@ -231,9 +252,7 @@ class Batch:
             "decode_u32": 0.0,
             "mask_loop": 0.0,
             "brle_decode": 0.0,
-            "adapter_loop": 0.0,
             "sampler_loop": 0.0,
-            "embed_loop": 0.0,
         }
 
         batch = cls()
@@ -320,6 +339,24 @@ class Batch:
         )
         timing["brle_decode"] = time.perf_counter() - t_brle
 
+        # ===== PRE-COMPUTE SAMPLER ARRAY SIZES =====
+        t0 = time.perf_counter()
+
+        # Count total output samplers for pre-allocation
+        total_samplers = sum(len(s) for s in output_token_samplers)
+
+        # Pre-allocate flat sampler arrays
+        temperatures_arr = np.ones(total_samplers, dtype=np.float32)
+        top_k_arr = np.zeros(total_samplers, dtype=np.int32)
+        top_p_arr = np.ones(total_samplers, dtype=np.float32)
+        min_p_arr = np.zeros(total_samplers, dtype=np.float32)
+        sampler_types_list = []
+
+        # Pre-allocate request output counts
+        request_output_counts_arr = np.empty(num_requests, dtype=np.int32)
+
+        sampler_cursor = 0
+
         # ===== PER-REQUEST LOOP (adapter/sampler/response setup) =====
         token_offset = 0
 
@@ -327,7 +364,6 @@ class Batch:
             req_token_count = int(req_token_counts[i])
 
             # Handle adapters
-            t0 = time.perf_counter()
             adapter_idx = adapter_indices[i]
             if adapter_idx is not None and adapter_idx in adapters:
                 seed = adapter_seeds[i] if adapter_seeds[i] is not None else 0
@@ -336,55 +372,47 @@ class Batch:
                 batch.adapter_subpass_needed = True
 
             # Handle output indices (adjust for batch offset)
-            # Ensure token_offset is standard python int to avoid numpy scalar issues in indices_for_logits
             current_token_offset = int(token_offset)
             for idx in output_token_indices[i]:
                 batch.indices_for_logits.append(idx + current_token_offset)
-            timing["adapter_loop"] += time.perf_counter() - t0
 
-            # Handle samplers
-            t0 = time.perf_counter()
-            for sampler_config in output_token_samplers[i]:
-                params = {}
+            # Handle samplers - fill pre-allocated arrays
+            req_samplers = output_token_samplers[i]
+            num_outputs = len(req_samplers)
+            request_output_counts_arr[i] = num_outputs
+
+            for sampler_config in req_samplers:
                 sampler_idx = sampler_config.get("sampler", 1)
-                batch.sampler_types.append(sampler_idx)
+                sampler_types_list.append(sampler_idx)
+
+                # Fill flat arrays directly (no dict allocation)
+                temperatures_arr[sampler_cursor] = sampler_config.get(
+                    "temperature", 1.0
+                )
 
                 if sampler_idx == 0:
-                    params["top_k"] = min(
+                    top_k_arr[sampler_cursor] = min(
                         sampler_config.get("top_k", max_dist_size),
                         max_dist_size,
                     )
                 else:
-                    params["top_k"] = sampler_config.get("top_k", 0)
-                    params["top_p"] = sampler_config.get("top_p", 1.0)
-                    params["min_p"] = sampler_config.get("min_p", 0.0)
+                    top_k_arr[sampler_cursor] = sampler_config.get("top_k", 0)
+                    top_p_arr[sampler_cursor] = sampler_config.get("top_p", 1.0)
+                    min_p_arr[sampler_cursor] = sampler_config.get("min_p", 0.0)
 
-                params["temperature"] = sampler_config.get("temperature", 1.0)
-                batch.sampler_params.append(params)
-            timing["sampler_loop"] += time.perf_counter() - t0
-
-            # Handle embed outputs
-            t0 = time.perf_counter()
-            # for idx, ptr in zip(output_embed_indices[i], output_embed_ptrs[i]):
-            #     batch.indices_for_embed_storage.append(idx + token_offset)
-            #     batch.embed_storage_pointers.append(ptr)
-
-            # Create dummy request for response packaging
-            dummy_req = message.ForwardPassRequest(
-                input_tokens=[],
-                input_token_positions=[],
-                input_embed_ptrs=[],
-                input_embed_positions=[],
-                adapter=adapter_indices[i],
-                adapter_seed=adapter_seeds[i],
-                mask=[],
-                output_token_indices=output_token_indices[i],
-                output_token_samplers=output_token_samplers[i],
-            )
-            batch.requests.append(dummy_req)
-            timing["embed_loop"] += time.perf_counter() - t0
+                sampler_cursor += 1
 
             token_offset += req_token_count
+
+        timing["sampler_loop"] = time.perf_counter() - t0
+
+        # Store pre-allocated arrays in batch
+        batch.sampler_types = sampler_types_list
+        batch.temperatures = temperatures_arr
+        batch.top_k_values = top_k_arr
+        batch.top_p_values = top_p_arr
+        batch.min_p_values = min_p_arr
+        batch.request_output_counts = request_output_counts_arr
 
         return batch, timing
 

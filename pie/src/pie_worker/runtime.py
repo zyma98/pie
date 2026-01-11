@@ -59,9 +59,7 @@ class StepTiming(NamedTuple):
     decode_u32: float
     mask_loop: float
     brle_decode: float
-    adapter_loop: float
     sampler_loop: float
-    embed_loop: float
 
 
 @dataclass
@@ -97,9 +95,7 @@ class LatencyStats:
         print(f"  build_batch:       {avg(0):.3f} ms")
         print(f"    decode_u32:      {avg(7):.3f} ms")
         print(f"    mask_loop:       {avg(8):.3f} ms (brle={avg(9):.3f} ms)")
-        print(f"    adapter_loop:    {avg(10):.3f} ms")
-        print(f"    sampler_loop:    {avg(11):.3f} ms")
-        print(f"    embed_loop:      {avg(12):.3f} ms")
+        print(f"    sampler_loop:    {avg(10):.3f} ms")
         print(f"  get_model_inputs:  {avg(1):.3f} ms")
         print(f"  get_sampling_meta: {avg(2):.3f} ms")
         print(f"  broadcast:         {avg(3):.3f} ms")
@@ -791,9 +787,7 @@ class Runtime:
                 decode_u32=build_timing["decode_u32"],
                 mask_loop=build_timing["mask_loop"],
                 brle_decode=build_timing["brle_decode"],
-                adapter_loop=build_timing["adapter_loop"],
                 sampler_loop=build_timing["sampler_loop"],
-                embed_loop=build_timing["embed_loop"],
             )
         )
 
