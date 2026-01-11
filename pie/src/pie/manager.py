@@ -212,6 +212,89 @@ def _build_backend_config(
     return {k: v for k, v in config.items() if v is not None}
 
 
+# =============================================================================
+# Multi-GPU FFI Mode Helpers
+# =============================================================================
+
+
+def _init_distributed(rank: int, world_size: int, master_port: int, device: str):
+    """Initialize torch.distributed for a given rank.
+
+    Sets up environment variables, CUDA device, and process group.
+    """
+    import os
+    import warnings
+    import torch
+    import torch.distributed as dist
+
+    # Environment setup
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = str(master_port)
+    os.environ["NCCL_TIMEOUT"] = "300"
+    os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
+
+    # Set CUDA device
+    torch.cuda.set_device(device)
+
+    # Suppress harmless warnings
+    warnings.filterwarnings(
+        "ignore", message=".*barrier.*device under current context.*"
+    )
+
+    # Initialize process group with NCCL options if available
+    backend = "nccl" if torch.cuda.is_available() else "gloo"
+    pg_options = None
+
+    if backend == "nccl":
+        try:
+            from torch.distributed import ProcessGroupNCCL
+
+            pg_options = ProcessGroupNCCL.Options()
+            pg_options.config.capture_safe = True
+        except (ImportError, AttributeError):
+            pass
+
+    if pg_options:
+        dist.init_process_group(
+            backend, rank=rank, world_size=world_size, pg_options=pg_options
+        )
+    else:
+        dist.init_process_group(backend, rank=rank, world_size=world_size)
+
+
+def _setup_control_channel(rank: int, world_size: int, control_queues: list):
+    """Set up the IPC control channel for this rank."""
+    from pie_worker import utils as pie_utils
+    from pie_worker.control_channel import ControlChannel
+
+    pie_utils._control_channel = ControlChannel(rank, world_size, control_queues)
+
+
+def _create_runtime(config_dict: dict, devices: list[str], rank: int, world_size: int):
+    """Create a Runtime instance for the given rank."""
+    from pie_worker.config import RuntimeConfig
+    from pie_worker.runtime import Runtime
+
+    # Remove device/devices from config to avoid duplicate argument
+    filtered_config = {
+        k: v for k, v in config_dict.items() if k not in ("device", "devices")
+    }
+
+    config = RuntimeConfig.from_args(
+        **filtered_config,
+        devices=devices,
+        rank=rank,
+        world_size=world_size,
+    )
+
+    return Runtime(config, log_queue=None)
+
+
+# =============================================================================
+# Multi-GPU FFI Mode Entry Points
+# =============================================================================
+
+
 def _start_multi_gpu_ffi_backend(
     engine_config: dict,
     model_config: dict,
@@ -230,126 +313,52 @@ def _start_multi_gpu_ffi_backend(
     Returns:
         List where first element is ServerHandle, rest are worker processes
     """
-    import os
     import random
-    import signal
-    import torch
     import torch.multiprocessing as mp
     import torch.distributed as dist
     from . import _pie
+    from pie_worker.control_channel import create_control_channels
+    from pie_worker.server import start_ffi_worker
 
     status_update(f"Initializing multi-GPU backend ({world_size} devices)...")
 
     # Use 'spawn' context for CUDA compatibility
     mp.set_start_method("spawn", force=True)
 
-    # Generate master port for distributed coordination
+    # Generate master port and create control channels
     master_port = 29500 + random.randint(0, 1000)
-
-    # Create IPC control channels for worker coordination
-    from pie_worker.control_channel import create_control_channels
-
     control_queues = create_control_channels(world_size)
 
-    # Build base config dict for all ranks
+    # Build config dict for all ranks
     full_config = _build_backend_config(
         engine_config, model_config, authorized_users_path
     )
 
     # Spawn worker processes for ranks 1..world_size-1
-    worker_processes = []
     ctx = mp.spawn(
         _ffi_worker_process,
-        args=(
-            world_size,
-            devices,
-            master_port,
-            control_queues,
-            full_config,
-        ),
-        nprocs=world_size - 1,  # Only spawn workers (not rank 0)
+        args=(world_size, devices, master_port, control_queues, full_config),
+        nprocs=world_size - 1,
         join=False,
         start_method="spawn",
     )
     worker_processes = list(ctx.processes)
 
-    # Now initialize rank 0 in the main process
-    os.environ["MASTER_ADDR"] = "localhost"
-    os.environ["MASTER_PORT"] = str(master_port)
-    os.environ["NCCL_TIMEOUT"] = "300"
-    os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
+    # Initialize rank 0 in this process
+    _init_distributed(0, world_size, master_port, devices[0])
+    _setup_control_channel(0, world_size, control_queues)
+    runtime = _create_runtime(full_config, devices, 0, world_size)
 
-    # Set CUDA device for rank 0
-    torch.cuda.set_device(devices[0])
-
-    # Initialize process group for rank 0
-    import warnings
-
-    warnings.filterwarnings(
-        "ignore", message=".*barrier.*device under current context.*"
-    )
-
-    backend = "nccl" if torch.cuda.is_available() else "gloo"
-
-    pg_options = None
-    if backend == "nccl":
-        try:
-            from torch.distributed import ProcessGroupNCCL
-
-            pg_options = ProcessGroupNCCL.Options()
-            pg_options.config.capture_safe = True
-        except (ImportError, AttributeError):
-            pass
-
-    if pg_options:
-        dist.init_process_group(
-            backend, rank=0, world_size=world_size, pg_options=pg_options
-        )
-    else:
-        dist.init_process_group(backend, rank=0, world_size=world_size)
-
-    # Set up control channel for rank 0
-    from pie_worker import utils as pie_utils
-    from pie_worker.control_channel import ControlChannel
-
-    pie_utils._control_channel = ControlChannel(0, world_size, control_queues)
-
-    # Create RuntimeConfig for rank 0
-    # Remove device/devices from full_config to avoid duplicate argument
-    from pie_worker.config import RuntimeConfig
-
-    rank0_config = {
-        k: v for k, v in full_config.items() if k not in ("device", "devices")
-    }
-    config = RuntimeConfig.from_args(
-        **rank0_config,
-        devices=devices,
-        rank=0,
-        world_size=world_size,
-    )
-
-    # Create Runtime for rank 0
-    from pie_worker.runtime import Runtime
-
-    runtime = Runtime(config, log_queue=None)
-
-    # Sync with workers before starting server
+    # Sync with workers then start server
     dist.barrier()
-
-    # Create FFI queue and start worker thread
-    from pie_worker.server import start_ffi_worker
 
     ffi_queue = _pie.FfiQueue()
     _ffi_worker = start_ffi_worker(ffi_queue, runtime)
 
-    # Start server with FFI mode
     server_handle = _pie.start_server_with_ffi(
-        server_config,
-        authorized_users_path,
-        ffi_queue,
+        server_config, authorized_users_path, ffi_queue
     )
 
-    # Return server_handle as first element, followed by worker processes
     return [server_handle] + worker_processes
 
 
@@ -363,90 +372,25 @@ def _ffi_worker_process(
 ):
     """Worker process for multi-GPU FFI mode.
 
-    Initializes torch.distributed and runs worker_loop waiting for broadcasts.
-
-    Note: mp.spawn passes local_rank as first arg, so actual rank = local_rank + 1
-    (since rank 0 runs in the main process).
+    Note: mp.spawn passes local_rank starting at 0, so actual rank = local_rank + 1.
     """
-    import os
     import signal
-    import warnings
-    import torch
     import torch.distributed as dist
 
-    # Actual rank (rank 0 is in main process)
     rank = local_rank + 1
 
     # Ignore SIGTERM initially (parent handles shutdown)
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
 
-    # Set up distributed environment
-    os.environ["MASTER_ADDR"] = "localhost"
-    os.environ["MASTER_PORT"] = str(master_port)
-    os.environ["NCCL_TIMEOUT"] = "300"
-    os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
+    # Initialize distributed, control channel, and runtime
+    _init_distributed(rank, world_size, master_port, devices[rank])
+    _setup_control_channel(rank, world_size, control_queues)
+    runtime = _create_runtime(config_dict, devices, rank, world_size)
 
-    # Set CUDA device for this rank
-    device = devices[rank]
-    torch.cuda.set_device(device)
-
-    # Suppress harmless warnings
-    warnings.filterwarnings(
-        "ignore", message=".*barrier.*device under current context.*"
-    )
-
-    # Initialize process group
-    backend = "nccl" if torch.cuda.is_available() else "gloo"
-
-    pg_options = None
-    if backend == "nccl":
-        try:
-            from torch.distributed import ProcessGroupNCCL
-
-            pg_options = ProcessGroupNCCL.Options()
-            pg_options.config.capture_safe = True
-        except (ImportError, AttributeError):
-            pass
-
-    if pg_options:
-        dist.init_process_group(
-            backend, rank=rank, world_size=world_size, pg_options=pg_options
-        )
-    else:
-        dist.init_process_group(backend, rank=rank, world_size=world_size)
-
-    # Set up control channel
-    from pie_worker import utils as pie_utils
-    from pie_worker.control_channel import ControlChannel
-
-    pie_utils._control_channel = ControlChannel(rank, world_size, control_queues)
-
-    # Create RuntimeConfig for this rank
-    # Remove device/devices from config_dict to avoid duplicate argument
-    from pie_worker.config import RuntimeConfig
-
-    worker_config = {
-        k: v for k, v in config_dict.items() if k not in ("device", "devices")
-    }
-    config = RuntimeConfig.from_args(
-        **worker_config,
-        devices=devices,
-        rank=rank,
-        world_size=world_size,
-    )
-
-    # Create Runtime
-    from pie_worker.runtime import Runtime
-
-    runtime = Runtime(config, log_queue=None)
-
-    # Sync with rank 0 before starting worker loop
+    # Sync with rank 0 then run worker loop
     dist.barrier()
-
-    # Run worker loop (waits for broadcasts from rank 0)
     runtime.worker_loop()
 
-    # Cleanup
     dist.destroy_process_group()
 
 
