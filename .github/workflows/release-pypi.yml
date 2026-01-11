@@ -70,7 +70,7 @@ jobs:
       matrix:
         target: [x86_64, aarch64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
@@ -81,7 +81,7 @@ jobs:
           args: --release --out dist
           working-directory: ${{ needs.setup.outputs.package_path }}
           manylinux: auto
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: wheels-linux-${{ matrix.target }}
           path: dist
@@ -94,7 +94,7 @@ jobs:
       matrix:
         target: [x86_64, aarch64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
@@ -105,6 +105,8 @@ jobs:
           args: --release --out dist
           working-directory: ${{ needs.setup.outputs.package_path }}
       - uses: actions/upload-artifact@v4
+          args: --release --out dist -m ${{ needs.setup.outputs.package_path }}/pyproject.toml
+      - uses: actions/upload-artifact@v6
         with:
           name: wheels-macos-${{ matrix.target }}
           path: dist
@@ -114,7 +116,7 @@ jobs:
     if: needs.setup.outputs.is_maturin == 'true'
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
@@ -124,6 +126,8 @@ jobs:
           args: --release --out dist
           working-directory: ${{ needs.setup.outputs.package_path }}
       - uses: actions/upload-artifact@v4
+          args: --release --out dist -m ${{ needs.setup.outputs.package_path }}/pyproject.toml
+      - uses: actions/upload-artifact@v6
         with:
           name: wheels-windows
           path: dist
@@ -133,7 +137,7 @@ jobs:
     if: needs.setup.outputs.is_maturin == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Build sdist
         uses: PyO3/maturin-action@v1
         with:
@@ -141,6 +145,8 @@ jobs:
           args: --out dist
           working-directory: ${{ needs.setup.outputs.package_path }}
       - uses: actions/upload-artifact@v4
+          args: --out dist -m ${{ needs.setup.outputs.package_path }}/pyproject.toml
+      - uses: actions/upload-artifact@v6
         with:
           name: wheels-sdist
           path: dist
@@ -151,7 +157,7 @@ jobs:
     if: needs.setup.outputs.is_maturin == 'false'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
@@ -159,7 +165,7 @@ jobs:
         run: pip install build
       - name: Build package
         run: python -m build ${{ needs.setup.outputs.package_path }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: wheels-python
           path: ${{ needs.setup.outputs.package_path }}/dist
@@ -172,7 +178,7 @@ jobs:
     if: needs.setup.outputs.is_maturin == 'true' && inputs.dry_run == false
     environment: pypi
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: wheels-*
           merge-multiple: true
@@ -190,7 +196,7 @@ jobs:
     if: needs.setup.outputs.is_maturin == 'false' && inputs.dry_run == false
     environment: pypi
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: wheels-python
           path: dist
