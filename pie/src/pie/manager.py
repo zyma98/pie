@@ -173,11 +173,11 @@ def _build_backend_config(
         "max_batch_size": model_config.get("max_batch_size", 128),
         "activation_dtype": model_config.get("activation_dtype", "bfloat16"),
         "weight_dtype": model_config.get("weight_dtype"),
-        "telemetry_enabled": model_config.get("telemetry", {}).get("enabled", False),
-        "telemetry_endpoint": model_config.get("telemetry", {}).get(
+        "telemetry_enabled": engine_config.get("telemetry", {}).get("enabled", False),
+        "telemetry_endpoint": engine_config.get("telemetry", {}).get(
             "endpoint", "http://localhost:4317"
         ),
-        "telemetry_service_name": model_config.get("telemetry", {}).get(
+        "telemetry_service_name": engine_config.get("telemetry", {}).get(
             "service_name", "pie"
         ),
         "random_seed": model_config.get("random_seed", 42),

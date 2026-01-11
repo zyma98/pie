@@ -3,6 +3,7 @@
 //! This module provides a throughput-optimizing scheduler that decides when to fire
 //! batches based on arrival rate estimation and latency modeling.
 
+use crate::telemetry;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -293,6 +294,14 @@ impl AdaptiveScheduler {
             in_flight = in_flight_batches,
             "Scheduler metrics"
         );
+        
+        // Record OTel metrics
+        if let Some(m) = telemetry::metrics() {
+            if let Some(rate) = arrival_rate {
+                m.scheduler_arrival_rate.record(rate, &[]);
+            }
+            m.scheduler_estimated_latency_ms.record(current_latency * 1000.0, &[]);
+        }
 
         // Expected throughput if we wait for one more request:
         // (batch_size + 1) / (estimated_latency + expected_wait_time)

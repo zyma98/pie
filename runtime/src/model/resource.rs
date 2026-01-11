@@ -1,6 +1,7 @@
 use crate::instance::InstanceId;
 use crate::runtime::{self, TerminationCause};
 use crate::service::ServiceCommand;
+use crate::telemetry;
 use crate::utils::IdPool;
 use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::time::Instant;
@@ -105,6 +106,19 @@ impl ResourceManager {
             "Resource allocation"
         );
         
+        // Record OTel metrics for KV pages (type_id 0)
+        if type_id == KV_PAGE_TYPE_ID {
+            if let Some(m) = telemetry::metrics() {
+                let pool = self.res_pool.get(&type_id);
+                if let Some(pool) = pool {
+                    let capacity = pool.capacity() as usize;
+                    let available = pool.available();
+                    m.kv_pages_allocated.record((capacity - available) as u64, &[]);
+                    m.kv_pages_available.record(available as u64, &[]);
+                }
+            }
+        }
+        
         Ok(result)
     }
 
@@ -203,6 +217,12 @@ impl ResourceManager {
                     type_id = type_id,
                     "OOM killer terminating instance"
                 );
+                
+                // Record OOM kill metric
+                if let Some(m) = telemetry::metrics() {
+                    m.kv_pages_oom_kills.add(1, &[]);
+                }
+                
                 self.cleanup(victim_id)?;
                 runtime::Command::TerminateInstance {
                     inst_id: victim_id,
