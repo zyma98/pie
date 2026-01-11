@@ -94,31 +94,52 @@ def start_engine_and_backend(
             )
 
         model_config = model_configs[0]
-        status_update("Initializing backend in-process...")
 
-        # Build the full config for pie_backend
-        full_config = _build_backend_config(
-            engine_config, model_config, authorized_users_path
-        )
+        # Detect multi-GPU configuration
+        device_value = model_config.get("device")
+        world_size = len(device_value) if isinstance(device_value, list) else 1
 
-        # Initialize Python backend - returns Runtime
-        from pie_worker.server import start_ffi_worker
+        if world_size > 1:
+            # Multi-GPU FFI mode: spawn worker processes
+            backend_processes = _start_multi_gpu_ffi_backend(
+                engine_config,
+                model_config,
+                server_config,
+                authorized_users_path,
+                device_value,
+                world_size,
+                console,
+                status_update,
+            )
+            server_handle = backend_processes.pop(0)  # First element is server_handle
+        else:
+            # Single-GPU FFI mode: existing in-process path
+            status_update("Initializing backend in-process...")
 
-        runtime = _pie.initialize_backend(full_config)
+            # Build the full config for pie_backend
+            full_config = _build_backend_config(
+                engine_config, model_config, authorized_users_path
+            )
 
-        # Create the FfiQueue FIRST via Python
-        ffi_queue = _pie.FfiQueue()
+            # Initialize Python backend - returns Runtime
+            from pie_worker.server import start_ffi_worker
 
-        # Start the Python worker thread BEFORE starting server
-        # This allows the worker to respond to handshake during Model::new
-        _ffi_worker = start_ffi_worker(ffi_queue, runtime)
+            runtime = _pie.initialize_backend(full_config)
 
-        # Now start server with FFI mode - the worker is ready to handle requests
-        server_handle = _pie.start_server_with_ffi(
-            server_config,
-            authorized_users_path,
-            ffi_queue,
-        )
+            # Create the FfiQueue FIRST via Python
+            ffi_queue = _pie.FfiQueue()
+
+            # Start the Python worker thread BEFORE starting server
+            # This allows the worker to respond to handshake during Model::new
+            _ffi_worker = start_ffi_worker(ffi_queue, runtime)
+
+            # Now start server with FFI mode - the worker is ready to handle requests
+            server_handle = _pie.start_server_with_ffi(
+                server_config,
+                authorized_users_path,
+                ffi_queue,
+            )
+            backend_processes = []
 
     except Exception as e:
         raise EngineError(f"Failed to initialize backend: {e}") from e
@@ -129,8 +150,7 @@ def start_engine_and_backend(
             "[green]✓[/green] Engine running. [dim]Press Ctrl+C to stop[/dim]"
         )
 
-    # Return empty list for backend_processes (no separate processes in FFI mode)
-    return server_handle, []
+    return server_handle, backend_processes
 
 
 def _build_backend_config(
@@ -192,6 +212,188 @@ def _build_backend_config(
     return {k: v for k, v in config.items() if v is not None}
 
 
+# =============================================================================
+# Multi-GPU FFI Mode Helpers
+# =============================================================================
+
+
+def _init_distributed(rank: int, world_size: int, master_port: int, device: str):
+    """Initialize torch.distributed for a given rank.
+
+    Sets up environment variables, CUDA device, and process group.
+    """
+    import os
+    import warnings
+    import torch
+    import torch.distributed as dist
+
+    # Environment setup
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = str(master_port)
+    os.environ["NCCL_TIMEOUT"] = "300"
+    os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
+
+    # Set CUDA device
+    torch.cuda.set_device(device)
+
+    # Suppress harmless warnings
+    warnings.filterwarnings(
+        "ignore", message=".*barrier.*device under current context.*"
+    )
+
+    # Initialize process group with NCCL options if available
+    backend = "nccl" if torch.cuda.is_available() else "gloo"
+    pg_options = None
+
+    if backend == "nccl":
+        try:
+            from torch.distributed import ProcessGroupNCCL
+
+            pg_options = ProcessGroupNCCL.Options()
+            pg_options.config.capture_safe = True
+        except (ImportError, AttributeError):
+            pass
+
+    if pg_options:
+        dist.init_process_group(
+            backend, rank=rank, world_size=world_size, pg_options=pg_options
+        )
+    else:
+        dist.init_process_group(backend, rank=rank, world_size=world_size)
+
+
+def _setup_control_channel(rank: int, world_size: int, control_queues: list):
+    """Set up the IPC control channel for this rank."""
+    from pie_worker import utils as pie_utils
+    from pie_worker.control_channel import ControlChannel
+
+    pie_utils._control_channel = ControlChannel(rank, world_size, control_queues)
+
+
+def _create_runtime(config_dict: dict, devices: list[str], rank: int, world_size: int):
+    """Create a Runtime instance for the given rank."""
+    from pie_worker.config import RuntimeConfig
+    from pie_worker.runtime import Runtime
+
+    # Remove device/devices from config to avoid duplicate argument
+    filtered_config = {
+        k: v for k, v in config_dict.items() if k not in ("device", "devices")
+    }
+
+    config = RuntimeConfig.from_args(
+        **filtered_config,
+        devices=devices,
+        rank=rank,
+        world_size=world_size,
+    )
+
+    return Runtime(config, log_queue=None)
+
+
+# =============================================================================
+# Multi-GPU FFI Mode Entry Points
+# =============================================================================
+
+
+def _start_multi_gpu_ffi_backend(
+    engine_config: dict,
+    model_config: dict,
+    server_config,
+    authorized_users_path: str | None,
+    devices: list[str],
+    world_size: int,
+    console,
+    status_update: callable,
+) -> list:
+    """Start multi-GPU FFI backend with worker processes.
+
+    Spawns worker processes for ranks 1..world_size-1, then initializes rank 0
+    in-process with torch.distributed and the FFI queue.
+
+    Returns:
+        List where first element is ServerHandle, rest are worker processes
+    """
+    import random
+    import torch.multiprocessing as mp
+    import torch.distributed as dist
+    from . import _pie
+    from pie_worker.control_channel import create_control_channels
+    from pie_worker.server import start_ffi_worker
+
+    status_update(f"Initializing multi-GPU backend ({world_size} devices)...")
+
+    # Use 'spawn' context for CUDA compatibility
+    mp.set_start_method("spawn", force=True)
+
+    # Generate master port and create control channels
+    master_port = 29500 + random.randint(0, 1000)
+    control_queues = create_control_channels(world_size)
+
+    # Build config dict for all ranks
+    full_config = _build_backend_config(
+        engine_config, model_config, authorized_users_path
+    )
+
+    # Spawn worker processes for ranks 1..world_size-1
+    ctx = mp.spawn(
+        _ffi_worker_process,
+        args=(world_size, devices, master_port, control_queues, full_config),
+        nprocs=world_size - 1,
+        join=False,
+        start_method="spawn",
+    )
+    worker_processes = list(ctx.processes)
+
+    # Initialize rank 0 in this process
+    _init_distributed(0, world_size, master_port, devices[0])
+    _setup_control_channel(0, world_size, control_queues)
+    runtime = _create_runtime(full_config, devices, 0, world_size)
+
+    # Sync with workers then start server
+    dist.barrier()
+
+    ffi_queue = _pie.FfiQueue()
+    _ffi_worker = start_ffi_worker(ffi_queue, runtime)
+
+    server_handle = _pie.start_server_with_ffi(
+        server_config, authorized_users_path, ffi_queue
+    )
+
+    return [server_handle] + worker_processes
+
+
+def _ffi_worker_process(
+    local_rank: int,  # mp.spawn passes 0-indexed local rank
+    world_size: int,
+    devices: list[str],
+    master_port: int,
+    control_queues: list,
+    config_dict: dict,
+):
+    """Worker process for multi-GPU FFI mode.
+
+    Note: mp.spawn passes local_rank starting at 0, so actual rank = local_rank + 1.
+    """
+    import signal
+    import torch.distributed as dist
+
+    rank = local_rank + 1
+
+    # Ignore SIGTERM initially (parent handles shutdown)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
+    # Initialize distributed, control channel, and runtime
+    _init_distributed(rank, world_size, master_port, devices[rank])
+    _setup_control_channel(rank, world_size, control_queues)
+    runtime = _create_runtime(config_dict, devices, rank, world_size)
+
+    # Sync with rank 0 then run worker loop
+    dist.barrier()
+    runtime.worker_loop()
+
+    dist.destroy_process_group()
+
+
 def wait_for_backends(
     server_handle: "_pie.ServerHandle",
     expected_count: int,
@@ -244,6 +446,8 @@ def check_backend_processes(
     Returns:
         True if all processes are alive, False if any have died
     """
+    import subprocess
+
     all_alive = True
     for process in backend_processes:
         # In FFI mode, backend_processes may contain dispatcher functions (not processes)
@@ -292,6 +496,7 @@ def terminate_engine_and_backend(
         on_message: Optional callback for status messages: (message: str) -> None
     """
     import signal
+    import subprocess
 
     def log(msg: str):
         if on_message:
