@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+import time
 import numpy as np
 import torch
 from numba import njit, prange
@@ -27,16 +28,24 @@ class Batch:
     """
 
     # Input tokens and positions
-    token_ids: list[int] = field(default_factory=list)
-    position_ids: list[int] = field(default_factory=list)
+    token_ids: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int64))
+    position_ids: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.int32)
+    )
 
     # KV Cache Layout
-    kv_page_indices: list[int] = field(default_factory=list)
-    kv_page_indptr: list[int] = field(default_factory=lambda: [0])
-    kv_last_page_lens: list[int] = field(default_factory=list)
+    kv_page_indices: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.int32)
+    )
+    kv_page_indptr: np.ndarray = field(
+        default_factory=lambda: np.array([0], dtype=np.int32)
+    )
+    kv_last_page_lens: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.int32)
+    )
 
     # Query/Output indirection pointers
-    qo_indptr: list[int] = field(default_factory=lambda: [0])
+    qo_indptr: np.ndarray = field(default_factory=lambda: np.array([0], dtype=np.int32))
 
     # Attention masks (one per request, flattened later)
     attention_masks: np.ndarray = field(
@@ -198,45 +207,205 @@ class Batch:
 
         return responses
 
+    @classmethod
+    def from_batched_request(
+        cls,
+        args: dict[str, Any],
+        kv_page_size: int,
+        max_dist_size: int,
+        adapters: dict[int, Any],
+    ) -> tuple[Batch, dict[str, float]]:
+        """
+        Convert BatchedForwardPassRequest dict to internal Batch object.
 
-def _decode_brle(brle_buffer) -> np.ndarray:
-    """
-    Decode a Binary Run-Length Encoded buffer into a boolean numpy array.
+        Args:
+            args: Dictionary with batched request fields
+            kv_page_size: KV cache page size from model config
+            max_dist_size: Max distribution size from model config
+            adapters: Dictionary of active adapters
 
-    The format assumes alternating runs of True and False, starting with True
-    (in attention masking, True means attend).
+        Returns:
+            Tuple of (Batch object ready for inference, timing dict)
+        """
+        timing = {
+            "decode_u32": 0.0,
+            "mask_loop": 0.0,
+            "brle_decode": 0.0,
+            "adapter_loop": 0.0,
+            "sampler_loop": 0.0,
+            "embed_loop": 0.0,
+        }
 
-    Args:
-        brle_buffer: List of run lengths or bytes (u32 little-endian encoded)
+        batch = cls()
 
-    Returns:
-        Decoded boolean array
-    """
-    # Handle bytes input (from FFI - u32 little-endian encoded)
-    if isinstance(brle_buffer, bytes):
-        brle_buffer = np.frombuffer(brle_buffer, dtype=np.uint32).tolist()
+        # Helper to decode bytes as u32 array or pass through lists
+        def _decode_u32(data):
+            if isinstance(data, bytes):
+                return np.frombuffer(data, dtype=np.uint32)
+            return np.array(data, dtype=np.uint32)
 
-    if not brle_buffer:
-        return np.array([], dtype=bool)
+        # Helper to decode bytes as i64 array
+        def _decode_i64(data):
+            if isinstance(data, bytes):
+                # Assume input is u32/i32 for now as input is from msgpack
+                # but we need i64 for token_ids in torch
+                return np.frombuffer(data, dtype=np.uint32).astype(np.int64)
+            return np.array(data, dtype=np.int64)
 
-    # Hybrid approach: Iterative loop is faster for small buffers (most decoding steps)
-    # NumPy vectorization is 10x faster for large buffers (complex prefills)
-    if len(brle_buffer) < 16:
-        total_size = sum(brle_buffer)
-        decoded_array = np.empty(total_size, dtype=bool)
-        current_pos = 0
-        value = True
-        for run_len in brle_buffer:
-            if run_len > 0:
-                decoded_array[current_pos : current_pos + run_len] = value
-            current_pos += run_len
-            value = not value
-        return decoded_array
-    else:
-        pattern = np.empty(len(brle_buffer), dtype=bool)
-        pattern[::2] = True
-        pattern[1::2] = False
-        return np.repeat(pattern, brle_buffer)
+        # Direct assignments - decode bytes as u32 arrays
+        t0 = time.perf_counter()
+        # token_ids are long (i64)
+        batch.token_ids = _decode_i64(args["token_ids"])
+
+        batch.position_ids = _decode_u32(args["position_ids"]).astype(np.int32)
+        batch.kv_page_indices = _decode_u32(args["kv_page_indices"]).astype(np.int32)
+        batch.kv_page_indptr = _decode_u32(args["kv_page_indptr"]).astype(np.int32)
+        batch.kv_last_page_lens = _decode_u32(args["kv_last_page_lens"]).astype(
+            np.int32
+        )
+        batch.qo_indptr = _decode_u32(args["qo_indptr"]).astype(np.int32)
+        batch.single_token_mode = args["single_token_mode"]
+        batch.total_tokens = int(len(batch.token_ids))
+        timing["decode_u32"] = time.perf_counter() - t0
+
+        # Process per-request data
+        flattened_masks_u32 = _decode_u32(args["flattened_masks"]).astype(np.int32)
+        mask_indptr = _decode_u32(args["mask_indptr"]).astype(np.int32)
+
+        adapter_indices = args["adapter_indices"]
+        adapter_seeds = args["adapter_seeds"]
+        output_token_indices = args["output_token_indices"]
+        output_token_samplers = args["output_token_samplers"]
+        output_embed_ptrs = args["output_embed_ptrs"]
+        output_embed_indices = args["output_embed_indices"]
+
+        num_requests = len(adapter_indices)
+
+        # ===== BATCH BRLE DECODING (once for all tokens) =====
+        t0 = time.perf_counter()
+
+        # First pass: compute per-token metadata (seq_len, context_len, position_id)
+        all_seq_lens = []  # seq_len for each token
+        all_position_ids = []  # position_id for each token
+        request_token_ranges = []  # (start_token, end_token, seq_len) per request
+
+        token_cursor = 0
+        for i in range(num_requests):
+            req_token_count = batch.qo_indptr[i + 1] - batch.qo_indptr[i]
+
+            # Calculate sequence length from KV pages
+            kv_start = batch.kv_page_indptr[i]
+            kv_end = batch.kv_page_indptr[i + 1]
+            num_pages = kv_end - kv_start
+            kv_last_len = batch.kv_last_page_lens[i]
+
+            if num_pages >= 1:
+                seq_len = kv_page_size * (num_pages - 1) + kv_last_len
+            else:
+                seq_len = kv_last_len
+
+            context_len = seq_len - req_token_count
+
+            request_token_ranges.append(
+                (token_cursor, token_cursor + req_token_count, seq_len)
+            )
+
+            for j in range(req_token_count):
+                all_seq_lens.append(seq_len)
+                all_position_ids.append(context_len + j)
+
+            token_cursor += req_token_count
+
+        # Compute token_acc_seq_lens (cumulative bit offsets)
+        token_acc_seq_lens = [0]
+        for sl in all_seq_lens:
+            token_acc_seq_lens.append(token_acc_seq_lens[-1] + sl)
+
+        # Prepare arrays for batch decoder
+        # Already numpy arrays from _decode_u32 (casted to int32 above)
+        flattened_np = flattened_masks_u32
+        mask_indptr_np = mask_indptr
+        position_ids_np = np.array(all_position_ids, dtype=np.int32)
+        token_acc_seq_lens_np = np.array(token_acc_seq_lens, dtype=np.int32)
+
+        # Call batch decoder ONCE for all tokens
+        t_brle = time.perf_counter()
+        batch.attention_masks = decode_brle_batch(
+            flattened_np, mask_indptr_np, position_ids_np, token_acc_seq_lens_np
+        )
+        timing["brle_decode"] = time.perf_counter() - t_brle
+
+        # Unpack all bits
+        timing["mask_loop"] = time.perf_counter() - t0
+
+        # ===== PER-REQUEST LOOP (slicing pre-decoded masks) =====
+        token_offset = 0
+
+        for i in range(num_requests):
+            start_token, end_token, seq_len = request_token_ranges[i]
+            req_token_count = end_token - start_token
+
+            # Handle adapters
+            t0 = time.perf_counter()
+            adapter_idx = adapter_indices[i]
+            if adapter_idx is not None and adapter_idx in adapters:
+                seed = adapter_seeds[i] if adapter_seeds[i] is not None else 0
+                batch.adapter_seeds.extend([seed] * req_token_count)
+                batch.adapter_indices.append(adapter_idx)
+                batch.adapter_subpass_needed = True
+
+            # Handle output indices (adjust for batch offset)
+            # Ensure token_offset is standard python int to avoid numpy scalar issues in indices_for_logits
+            current_token_offset = int(token_offset)
+            for idx in output_token_indices[i]:
+                batch.indices_for_logits.append(idx + current_token_offset)
+            timing["adapter_loop"] += time.perf_counter() - t0
+
+            # Handle samplers
+            t0 = time.perf_counter()
+            for sampler_config in output_token_samplers[i]:
+                params = {}
+                sampler_idx = sampler_config.get("sampler", 1)
+                batch.sampler_types.append(sampler_idx)
+
+                if sampler_idx == 0:
+                    params["top_k"] = min(
+                        sampler_config.get("top_k", max_dist_size),
+                        max_dist_size,
+                    )
+                else:
+                    params["top_k"] = sampler_config.get("top_k", 0)
+                    params["top_p"] = sampler_config.get("top_p", 1.0)
+                    params["min_p"] = sampler_config.get("min_p", 0.0)
+
+                params["temperature"] = sampler_config.get("temperature", 1.0)
+                batch.sampler_params.append(params)
+            timing["sampler_loop"] += time.perf_counter() - t0
+
+            # Handle embed outputs
+            t0 = time.perf_counter()
+            # for idx, ptr in zip(output_embed_indices[i], output_embed_ptrs[i]):
+            #     batch.indices_for_embed_storage.append(idx + token_offset)
+            #     batch.embed_storage_pointers.append(ptr)
+
+            # Create dummy request for response packaging
+            dummy_req = message.ForwardPassRequest(
+                input_tokens=[],
+                input_token_positions=[],
+                input_embed_ptrs=[],
+                input_embed_positions=[],
+                adapter=adapter_indices[i],
+                adapter_seed=adapter_seeds[i],
+                mask=[],
+                output_token_indices=output_token_indices[i],
+                output_token_samplers=output_token_samplers[i],
+            )
+            batch.requests.append(dummy_req)
+            timing["embed_loop"] += time.perf_counter() - t0
+
+            token_offset += req_token_count
+
+        return batch, timing
 
 
 @njit(parallel=False, cache=False)
