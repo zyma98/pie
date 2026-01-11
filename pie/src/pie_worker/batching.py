@@ -268,6 +268,9 @@ class Batch:
         batch.total_tokens = int(len(batch.token_ids))
         timing["decode_u32"] = time.perf_counter() - t0
 
+        # ===== VECTORIZED BATCH METADATA GENERATION =====
+        t0 = time.perf_counter()
+
         # Process per-request data
         flattened_masks_u32 = _decode_u32(args["flattened_masks"]).astype(np.int32)
         mask_indptr = _decode_u32(args["mask_indptr"]).astype(np.int32)
@@ -281,69 +284,47 @@ class Batch:
 
         num_requests = len(adapter_indices)
 
-        # ===== BATCH BRLE DECODING (once for all tokens) =====
-        t0 = time.perf_counter()
+        # [OPTIMIZATION] Vectorized computation of per-request token counts
+        req_token_counts = np.diff(batch.qo_indptr)
 
-        # First pass: compute per-token metadata (seq_len, context_len, position_id)
-        all_seq_lens = []  # seq_len for each token
-        all_position_ids = []  # position_id for each token
-        request_token_ranges = []  # (start_token, end_token, seq_len) per request
+        # [OPTIMIZATION] Vectorized sequence length calculation
+        # seq_len = (num_pages - 1) * kv_page_size + last_len for num_pages > 0
+        num_pages = np.diff(batch.kv_page_indptr)
+        seq_lens = np.where(
+            num_pages > 0,
+            (num_pages - 1) * kv_page_size + batch.kv_last_page_lens,
+            batch.kv_last_page_lens,
+        )
 
-        token_cursor = 0
-        for i in range(num_requests):
-            req_token_count = batch.qo_indptr[i + 1] - batch.qo_indptr[i]
+        # [OPTIMIZATION] Vectorized repeat - No Python loops!
+        all_seq_lens = np.repeat(seq_lens, req_token_counts)
 
-            # Calculate sequence length from KV pages
-            kv_start = batch.kv_page_indptr[i]
-            kv_end = batch.kv_page_indptr[i + 1]
-            num_pages = kv_end - kv_start
-            kv_last_len = batch.kv_last_page_lens[i]
+        # [OPTIMIZATION] Vectorized position IDs calculation
+        # Formula: global_index - request_start + context_len
+        context_lens = seq_lens - req_token_counts
+        global_indices = np.arange(batch.total_tokens, dtype=np.int32)
+        request_starts = np.repeat(batch.qo_indptr[:-1], req_token_counts)
+        request_contexts = np.repeat(context_lens, req_token_counts)
+        position_ids_np = global_indices - request_starts + request_contexts
 
-            if num_pages >= 1:
-                seq_len = kv_page_size * (num_pages - 1) + kv_last_len
-            else:
-                seq_len = kv_last_len
+        # [OPTIMIZATION] Vectorized cumsum for bit offsets
+        token_acc_seq_lens_np = np.zeros(batch.total_tokens + 1, dtype=np.int32)
+        np.cumsum(all_seq_lens, out=token_acc_seq_lens_np[1:])
 
-            context_len = seq_len - req_token_count
-
-            request_token_ranges.append(
-                (token_cursor, token_cursor + req_token_count, seq_len)
-            )
-
-            for j in range(req_token_count):
-                all_seq_lens.append(seq_len)
-                all_position_ids.append(context_len + j)
-
-            token_cursor += req_token_count
-
-        # Compute token_acc_seq_lens (cumulative bit offsets)
-        token_acc_seq_lens = [0]
-        for sl in all_seq_lens:
-            token_acc_seq_lens.append(token_acc_seq_lens[-1] + sl)
-
-        # Prepare arrays for batch decoder
-        # Already numpy arrays from _decode_u32 (casted to int32 above)
-        flattened_np = flattened_masks_u32
-        mask_indptr_np = mask_indptr
-        position_ids_np = np.array(all_position_ids, dtype=np.int32)
-        token_acc_seq_lens_np = np.array(token_acc_seq_lens, dtype=np.int32)
+        timing["mask_loop"] = time.perf_counter() - t0
 
         # Call batch decoder ONCE for all tokens
         t_brle = time.perf_counter()
         batch.attention_masks = decode_brle_batch(
-            flattened_np, mask_indptr_np, position_ids_np, token_acc_seq_lens_np
+            flattened_masks_u32, mask_indptr, position_ids_np, token_acc_seq_lens_np
         )
         timing["brle_decode"] = time.perf_counter() - t_brle
 
-        # Unpack all bits
-        timing["mask_loop"] = time.perf_counter() - t0
-
-        # ===== PER-REQUEST LOOP (slicing pre-decoded masks) =====
+        # ===== PER-REQUEST LOOP (adapter/sampler/response setup) =====
         token_offset = 0
 
         for i in range(num_requests):
-            start_token, end_token, seq_len = request_token_ranges[i]
-            req_token_count = end_token - start_token
+            req_token_count = int(req_token_counts[i])
 
             # Handle adapters
             t0 = time.perf_counter()
@@ -408,7 +389,7 @@ class Batch:
         return batch, timing
 
 
-@njit(parallel=False, cache=False)
+@njit(cache=True)
 def decode_brle_batch(
     flattened_masks: np.ndarray,
     mask_indptr: np.ndarray,
@@ -417,6 +398,9 @@ def decode_brle_batch(
 ) -> np.ndarray:
     """
     Decode BRLE masks for an entire batch using Numba JIT.
+
+    Optimized with slice assignment which Numba compiles to SIMD/memset
+    block writes - faster than parallel (prange) due to thread pool overhead.
 
     Args:
         flattened_masks: Concatenated BRLE run lengths (int32)
@@ -450,8 +434,8 @@ def decode_brle_batch(
             eff_len = min(run_len, remaining)
 
             if is_true_run and eff_len > 0:
-                for bit_off in range(eff_len):
-                    result[curr_bit_pos + bit_off] = True
+                # Slice assignment compiles to SIMD/memset
+                result[curr_bit_pos : curr_bit_pos + eff_len] = True
 
             bits_consumed += eff_len
             curr_bit_pos += eff_len
