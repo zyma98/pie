@@ -5,13 +5,36 @@ This module handles the lifecycle of the Pie engine and backend services.
 
 import sys
 import time
+import os
+import signal
+import subprocess
+import random
+import asyncio
+import warnings
 from pathlib import Path
-from typing import Optional, Any, TYPE_CHECKING
+from typing import Optional, Any
+
+import torch
+import torch.multiprocessing as mp
+import torch.distributed as dist
+
+
+import blake3
+
+
+from rich.console import Console
 
 from . import path as pie_path
+from . import _pie
 
-if TYPE_CHECKING:
-    from . import _pie
+from pie_worker import utils as pie_utils
+from pie_worker.control_channel import ControlChannel, create_control_channels
+from pie_worker.server import start_ffi_worker
+from pie_worker.config import RuntimeConfig
+from pie_worker.runtime import Runtime
+
+
+from pie_client import PieClient, Event
 
 
 class EngineError(Exception):
@@ -66,12 +89,22 @@ def start_engine_and_backend(
     Raises:
         EngineError: If engine or backend fails to start
     """
-    from . import _pie
+    """Start the Pie engine and all configured backend services.
 
-    # Setup console if available
-    use_rich = console is not None
-    if use_rich:
-        from rich.console import Console
+    Args:
+        engine_config: Engine configuration dict
+        model_configs: List of model configurations
+        timeout: Maximum time to wait for backends to connect (seconds)
+        console: Optional rich.console.Console for output
+        on_status: Optional callback for status updates: (status_message: str) -> None
+        on_message: Optional callback for log messages: (level: str, message: str) -> None
+
+    Returns:
+        Tuple of (ServerHandle, list of backend processes - empty for FFI mode)
+
+    Raises:
+        EngineError: If engine or backend fails to start
+    """
 
     def status_update(msg: str):
         if on_status:
@@ -144,8 +177,6 @@ def start_engine_and_backend(
             )
 
             # Initialize Python backend - returns Runtime
-            from pie_worker.server import start_ffi_worker
-
             runtime = _pie.initialize_backend(full_config)
 
             # Create the FfiQueue FIRST via Python
@@ -246,11 +277,6 @@ def _init_distributed(rank: int, world_size: int, master_port: int, device: str)
 
     Sets up environment variables, CUDA device, and process group.
     """
-    import os
-    import warnings
-    import torch
-    import torch.distributed as dist
-
     # Environment setup
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = str(master_port)
@@ -288,16 +314,19 @@ def _init_distributed(rank: int, world_size: int, master_port: int, device: str)
 
 def _setup_control_channel(rank: int, world_size: int, control_queues: list):
     """Set up the IPC control channel for this rank."""
-    from pie_worker import utils as pie_utils
-    from pie_worker.control_channel import ControlChannel
 
+
+def _setup_control_channel(rank: int, world_size: int, control_queues: list):
+    """Set up the IPC control channel for this rank."""
     pie_utils._control_channel = ControlChannel(rank, world_size, control_queues)
 
 
 def _create_runtime(config_dict: dict, devices: list[str], rank: int, world_size: int):
     """Create a Runtime instance for the given rank."""
-    from pie_worker.config import RuntimeConfig
-    from pie_worker.runtime import Runtime
+
+
+def _create_runtime(config_dict: dict, devices: list[str], rank: int, world_size: int):
+    """Create a Runtime instance for the given rank."""
 
     # Remove device/devices from config to avoid duplicate argument
     filtered_config = {
@@ -337,12 +366,14 @@ def _start_multi_gpu_ffi_backend(
     Returns:
         List where first element is ServerHandle, rest are worker processes
     """
-    import random
-    import torch.multiprocessing as mp
-    import torch.distributed as dist
-    from . import _pie
-    from pie_worker.control_channel import create_control_channels
-    from pie_worker.server import start_ffi_worker
+    """Start multi-GPU FFI backend with worker processes.
+
+    Spawns worker processes for ranks 1..world_size-1, then initializes rank 0
+    in-process with torch.distributed and the FFI queue.
+
+    Returns:
+        List where first element is ServerHandle, rest are worker processes
+    """
 
     status_update(f"Initializing multi-GPU backend ({world_size} devices)...")
 
@@ -384,9 +415,8 @@ def _start_multi_gpu_ffi_backend(
         server_config, authorized_users_path, ffi_queue
     )
 
-    return (
-        [server_handle] + worker_processes + [FfiWorkerHandle(_ffi_worker, stop_event)]
-    )
+    # Return the context objects (ctx) instead of raw processes so we can join gracefully
+    return [server_handle, ctx, FfiWorkerHandle(_ffi_worker, stop_event)]
 
 
 def _ffi_worker_process(
@@ -401,9 +431,10 @@ def _ffi_worker_process(
 
     Note: mp.spawn passes local_rank starting at 0, so actual rank = local_rank + 1.
     """
-    import signal
-    import torch.distributed as dist
+    """Worker process for multi-GPU FFI mode.
 
+    Note: mp.spawn passes local_rank starting at 0, so actual rank = local_rank + 1.
+    """
     rank = local_rank + 1
 
     # Ignore SIGTERM initially (parent handles shutdown)
@@ -418,7 +449,26 @@ def _ffi_worker_process(
     dist.barrier()
     runtime.worker_loop()
 
-    dist.destroy_process_group()
+    # Clean exit without running Python finalizers that might hang
+    # dist.destroy_process_group() # Can hang in multi-process if not coordinated
+
+    # Cleanup control channel resources
+    if pie_utils._control_channel is not None:
+        pie_utils._control_channel.cleanup()
+        pie_utils._control_channel = None
+
+    # Clear local references
+    control_queues = None
+
+    # Force GC to cleanup Queues and other resources
+    # time imported globally
+
+    # Give background threads a moment to exit
+    time.sleep(0.1)
+
+    gc.collect()
+
+    return
 
 
 def wait_for_backends(
@@ -473,7 +523,6 @@ def check_backend_processes(
     Returns:
         True if all processes are alive, False if any have died
     """
-    import subprocess
 
     all_alive = True
     for process in backend_processes:
@@ -496,6 +545,11 @@ def check_backend_processes(
             if not process.is_alive():
                 is_dead = True
                 return_code = process.exitcode
+                # Check for SpawnContext
+                if hasattr(process, "processes"):
+                    # For SpawnContext, is_alive checks if any process is alive
+                    # Context is "dead" if all processes are dead
+                    pass
 
         if is_dead:
             all_alive = False
@@ -522,16 +576,41 @@ def terminate_engine_and_backend(
         backend_processes: List of backend subprocess.Popen objects
         on_message: Optional callback for status messages: (message: str) -> None
     """
-    import signal
-    import subprocess
 
     def log(msg: str):
         if on_message:
             on_message(msg)
+        else:
+            # sys imported globally
+            pass
+            # print(f"[Manager] {msg}", file=sys.stderr)
+
+    # 1. Broadcast STOP signal to workers
+    try:
+        if pie_utils._control_channel is not None:
+            # log("Debug: Sending STOP signal to workers")
+            pie_utils._control_channel.send("STOP")
+            # Give workers time to receive the signal and exit voluntarily
+            time.sleep(0.5)
+    except ImportError:
+        pass
+    except Exception as e:
+        log(f"Error sending STOP signal: {e}")
 
     for process in backend_processes:
+        # Check for SpawnContext (multiprocessing spawn context)
+        # It doesn't have a pid attribute directly, but has .processes and .join
+        if hasattr(process, "join") and hasattr(process, "processes"):
+            try:
+                # log("Debug: Joining SpawnContext")
+                process.join(timeout=5)
+                # log("Debug: SpawnContext joined successfully")
+            except Exception as e:
+                log(f"Error joining SpawnContext: {e}")
+            continue
+
         # In FFI mode, backend_processes may contain dispatcher functions (not processes)
-        # Skip anything that's not a process
+        # Skip anything that's not a process or context
         if not hasattr(process, "pid"):
             continue
 
@@ -566,6 +645,18 @@ def terminate_engine_and_backend(
                 server_handle.shutdown()
         except Exception as e:
             log(f"Error shutting down engine: {e}")
+
+    # Finalize control channel queues if they exist
+    # This prevents "leaked semaphore" warnings from multiprocessing.resource_tracker
+    try:
+        if pie_utils._control_channel is not None:
+            pie_utils._control_channel.cleanup()
+            pie_utils._control_channel = None
+
+    except ImportError:
+        pass  # pie_worker might not be installed or importable
+    except Exception as e:
+        log(f"Error cleaning up control channel: {e}")
 
 
 def run_interactive_shell(engine_config: dict, internal_token: str) -> None:
@@ -667,10 +758,7 @@ def submit_inferlet_and_wait(
         arguments: Arguments to pass to the inferlet
         server_handle: Optional server handle for process monitoring
         backend_processes: Optional list of backend processes to monitor
-        on_event: Optional callback for events: (event_type: str, message: str) -> None
     """
-    import asyncio
-
     asyncio.run(
         _submit_inferlet_async(
             client_config,
@@ -692,9 +780,6 @@ async def _submit_inferlet_async(
     on_event: Optional[callable] = None,
 ) -> None:
     """Async implementation of submit_inferlet_and_wait."""
-    import blake3
-    import asyncio
-    from pie_client import PieClient, Event
 
     def emit(event_type: str, msg: str):
         if on_event:
