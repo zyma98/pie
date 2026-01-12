@@ -20,6 +20,28 @@ class EngineError(Exception):
     pass
 
 
+class FfiWorkerHandle:
+    """Wrapper for FFI worker thread to look like a process for cleanup."""
+
+    def __init__(self, thread, stop_event):
+        self.thread = thread
+        self.stop_event = stop_event
+        self.pid = -1  # Pseudo-PID
+
+    def terminate(self):
+        self.stop_event.set()
+
+    def kill(self):
+        """Simulate kill by ensuring stop event is set (threads cannot be SIGKILLed)."""
+        self.stop_event.set()
+
+    def join(self, timeout=None):
+        self.thread.join(timeout=timeout)
+
+    def is_alive(self):
+        return self.thread.is_alive()
+
+
 def start_engine_and_backend(
     engine_config: dict,
     model_configs: list[dict],
@@ -131,7 +153,7 @@ def start_engine_and_backend(
 
             # Start the Python worker thread BEFORE starting server
             # This allows the worker to respond to handshake during Model::new
-            _ffi_worker = start_ffi_worker(ffi_queue, runtime)
+            _ffi_worker, stop_event = start_ffi_worker(ffi_queue, runtime)
 
             # Now start server with FFI mode - the worker is ready to handle requests
             server_handle = _pie.start_server_with_ffi(
@@ -139,7 +161,9 @@ def start_engine_and_backend(
                 authorized_users_path,
                 ffi_queue,
             )
-            backend_processes = []
+
+            # Wrap worker thread for cleanup
+            backend_processes = [FfiWorkerHandle(_ffi_worker, stop_event)]
 
     except Exception as e:
         raise EngineError(f"Failed to initialize backend: {e}") from e
@@ -350,16 +374,19 @@ def _start_multi_gpu_ffi_backend(
     runtime = _create_runtime(full_config, devices, 0, world_size)
 
     # Sync with workers then start server
+    # Sync with workers then start server
     dist.barrier()
 
     ffi_queue = _pie.FfiQueue()
-    _ffi_worker = start_ffi_worker(ffi_queue, runtime)
+    _ffi_worker, stop_event = start_ffi_worker(ffi_queue, runtime)
 
     server_handle = _pie.start_server_with_ffi(
         server_config, authorized_users_path, ffi_queue
     )
 
-    return [server_handle] + worker_processes
+    return (
+        [server_handle] + worker_processes + [FfiWorkerHandle(_ffi_worker, stop_event)]
+    )
 
 
 def _ffi_worker_process(
