@@ -626,9 +626,13 @@ class Runtime:
         while not shutdown_requested:
             # Receive control message
             try:
-                # Use my local process group
-                my_pg = self.process_groups.get(self.group_id)
-                msg = utils.broadcast_struct(None, src=0, device=device, group=my_pg)
+                # Use compute_process_groups for TP-only broadcast
+                # src must be the leader's GLOBAL rank, not group-local rank
+                my_pg = self.compute_process_groups.get(self.group_id)
+                leader_global_rank = self.group_topology[self.group_id][0]
+                msg = utils.broadcast_struct(
+                    None, src=leader_global_rank, device=device, group=my_pg
+                )
             except Exception:
                 break
 
@@ -846,8 +850,8 @@ class Runtime:
         # Use group_id from kwargs if present (from Rust), else default to local
         target_group_id = kwargs.get("group_id", self.group_id)
 
-        # Check if this is a remote DP group (Rank 0 not a compute member)
-        # For such groups, skip tensor creation and send raw kwargs
+        # Check if this is a remote DP group (only relevant for central coordinator mode)
+        # In symmetric IPC mode, each group leader handles its own group, so this is always False
         is_remote_dp_group = (
             target_group_id != 0
             and self.group_topology
@@ -855,14 +859,11 @@ class Runtime:
             and 0 not in self.group_topology[target_group_id]
         )
 
-        # IPC MODE: If we're NOT rank 0, we received this fire_batch directly via IPC.
-        # In this case, we ARE the group leader and should execute locally.
-        # Don't try to use the control channel - execute the batch right here.
-        if self.config.rank != 0:
-            # This process received fire_batch via IPC - execute locally
+        # SYMMETRIC IPC MODE: If target_group_id == self.group_id, we ARE the group leader
+        # and should execute locally. The Rust server already routed the request to us.
+        # This check supersedes the rank != 0 check for the symmetric architecture.
+        if target_group_id == self.group_id:
             is_remote_dp_group = False
-            # Override target_group_id to our own group for local execution
-            target_group_id = self.group_id
 
         # PROFILING: Track request distribution and timings
         if not hasattr(self, "_dp_stats"):
@@ -1000,8 +1001,8 @@ class Runtime:
             t0 = time.perf_counter()
             should_broadcast = (
                 self.config.world_size > 1
-                and self.config.rank == 0  # Only rank 0 broadcasts
-                and target_group_id == 0  # Only for local TP groups
+                and self.config.rank == 0  # Only group leader (tp_rank 0) broadcasts
+                and target_group_id == self.group_id  # Only for MY TP group
             )
             if should_broadcast:
                 msg = {
@@ -1009,10 +1010,13 @@ class Runtime:
                     "inputs": inputs,
                     "sampling_metadata": sampling_metadata,
                 }
-                target_pg = self.process_groups.get(target_group_id)
+                # Use compute_process_groups for TP-only broadcast
+                # src must be the leader's GLOBAL rank, not group-local rank
+                target_pg = self.compute_process_groups.get(target_group_id)
+                leader_global_rank = self.group_topology[target_group_id][0]
                 utils.broadcast_struct(
                     msg,
-                    src=0,
+                    src=leader_global_rank,
                     device=device,
                     group=target_pg,
                     group_id=target_group_id,
@@ -1021,7 +1025,7 @@ class Runtime:
 
             # Execute inference locally
             t0 = time.perf_counter()
-            if target_group_id == 0 or target_group_id == self.group_id:
+            if target_group_id == self.group_id:
                 sampling_results = self._run_step(inputs, sampling_metadata)
             else:
                 # TP group with Rank 0: wait for result
