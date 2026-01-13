@@ -12,6 +12,15 @@ import random
 import asyncio
 import warnings
 from pathlib import Path
+
+# Suppress semaphore leak warnings from multiprocessing resource_tracker
+# These occur when workers are forcefully terminated during shutdown and are cosmetic
+# Set env var so it propagates to child processes (resource_tracker)
+os.environ.setdefault(
+    "PYTHONWARNINGS",
+    "ignore::UserWarning:multiprocessing.resource_tracker",
+)
+warnings.filterwarnings("ignore", message=".*leaked semaphore.*", category=UserWarning)
 from typing import Optional, Any
 import queue  # For Queue type hint logic if needed, but Queue is from MP
 
@@ -299,12 +308,18 @@ def _init_distributed(rank: int, world_size: int, master_port: int, device: str)
     # Initialize process group with NCCL
     backend = "nccl" if torch.cuda.is_available() else "gloo"
 
+    # Extract device index for device_id parameter
+    device_id = None
+    if device.startswith("cuda:"):
+        device_id = torch.device(device)
+
     dist.init_process_group(
         backend,
         store=store,
         rank=rank,
         world_size=world_size,
         timeout=timeout,
+        device_id=device_id,
     )
 
 
@@ -466,12 +481,17 @@ def _start_multi_gpu_ffi_backend(
         nprocs=world_size,
         join=False,
         start_method="spawn",
+        daemon=True,  # Workers die automatically when main process exits
     )
 
     # Wait for ALL workers to signal they've connected to IPC
     # Each worker sends its rank when ready
     for _ in range(world_size):
         rank = ready_queue.get(timeout=120)  # 2 minute timeout for model loading
+
+    # Clean up the ready_queue to prevent semaphore leak
+    ready_queue.close()
+    ready_queue.join_thread()
 
     # Phase 2: Complete initialization (blocks until handshake succeeds)
     # All workers are now connected via IPC
@@ -641,13 +661,29 @@ def _run_ipc_worker_loop(ipc_queue, runtime):
 
     shutdown_requested = False
     poll_timeout_ms = 100
+    parent_pid = os.getppid()
+    check_parent_every = 10  # Check parent alive every N poll cycles
+    poll_count = 0
 
     try:
         while not shutdown_requested:
-            # Poll the IPC queue (releases GIL while waiting)
-            request = ipc_queue.poll_blocking(poll_timeout_ms)
-            if request is None:
-                continue  # Timeout, try again
+            # Check if parent process is still alive periodically
+            poll_count += 1
+            if poll_count % check_parent_every == 0:
+                try:
+                    os.kill(parent_pid, 0)  # Doesn't kill, just checks existence
+                except OSError:
+                    # Parent process has exited, we should exit too
+                    break
+
+            try:
+                # Poll the IPC queue (releases GIL while waiting)
+                request = ipc_queue.poll_blocking(poll_timeout_ms)
+                if request is None:
+                    continue  # Timeout, try again
+            except Exception:
+                # IPC queue may be closed when server shuts down
+                break
 
             request_id, method, payload = request
 
@@ -839,6 +875,10 @@ def terminate_engine_and_backend(
         backend_processes: List of backend subprocess.Popen objects
         on_message: Optional callback for status messages: (message: str) -> None
     """
+    # Suppress semaphore leak warning during shutdown (cosmetic, happens when workers are killed)
+    warnings.filterwarnings(
+        "ignore", message=".*leaked semaphore.*", category=UserWarning
+    )
 
     def log(msg: str):
         if on_message:
@@ -848,12 +888,21 @@ def terminate_engine_and_backend(
             pass
             # print(f"[Manager] {msg}", file=sys.stderr)
 
-    # 1. Broadcast STOP signal to workers
+    # 1. Shut down the server FIRST - this sends shutdown signal to workers via IPC
+    if server_handle is not None:
+        try:
+            if server_handle.is_running():
+                server_handle.shutdown()
+        except Exception as e:
+            log(f"Error shutting down engine: {e}")
+
+    # 2. Give workers time to shut down gracefully after receiving IPC shutdown
+    time.sleep(1.0)
+
+    # 3. Broadcast STOP signal via control channel (legacy, may not be in use)
     try:
         if pie_utils._control_channel is not None:
-            # log("Debug: Sending STOP signal to workers")
             pie_utils._control_channel.send("STOP")
-            # Give workers time to receive the signal and exit voluntarily
             time.sleep(0.5)
     except ImportError:
         pass
@@ -865,11 +914,19 @@ def terminate_engine_and_backend(
         # It doesn't have a pid attribute directly, but has .processes and .join
         if hasattr(process, "join") and hasattr(process, "processes"):
             try:
-                # log("Debug: Joining SpawnContext")
-                process.join(timeout=5)
-                # log("Debug: SpawnContext joined successfully")
+                # Terminate all worker processes in the spawn context
+                for p in process.processes:
+                    if p.is_alive():
+                        p.terminate()
+                # Wait briefly for termination
+                for p in process.processes:
+                    p.join(timeout=2)
+                    if p.is_alive():
+                        p.kill()  # Force kill if still alive
+                # Finally join the context itself
+                process.join(timeout=1)
             except Exception as e:
-                log(f"Error joining SpawnContext: {e}")
+                log(f"Error terminating SpawnContext: {e}")
             continue
 
         # In FFI mode, backend_processes may contain dispatcher functions (not processes)
@@ -900,14 +957,6 @@ def terminate_engine_and_backend(
                 process.kill()
             except Exception as e:
                 log(f"Error terminating process {pid}: {e}")
-
-    # Gracefully shut down the engine
-    if server_handle is not None:
-        try:
-            if server_handle.is_running():
-                server_handle.shutdown()
-        except Exception as e:
-            log(f"Error shutting down engine: {e}")
 
     # Finalize control channel queues if they exist
     # This prevents "leaked semaphore" warnings from multiprocessing.resource_tracker
