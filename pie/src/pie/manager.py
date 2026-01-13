@@ -347,6 +347,22 @@ def _setup_process_groups(rank: int, group_topology: list[list[int]]) -> dict:
     return pg_map
 
 
+def _setup_compute_process_groups(rank: int, group_topology: list[list[int]]) -> dict:
+    """Create ProcessGroups for Tensor Parallel computation (TP ranks only)."""
+    pg_map = {}
+    for i, group_ranks in enumerate(group_topology):
+        # Compute group includes ONLY the TP workers for this group
+        # Sort to ensure consistent ordering
+        comm_ranks = sorted(list(set(group_ranks)))
+
+        # Create group
+        pg = dist.new_group(comm_ranks)
+
+        pg_map[i] = pg
+
+    return pg_map
+
+
 def _create_runtime(
     config_dict: dict,
     devices: list[str],
@@ -356,6 +372,7 @@ def _create_runtime(
     result_queue: Any | None = None,
     result_queues: list | None = None,  # All queues (for Rank 0)
     pg_map: dict | None = None,
+    compute_pg_map: dict | None = None,
 ):
     """Create a Runtime instance for the given rank."""
 
@@ -385,6 +402,7 @@ def _create_runtime(
         result_queue=result_queue,
         result_queues=result_queues,
         process_groups=pg_map,
+        compute_process_groups=compute_pg_map,
         group_topology=group_topology,
     )
     return rt
@@ -471,8 +489,12 @@ def _start_multi_gpu_ffi_backend(
     # Initialize rank 0 in this process
     # Initialize rank 0 in this process
     _init_distributed(0, world_size, master_port, devices[0])
+    # print("[DEBUG R0] _setup_control_channel...")
     _setup_control_channel(0, world_size, control_queues, group_topology)
+    # print("[DEBUG R0] _setup_process_groups...")
     pg_map = _setup_process_groups(0, group_topology)
+    compute_pg_map = _setup_compute_process_groups(0, group_topology)
+    # print("[DEBUG R0] _create_runtime...")
 
     runtime = _create_runtime(
         full_config,
@@ -483,6 +505,7 @@ def _start_multi_gpu_ffi_backend(
         result_queue=result_queues[0],
         result_queues=result_queues,  # Pass all queues to Rank 0
         pg_map=pg_map,
+        compute_pg_map=compute_pg_map,
     )
     # Sync with workers then start server
     dist.barrier()
@@ -555,11 +578,12 @@ def _ffi_worker_process(
     my_result_queue = result_queues[my_group_id]
 
     # Initialize distributed, control channel, and runtime
-    print(f"[DEBUG R{rank}] _init_distributed...")
+    # print(f"[DEBUG R{rank}] _init_distributed...")
     # Initialize distributed process group
     _init_distributed(rank, world_size, master_port, devices[rank])
     _setup_control_channel(rank, world_size, control_queues, group_topology)
     pg_map = _setup_process_groups(rank, group_topology)
+    compute_pg_map = _setup_compute_process_groups(rank, group_topology)
 
     runtime = _create_runtime(
         config_dict,
@@ -570,6 +594,7 @@ def _ffi_worker_process(
         result_queue=my_result_queue,
         result_queues=None,  # Workers don't need all queues
         pg_map=pg_map,
+        compute_pg_map=compute_pg_map,
     )
 
     # Sync with rank 0 then run worker loop
@@ -577,7 +602,8 @@ def _ffi_worker_process(
     runtime.worker_loop()
 
     # Clean exit without running Python finalizers that might hang
-    # dist.destroy_process_group() # Can hang in multi-process if not coordinated
+    if dist.is_initialized():
+        dist.destroy_process_group()
 
     # Cleanup control channel resources
     if pie_utils._control_channel is not None:

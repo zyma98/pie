@@ -151,14 +151,14 @@ def broadcast_struct(
     # 2. Broadcast metadata via IPC control channel (replaces GLOO)
     if _control_channel is not None:
         if rank == src:
-            print(
-                f"[DEBUG] Rank {rank}: Sending metadata via control channel to group {group_id}"
-            )
+            # print(
+            #     f"[DEBUG] Rank {rank}: Sending metadata via control channel to group {group_id}"
+            # )
             _control_channel.send(metadata, destination_group=group_id)
         else:
-            print(f"[DEBUG] Rank {rank}: Waiting for metadata from control channel")
+            # print(f"[DEBUG] Rank {rank}: Waiting for metadata from control channel")
             metadata = _control_channel.recv()
-            print(f"[DEBUG] Rank {rank}: Received metadata")
+            # print(f"[DEBUG] Rank {rank}: Received metadata")
     else:
         # Fallback to GLOO if control channel not initialized
         meta_list = [metadata]

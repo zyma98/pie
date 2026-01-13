@@ -15,6 +15,7 @@ import random
 import numpy as np
 from . import utils
 import torch
+import torch.distributed as dist
 
 from .config import RuntimeConfig
 from .batching import Batch
@@ -142,6 +143,7 @@ class Runtime:
         result_queue: object = None,
         result_queues: list = None,
         process_groups: dict = None,
+        compute_process_groups: dict = None,
         group_topology: list = None,
     ):
         """
@@ -154,6 +156,7 @@ class Runtime:
             result_queue: Optional queue for results (single worker usage)
             result_queues: List of queues for all groups (Rank 0 only)
             process_groups: Dict of {group_id: ProcessGroup} for all groups (Rank 0 only)
+            compute_process_groups: Dict of {group_id: ProcessGroup} for TP sync
             group_topology: List of groups [[rank0, rank1], [rank2, rank3], ...]
         """
         self.config = config
@@ -162,6 +165,9 @@ class Runtime:
         self.result_queue = result_queue
         self.result_queues = result_queues if result_queues is not None else []
         self.process_groups = process_groups if process_groups is not None else {}
+        self.compute_process_groups = (
+            compute_process_groups if compute_process_groups is not None else {}
+        )
         self.group_topology = group_topology if group_topology is not None else []
         self.adapters = {}
 
@@ -194,12 +200,12 @@ class Runtime:
         # Load model weights using ModelLoader
         loader = ModelLoader(config, log_queue=log_queue)
 
-        print(f"[DEBUG R{config.rank}] Runtime: Loading weights...")
+        # print(f"[DEBUG R{config.rank}] Runtime: Loading weights...")
         self._log("Loading model weights", "DEBUG")
 
         weights, normalized_arch, self.info = loader.load()
 
-        print(f"[DEBUG R{config.rank}] Runtime: Weights loaded")
+        # print(f"[DEBUG R{config.rank}] Runtime: Weights loaded")
         # Store snapshot_dir for tokenizer loading
         self.snapshot_dir = loader.snapshot_dir
 
@@ -207,7 +213,7 @@ class Runtime:
 
         # Store architecture type
         self.type = self.info["architecture"]["type"]
-        print(f"[DEBUG R{config.rank}] Runtime: Creating engine for {self.type}...")
+        # print(f"[DEBUG R{config.rank}] Runtime: Creating engine for {self.type}...")
 
         # Create model-specific components based on architecture
         match self.type:
@@ -225,6 +231,9 @@ class Runtime:
                     self.model_config,
                     config,
                     weights,
+                    compute_process_group=self.compute_process_groups.get(
+                        self.group_id
+                    ),
                 )
                 # Create adapter cache
                 self.adapter_at_layer = llama3.create_adapter_cache(
@@ -252,6 +261,9 @@ class Runtime:
                     self.model_config,
                     config,
                     weights,
+                    # qwen2 not updated yet, leaving as is or assuming it handles extra kwargs?
+                    # Actually I didn't update qwen2.py. Only qwen3.py.
+                    # Use unmodified qwen2 for now.
                 )
                 # Create adapter cache
                 self.adapter_at_layer = qwen2.create_adapter_cache(
@@ -276,6 +288,9 @@ class Runtime:
                     self.model_config,
                     config,
                     weights,
+                    compute_process_group=self.compute_process_groups.get(
+                        self.group_id
+                    ),
                 )
 
                 # Create adapter cache
@@ -535,11 +550,11 @@ class Runtime:
         # print parameters
         # print(f"Initializing adapter {adapter_ptr} with rank {rank}, alpha {alpha}, population size {population_size}, mu fraction {mu_fraction}, initial sigma {initial_sigma}")
         # Calculate local shard sizes for distributed adapters
-        world_size = self.config.world_size
-        gpu_rank = self.config.rank
+        tp_size = self.config.tensor_parallel_size
+        gpu_rank = self.config.rank % tp_size
 
-        local_num_q_heads = cfg.num_q_heads // world_size
-        local_num_kv_heads = cfg.num_kv_heads // world_size
+        local_num_q_heads = cfg.num_q_heads // tp_size
+        local_num_kv_heads = cfg.num_kv_heads // tp_size
 
         # Local output features (sharded up-projection)
         local_out_features = [
@@ -566,7 +581,7 @@ class Runtime:
             device=self.config.device,
             dtype=self.config.activation_dtype,
             gpu_rank=gpu_rank,
-            world_size=world_size,
+            world_size=tp_size,
         )
 
     @torch.inference_mode()
@@ -683,8 +698,18 @@ class Runtime:
         Returns:
             Sampling results (only valid on Rank 0 usually, but we return whatever comes out)
         """
+        # TP Barrier: Only sync if TP degree > 1
         if self.config.world_size > 1:
-            torch.distributed.barrier()
+            # If we have compute process groups, use them for TP sync
+            if self.compute_process_groups:
+                my_compute_pg = self.compute_process_groups.get(self.group_id)
+                # Only barrier if TP degree > 1 (group size > 1)
+                if my_compute_pg and dist.get_world_size(group=my_compute_pg) > 1:
+                    dist.barrier(group=my_compute_pg)
+            else:
+                # Fallback to global barrier (legacy behavior)
+
+                dist.barrier()
 
         # 2. Embed inputs
         input_embeds = self.engine.embed_inputs(inputs)
@@ -923,3 +948,6 @@ class Runtime:
         if self.config.world_size > 1 and self.config.rank == 0:
             print("Broadcasting STOP signal to workers...")
             utils.broadcast_struct("STOP", src=0, device=self.config.device)
+
+        if dist.is_initialized():
+            dist.destroy_process_group()

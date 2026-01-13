@@ -534,7 +534,7 @@ impl Model {
                     
                     tokio::spawn(async move {
                          let start_time = Instant::now();
-                         Self::execute_forward_pass_batch(&backend_clone, batch_to_fire, REQUEST_TIMEOUT).await;
+                         Self::execute_forward_pass_batch(&backend_clone, batch_to_fire, group_id, REQUEST_TIMEOUT).await;
                          let latency = start_time.elapsed();
                          completion_tx_clone.send((batch_size, tokens_in_batch, latency, group_id)).ok();
                     });
@@ -591,7 +591,7 @@ impl Model {
         for group_id in 0..num_groups {
             if !batches[group_id].is_empty() {
                 let batch = std::mem::take(&mut batches[group_id]);
-                Self::execute_forward_pass_batch(&backend, batch, REQUEST_TIMEOUT).await;
+                Self::execute_forward_pass_batch(&backend, batch, group_id, REQUEST_TIMEOUT).await;
             }
         }
 
@@ -616,9 +616,12 @@ impl Model {
     async fn execute_forward_pass_batch(
         backend: &RpcBackend,
         requests: Vec<(ForwardPassRequest, Option<oneshot::Sender<ForwardPassResponse>>)>,
+        group_id: usize,
         timeout: Duration,
     ) {
+        // println!("[DEBUG Rust] Firing batch for group {}", group_id);
         let mut batch_req = BatchedForwardPassRequest::new();
+        batch_req.group_id = Some(group_id);
         for (fp_req, _) in &requests {
             batch_req.add_request(fp_req);
         }
@@ -674,7 +677,6 @@ impl Model {
             Request::ForwardPass(mut fp_req, resp_tx) => {
                 // Capture arrival time before queuing to avoid measurement distortion
                 // when requests pile up behind the in-flight limit.
-                fp_req.arrival_time = Some(Instant::now());
                 
                 // Lookup group ID from resource manager
                 let group_id = if let Some(inst_id) = fp_req.inst_id {

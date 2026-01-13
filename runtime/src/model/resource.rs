@@ -70,6 +70,10 @@ pub struct ResourceManager {
     /// Map instance to its assigned device group.
     instance_groups: HashMap<InstanceId, GroupId>,
     inst_start_time: HashMap<InstanceId, Instant>,
+    /// Round-robin counter for distributing instances across groups
+    next_group_rr: std::cell::Cell<usize>,
+    /// Total number of groups for round-robin
+    num_groups: usize,
 }
 
 impl ResourceManager {
@@ -88,6 +92,8 @@ impl ResourceManager {
             res_allocated: HashMap::new(),
             instance_groups: HashMap::new(),
             inst_start_time: HashMap::new(),
+            next_group_rr: std::cell::Cell::new(0),
+            num_groups,
         }
     }
 
@@ -108,11 +114,16 @@ impl ResourceManager {
         type_id: ResourceTypeId,
         count: usize,
     ) -> Result<Vec<ResourceId>, ResourceError> {
-        // Auto-assign to group 0 if not already assigned (default for backward compatibility)
+        // Round-robin assignment across groups if not already assigned
         let group_id = *self
             .instance_groups
             .entry(inst_id)
-            .or_insert(0);
+            .or_insert_with(|| {
+                let group = self.next_group_rr.get();
+                self.next_group_rr.set((group + 1) % self.num_groups);
+                // eprintln!("[DEBUG] Round-robin assigning instance {:?} to group {}", inst_id, group);
+                group
+            });
 
         let available = self.available(group_id, type_id)?;
 

@@ -291,6 +291,9 @@ pub struct BatchedForwardPassRequest {
     // Trace context for cross-language propagation (W3C traceparent)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trace_context: Option<String>,
+
+    // Target group ID for Data Parallelism routing
+    pub group_id: Option<usize>,
 }
 
 impl BatchedForwardPassRequest {
@@ -320,6 +323,7 @@ impl BatchedForwardPassRequest {
             output_embed_indices: Vec::new(),
             single_token_mode: true,
             trace_context: None,
+            group_id: None,
         }
     }
 
