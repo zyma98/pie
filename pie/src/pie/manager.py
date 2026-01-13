@@ -154,6 +154,22 @@ def start_engine_and_backend(
         device_value = model_config.get("device")
         world_size = len(device_value) if isinstance(device_value, list) else 1
 
+        # Validate that all configured devices are accessible
+        devices_to_validate = (
+            device_value if isinstance(device_value, list) else [device_value]
+        )
+        available_gpus = torch.cuda.device_count()
+
+        for device in devices_to_validate:
+            if device and device.startswith("cuda:"):
+                device_idx = int(device.split(":")[1])
+                if device_idx >= available_gpus:
+                    raise EngineError(
+                        f"Device '{device}' is not accessible. "
+                        f"Only {available_gpus} GPU(s) are visible (cuda:0 to cuda:{available_gpus - 1}). "
+                        f"Check CUDA_VISIBLE_DEVICES environment variable."
+                    )
+
         if world_size > 1:
             # Multi-GPU FFI mode: spawn worker processes
             backend_processes = _start_multi_gpu_ffi_backend(
@@ -168,34 +184,21 @@ def start_engine_and_backend(
             )
             server_handle = backend_processes.pop(0)  # First element is server_handle
         else:
-            # Single-GPU FFI mode: existing in-process path
-            status_update("Initializing backend in-process...")
+            # Single-GPU mode: use same IPC architecture as multi-GPU with world_size=1
+            status_update("Initializing single-GPU backend...")
 
-            # Build the full config for pie_backend
-            full_config = _build_backend_config(
-                engine_config, model_config, authorized_users_path
-            )
-
-            # Initialize Python backend - returns Runtime
-            runtime = _pie.initialize_backend(full_config)
-
-            # Create the FfiQueue FIRST via Python
-            ffi_queue = _pie.FfiQueue()
-
-            # Start the Python worker thread BEFORE starting server
-            # This allows the worker to respond to handshake during Model::new
-            _ffi_worker, stop_event = start_ffi_worker(ffi_queue, runtime)
-
-            # Now start server with FFI mode - the worker is ready to handle requests
-            server_handle = _pie.start_server_with_ffi(
+            # Treat as multi-GPU with 1 device for unified code path
+            backend_processes = _start_multi_gpu_ffi_backend(
+                engine_config,
+                model_config,
                 server_config,
                 authorized_users_path,
-                ffi_queue,
-                1,  # num_groups for single-GPU is always 1
+                [device_value] if isinstance(device_value, str) else device_value,
+                1,  # world_size = 1
+                console,
+                status_update,
             )
-
-            # Wrap worker thread for cleanup
-            backend_processes = [FfiWorkerHandle(_ffi_worker, stop_event)]
+            server_handle = backend_processes.pop(0)  # First element is server_handle
 
     except Exception as e:
         raise EngineError(f"Failed to initialize backend: {e}") from e
@@ -276,13 +279,9 @@ def _build_backend_config(
 def _init_distributed(rank: int, world_size: int, master_port: int, device: str):
     """Initialize torch.distributed for a given rank.
 
-    Sets up environment variables, CUDA device, and process group.
+    Sets up CUDA device and process group using FileStore for rendezvous.
     """
-    # Environment setup
-    os.environ["MASTER_ADDR"] = "localhost"
-    os.environ["MASTER_PORT"] = str(master_port)
-    os.environ["NCCL_TIMEOUT"] = "300"
-    os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
+    import datetime
 
     # Set CUDA device
     torch.cuda.set_device(device)
@@ -292,39 +291,21 @@ def _init_distributed(rank: int, world_size: int, master_port: int, device: str)
         "ignore", message=".*barrier.*device under current context.*"
     )
 
-    # Initialize process group with NCCL options if available
+    # Use FileStore for more robust rendezvous (avoids port conflicts)
+    store_path = f"/tmp/pie_dist_store_{master_port}"
+    store = dist.FileStore(store_path, world_size)
+    timeout = datetime.timedelta(seconds=300)
+
+    # Initialize process group with NCCL
     backend = "nccl" if torch.cuda.is_available() else "gloo"
-    pg_options = None
 
-    if backend == "nccl":
-        try:
-            from torch.distributed import ProcessGroupNCCL
-
-            pg_options = ProcessGroupNCCL.Options()
-            pg_options.config.capture_safe = True
-        except (ImportError, AttributeError):
-            pass
-
-    # Extract device index from device string (e.g., "cuda:0" -> 0)
-    device_id = None
-    if device.startswith("cuda:"):
-        device_id = int(device.split(":")[1])
-
-    if pg_options:
-        dist.init_process_group(
-            backend,
-            rank=rank,
-            world_size=world_size,
-            pg_options=pg_options,
-            device_id=torch.device(device) if device_id is not None else None,
-        )
-    else:
-        dist.init_process_group(
-            backend,
-            rank=rank,
-            world_size=world_size,
-            device_id=torch.device(device) if device_id is not None else None,
-        )
+    dist.init_process_group(
+        backend,
+        store=store,
+        rank=rank,
+        world_size=world_size,
+        timeout=timeout,
+    )
 
 
 def _setup_process_groups(rank: int, group_topology: list[list[int]]) -> dict:
@@ -607,24 +588,25 @@ def _ipc_worker_process(
     # Check if I'm a group leader (first rank in my TP group)
     is_group_leader = tp_rank == 0
 
-    if is_group_leader:
-        # Group leader: connect to IPC and handle requests
-        server_name = ipc_server_names[my_group_id]
-        ipc_queue = _pie.FfiIpcQueue.connect(server_name, my_group_id)
+    try:
+        if is_group_leader:
+            # Group leader: connect to IPC and handle requests
+            server_name = ipc_server_names[my_group_id]
+            ipc_queue = _pie.FfiIpcQueue.connect(server_name, my_group_id)
 
-        # Signal that we're connected and ready
-        ready_queue.put(rank)
+            # Signal that we're connected and ready
+            ready_queue.put(rank)
 
-        # Run IPC worker loop (handles requests from Rust server)
-        _run_ipc_worker_loop(ipc_queue, runtime)
-    else:
-        # Non-leader: signal ready, then run worker loop waiting for commands from leader
-        ready_queue.put(rank)
-        runtime.worker_loop()
-
-    # Cleanup
-    if dist.is_initialized():
-        dist.destroy_process_group()
+            # Run IPC worker loop (handles requests from Rust server)
+            _run_ipc_worker_loop(ipc_queue, runtime)
+        else:
+            # Non-leader: signal ready, then run worker loop waiting for commands from leader
+            ready_queue.put(rank)
+            runtime.worker_loop()
+    finally:
+        # Cleanup - ensure process group is destroyed even on termination
+        if dist.is_initialized():
+            dist.destroy_process_group()
 
 
 def _run_ipc_worker_loop(ipc_queue, runtime):
