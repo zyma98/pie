@@ -510,19 +510,47 @@ def _start_multi_gpu_ffi_backend(
     # Sync with workers then start server
     dist.barrier()
 
-    # Create one FfiQueue per DP group for parallel dispatch
-    ffi_queues = [_pie.FfiQueue() for _ in range(num_groups)]
+    # Hybrid FFI/IPC Architecture:
+    # - Group 0: Uses in-process FFI queue (immediate handshake, same process)
+    # - Groups 1+: Uses IPC channels for cross-process communication (GIL isolation)
+    #
+    # Note: Group 0 uses FFI because the handshake RPC requires an active
+    # Python worker. IPC would cause a deadlock since the Rust function blocks
+    # until handshake completes, but Python can't connect until it returns.
 
-    # Start one FFI worker thread per queue (all share same Runtime)
-    ffi_workers = []
-    for i, q in enumerate(ffi_queues):
-        thread, stop = start_ffi_worker(q, runtime, thread_name=f"ffi-group-{i}")
-        ffi_workers.append(FfiWorkerHandle(thread, stop))
+    # Create FFI queue for Group 0 (local)
+    local_queue = _pie.FfiQueue()
 
-    # Pass all queues to Rust - it will route fire_batch to group-specific queues
-    server_handle = _pie.start_server_with_ffi(
-        server_config, authorized_users_path, ffi_queues
+    # Start FFI worker THREAD for Group 0
+    # This runs the polling loop in a background thread, not the main thread
+    ffi_thread, ffi_stop = start_ffi_worker(
+        local_queue, runtime, thread_name="ffi-group-0"
     )
+    ffi_workers = [FfiWorkerHandle(ffi_thread, ffi_stop)]
+
+    # Calculate number of remote groups (Groups 1+)
+    num_ipc_groups = num_groups - 1
+
+    if num_ipc_groups > 0:
+        # Use hybrid architecture: FFI for Group 0, IPC for Groups 1+
+        server_handle, ipc_server_names = _pie.start_server_with_ipc(
+            server_config, authorized_users_path, local_queue, num_ipc_groups
+        )
+
+        # Send IPC server names to group leaders (Groups 1+) via ControlChannel
+        for group_id in range(1, num_groups):
+            server_name = ipc_server_names[group_id - 1]
+            msg = {
+                "type": "IPC_SERVER_NAME",
+                "group_id": group_id,
+                "server_name": server_name,
+            }
+            pie_utils._control_channel.send(msg, destination_group=group_id)
+    else:
+        # Single group mode: use regular FFI
+        server_handle = _pie.start_server_with_ffi(
+            server_config, authorized_users_path, [local_queue]
+        )
 
     # Return the context objects (ctx) instead of raw processes so we can join gracefully
     return [server_handle, ctx] + ffi_workers
@@ -547,6 +575,90 @@ def _calculate_topology(world_size: int, tp_degree: int) -> list[list[int]]:
         topology.append(group_ranks)
 
     return topology
+
+
+def _run_ipc_worker_loop(ipc_queue, runtime):
+    """Run the IPC worker loop for a group leader.
+
+    This is similar to the FFI worker loop in server.py, but uses IPC for
+    cross-process communication. This allows each group leader to have its
+    own Python GIL, eliminating GIL contention between groups.
+
+    Args:
+        ipc_queue: FfiIpcQueue instance connected to Rust
+        runtime: Runtime instance to dispatch calls to
+    """
+    import msgpack
+    from pie_worker.server import (
+        STATUS_OK,
+        STATUS_METHOD_NOT_FOUND,
+        STATUS_INTERNAL_ERROR,
+    )
+
+    # Method dispatch table
+    methods = {
+        "handshake": runtime.handshake_rpc,
+        "query": runtime.query_rpc,
+        "fire_batch": runtime.fire_batch,
+        "embed_image": runtime.embed_image_rpc,
+        "initialize_adapter": runtime.initialize_adapter_rpc,
+        "update_adapter": runtime.update_adapter_rpc,
+        "upload_adapter": runtime.upload_adapter_rpc,
+        "download_adapter": runtime.download_adapter_rpc,
+    }
+
+    shutdown_requested = False
+    poll_timeout_ms = 100
+
+    try:
+        while not shutdown_requested:
+            # Poll the IPC queue (releases GIL while waiting)
+            request = ipc_queue.poll_blocking(poll_timeout_ms)
+            if request is None:
+                continue  # Timeout, try again
+
+            request_id, method, payload = request
+
+            try:
+                # Unpack args
+                args = msgpack.unpackb(payload)
+
+                # Check for shutdown
+                if method == "shutdown":
+                    shutdown_requested = True
+                    response = msgpack.packb(None)
+                    ipc_queue.respond(request_id, response)
+                    continue
+
+                # Get handler
+                fn = methods.get(method)
+                if fn is None:
+                    response = msgpack.packb(f"Method not found: {method}")
+                    ipc_queue.respond(request_id, response)
+                    continue
+
+                # Call handler
+                if isinstance(args, dict):
+                    result = fn(**args)
+                elif isinstance(args, (list, tuple)):
+                    result = fn(*args)
+                else:
+                    result = fn(args)
+
+                # Pack and respond
+                response = msgpack.packb(result)
+                ipc_queue.respond(request_id, response)
+
+            except Exception as e:
+                import traceback
+
+                tb = traceback.format_exc()
+                print(f"[IPC Worker Error] {method}: {e}\n{tb}")
+                response = msgpack.packb(str(e))
+                ipc_queue.respond(request_id, response)
+    finally:
+        # Ensure cleanup when loop stops
+        runtime.shutdown()
 
 
 def _ffi_worker_process(
@@ -601,9 +713,33 @@ def _ffi_worker_process(
         compute_pg_map=compute_pg_map,
     )
 
-    # Sync with rank 0 then run worker loop
+    # Sync with rank 0 then start working
     dist.barrier()
-    runtime.worker_loop()
+
+    # Check if I'm a group leader for a remote group (group_id > 0)
+    # Group leader = first rank in the group
+    is_group_leader = (my_group_id > 0) and (rank == group_topology[my_group_id][0])
+
+    if is_group_leader:
+        # Wait for IPC server name from Rank 0
+        msg = pie_utils._control_channel.recv(timeout=30.0)
+
+        if msg and msg.get("type") == "IPC_SERVER_NAME":
+            server_name = msg["server_name"]
+            group_id = msg["group_id"]
+
+            # Connect to IPC queue and poll it directly
+            # This gives us our own GIL - no contention with other groups!
+            ipc_queue = _pie.FfiIpcQueue.connect(server_name, group_id)
+
+            # Run IPC worker loop (similar to FFI worker but via IPC)
+            _run_ipc_worker_loop(ipc_queue, runtime)
+        else:
+            # Fallback to regular worker loop if no IPC setup
+            runtime.worker_loop()
+    else:
+        # Non-leader ranks use the regular control channel worker loop
+        runtime.worker_loop()
 
     # Clean exit without running Python finalizers that might hang
     if dist.is_initialized():

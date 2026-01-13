@@ -855,6 +855,15 @@ class Runtime:
             and 0 not in self.group_topology[target_group_id]
         )
 
+        # IPC MODE: If we're NOT rank 0, we received this fire_batch directly via IPC.
+        # In this case, we ARE the group leader and should execute locally.
+        # Don't try to use the control channel - execute the batch right here.
+        if self.config.rank != 0:
+            # This process received fire_batch via IPC - execute locally
+            is_remote_dp_group = False
+            # Override target_group_id to our own group for local execution
+            target_group_id = self.group_id
+
         # PROFILING: Track request distribution and timings
         if not hasattr(self, "_dp_stats"):
             self._dp_stats = {
@@ -985,8 +994,16 @@ class Runtime:
             t_get_sampling_meta = time.perf_counter() - t0
 
             # Broadcast to workers if multi-GPU TP group
+            # Skip broadcast if:
+            # - Single process mode (world_size == 1)
+            # - IPC mode (rank != 0) - we're already the group leader processing locally
             t0 = time.perf_counter()
-            if self.config.world_size > 1:
+            should_broadcast = (
+                self.config.world_size > 1
+                and self.config.rank == 0  # Only rank 0 broadcasts
+                and target_group_id == 0  # Only for local TP groups
+            )
+            if should_broadcast:
                 msg = {
                     "type": "STEP",
                     "inputs": inputs,
