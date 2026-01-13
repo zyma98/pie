@@ -446,6 +446,11 @@ impl Model {
         // Channel for batch completions (batch_size, tokens, latency, group_id)
         let (completion_tx, mut completion_rx) = mpsc::unbounded_channel::<(usize, usize, Duration, usize)>();
 
+        // PROFILING: Track request rates and batch firing
+        let mut prof_requests_received: Vec<usize> = vec![0; num_groups];
+        let mut prof_batches_fired: Vec<usize> = vec![0; num_groups];
+        let mut prof_last_report = Instant::now();
+
         loop {
             // Process any completed batches (non-blocking) - from any group
             while let Ok((batch_size, tokens_in_batch, latency, group_id)) = completion_rx.try_recv() {
@@ -484,6 +489,7 @@ impl Model {
                 }
                 group_tokens[group_id] += req.input_tokens.len();
                 batches[group_id].push((req, tx));
+                prof_requests_received[group_id] += 1;
             }
 
             // Try to accumulate more requests (non-blocking)
@@ -498,6 +504,7 @@ impl Model {
                         }
                         group_tokens[group_id] += req.input_tokens.len();
                         batches[group_id].push((req, tx));
+                        prof_requests_received[group_id] += 1;
 
                         // Stop accumulating if THIS group hit capacity to avoid latency spikes
                         if batches[group_id].len() >= max_batch_size || group_tokens[group_id] >= max_batch_tokens {
@@ -530,6 +537,7 @@ impl Model {
                     group_tokens[group_id] = 0;
                     in_flight_counts[group_id] += 1;
                     fired_any = true;
+                    prof_batches_fired[group_id] += 1;
 
                      {
                         let mut sched = scheduler.lock().unwrap();
@@ -549,6 +557,20 @@ impl Model {
                          completion_tx_clone.send((batch_size, tokens_in_batch, latency, group_id)).ok();
                     });
                 }
+            }
+
+            // PROFILING: Report every 10 seconds
+            if prof_last_report.elapsed().as_secs() >= 10 {
+                let total_reqs: usize = prof_requests_received.iter().sum();
+                let total_batches: usize = prof_batches_fired.iter().sum();
+                eprintln!("[RUST PROFILING] Reqs: {:?} ({}) | Batches: {:?} ({}) | InFlight: {:?}",
+                    prof_requests_received, total_reqs,
+                    prof_batches_fired, total_batches,
+                    in_flight_counts);
+                // Reset counters
+                for c in &mut prof_requests_received { *c = 0; }
+                for c in &mut prof_batches_fired { *c = 0; }
+                prof_last_report = Instant::now();
             }
 
             // Wait logic
