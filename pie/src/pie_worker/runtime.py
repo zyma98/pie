@@ -134,17 +134,43 @@ class Runtime:
         if self.log_queue is not None:
             self.log_queue.put({"message": msg, "level": level})
 
-    def __init__(self, config: RuntimeConfig, log_queue: object = None):
+    def __init__(
+        self,
+        config: RuntimeConfig,
+        log_queue: object = None,
+        group_id: int = 0,
+        result_queue: object = None,
+        result_queues: list = None,
+        process_groups: dict = None,
+        group_topology: list = None,
+    ):
         """
         Initialize the runtime.
 
         Args:
             config: Runtime configuration
             log_queue: Optional queue for sending logs back to controller
+            group_id: Data Parallel Execution Group ID (Default/Local group)
+            result_queue: Optional queue for results (single worker usage)
+            result_queues: List of queues for all groups (Rank 0 only)
+            process_groups: Dict of {group_id: ProcessGroup} for all groups (Rank 0 only)
+            group_topology: List of groups [[rank0, rank1], [rank2, rank3], ...]
         """
         self.config = config
         self.log_queue = log_queue
+        self.group_id = group_id
+        self.result_queue = result_queue
+        self.result_queues = result_queues if result_queues is not None else []
+        self.process_groups = process_groups if process_groups is not None else {}
+        self.group_topology = group_topology if group_topology is not None else []
         self.adapters = {}
+
+        # Determine if this rank is the group leader (lowest rank in its group)
+        self.is_group_leader = False
+        if self.group_topology and 0 <= group_id < len(self.group_topology):
+            my_group = self.group_topology[group_id]
+            if my_group and config.rank == min(my_group):
+                self.is_group_leader = True
 
         # Initialize telemetry (only on rank 0 to avoid duplicate spans)
         if config.rank == 0:
@@ -168,10 +194,12 @@ class Runtime:
         # Load model weights using ModelLoader
         loader = ModelLoader(config, log_queue=log_queue)
 
+        print(f"[DEBUG R{config.rank}] Runtime: Loading weights...")
         self._log("Loading model weights", "DEBUG")
 
         weights, normalized_arch, self.info = loader.load()
 
+        print(f"[DEBUG R{config.rank}] Runtime: Weights loaded")
         # Store snapshot_dir for tokenizer loading
         self.snapshot_dir = loader.snapshot_dir
 
@@ -179,6 +207,7 @@ class Runtime:
 
         # Store architecture type
         self.type = self.info["architecture"]["type"]
+        print(f"[DEBUG R{config.rank}] Runtime: Creating engine for {self.type}...")
 
         # Create model-specific components based on architecture
         match self.type:
@@ -582,7 +611,9 @@ class Runtime:
         while not shutdown_requested:
             # Receive control message
             try:
-                msg = utils.broadcast_struct(None, src=0, device=device)
+                # Use my local process group
+                my_pg = self.process_groups.get(self.group_id)
+                msg = utils.broadcast_struct(None, src=0, device=device, group=my_pg)
             except Exception:
                 break
 
@@ -600,12 +631,28 @@ class Runtime:
                     inputs = msg["inputs"]
                     sampling_metadata = msg["sampling_metadata"]
                     try:
-                        self._run_step(inputs, sampling_metadata)
+                        result = self._run_step(inputs, sampling_metadata)
+
+                        # If I'm the group leader of a secondary group, push result to result_queue
+                        if (
+                            self.is_group_leader
+                            and self.group_id > 0
+                            and self.result_queue is not None
+                        ):
+                            self.result_queue.put(result)
                     except Exception as e:
                         # Log error but continue - don't let one error hang the whole system
                         print(f"Worker {self.config.rank} _run_step error: {e}")
                         # Sync CUDA to clear any pending operations
                         torch.cuda.synchronize()
+
+                        # Push error result to avoid deadlock
+                        if (
+                            self.is_group_leader
+                            and self.group_id > 0
+                            and self.result_queue is not None
+                        ):
+                            self.result_queue.put(None)
 
                 elif msg_type == "INIT_ADAPTER":
                     # Initialize adapter
@@ -752,18 +799,56 @@ class Runtime:
 
         # Broadcast to workers if multi-GPU
         t0 = time.perf_counter()
+        # Use group_id from kwargs if present (from Rust), else default to local
+        target_group_id = kwargs.get("group_id", self.group_id)
+
         if self.config.world_size > 1:
             msg = {
                 "type": "STEP",
                 "inputs": inputs,
                 "sampling_metadata": sampling_metadata,
             }
-            utils.broadcast_struct(msg, src=0, device=device)
+            target_pg = self.process_groups.get(target_group_id)
+
+            utils.broadcast_struct(
+                msg,
+                src=0,
+                device=device,
+                group=target_pg,
+                group_id=target_group_id,
+            )
         t_broadcast = time.perf_counter() - t0
 
-        # Execute inference
+        # Execute inference - either locally (Group 0) or wait for result (secondary groups)
         t0 = time.perf_counter()
-        sampling_results = self._run_step(inputs, sampling_metadata)
+        if target_group_id == 0 or target_group_id == self.group_id:
+            # Group 0 or my own group: Execute locally
+            sampling_results = self._run_step(inputs, sampling_metadata)
+        else:
+            # Secondary group: Wait for result from that group's leader
+            if self.result_queues and target_group_id < len(self.result_queues):
+                try:
+                    # Wait with timeout to avoid infinite hang
+                    sampling_results = self.result_queues[target_group_id].get(
+                        timeout=300
+                    )
+                    if sampling_results is None:
+                        # Error occurred in worker, return empty results
+                        print(
+                            f"[Warning] Group {target_group_id} returned error result"
+                        )
+                        sampling_results = []
+                except Exception as e:
+                    print(
+                        f"[Error] Timeout waiting for group {target_group_id} result: {e}"
+                    )
+                    sampling_results = []
+            else:
+                # Fallback: Execute locally (should not happen in proper DP setup)
+                print(
+                    f"[Warning] No result_queue for group {target_group_id}, executing locally"
+                )
+                sampling_results = self._run_step(inputs, sampling_metadata)
         t_inference = time.perf_counter() - t0
 
         # Package responses
