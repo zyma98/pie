@@ -29,7 +29,6 @@ from . import path as pie_path
 from . import _pie
 
 from pie_worker import utils as pie_utils
-from pie_worker.control_channel import ControlChannel, create_control_channels
 from pie_worker.server import start_ffi_worker
 from pie_worker.config import RuntimeConfig
 from pie_worker.runtime import Runtime
@@ -326,22 +325,6 @@ def _init_distributed(rank: int, world_size: int, master_port: int, device: str)
             world_size=world_size,
             device_id=torch.device(device) if device_id is not None else None,
         )
-
-
-def _setup_control_channel(rank: int, world_size: int, control_queues: list):
-    """Set up the IPC control channel for this rank."""
-
-
-def _setup_control_channel(
-    rank: int,
-    world_size: int,
-    control_queues: list,
-    group_topology: list[list[int]] | None = None,
-):
-    """Set up the IPC control channel for this rank."""
-    pie_utils._control_channel = ControlChannel(
-        rank, world_size, control_queues, group_topology
-    )
 
 
 def _setup_process_groups(rank: int, group_topology: list[list[int]]) -> dict:
@@ -767,107 +750,6 @@ def _ipc_group_worker(
     # Connect to IPC and run worker loop
     ipc_queue = _pie.FfiIpcQueue.connect(server_name, group_id)
     _run_ipc_worker_loop(ipc_queue, runtime)
-
-
-def _ffi_worker_process(
-    local_rank: int,  # mp.spawn passes 0-indexed local rank
-    world_size: int,
-    devices: list[str],
-    master_port: int,
-    control_queues: list,
-    config_dict: dict,
-    group_topology: list[list[int]],
-    result_queues: list,
-):
-    """Worker process for multi-GPU FFI mode.
-
-    Note: mp.spawn passes local_rank starting at 0, so actual rank = local_rank + 1.
-    """
-    """Worker process for multi-GPU FFI mode.
-
-    Note: mp.spawn passes local_rank starting at 0, so actual rank = local_rank + 1.
-    """
-    rank = local_rank + 1
-
-    # Ignore SIGTERM initially (parent handles shutdown)
-    signal.signal(signal.SIGTERM, signal.SIG_IGN)
-
-    # Determine my group to find my result queue
-    my_group_id = 0
-    for i, group in enumerate(group_topology):
-        if rank in group:
-            my_group_id = i
-            break
-
-    my_result_queue = result_queues[my_group_id]
-
-    # Initialize distributed, control channel, and runtime
-    _init_distributed(rank, world_size, master_port, devices[rank])
-    _setup_control_channel(rank, world_size, control_queues, group_topology)
-    pg_map = _setup_process_groups(rank, group_topology)
-    compute_pg_map = _setup_compute_process_groups(rank, group_topology)
-
-    runtime = _create_runtime(
-        config_dict,
-        devices,
-        rank,
-        world_size,
-        group_topology,
-        result_queue=my_result_queue,
-        result_queues=None,  # Workers don't need all queues
-        pg_map=pg_map,
-        compute_pg_map=compute_pg_map,
-    )
-
-    # Sync with rank 0 then start working
-    dist.barrier()
-
-    # Check if I'm a group leader for a remote group (group_id > 0)
-    # Group leader = first rank in the group
-    is_group_leader = (my_group_id > 0) and (rank == group_topology[my_group_id][0])
-
-    if is_group_leader:
-        # Wait for IPC server name from Rank 0
-        msg = pie_utils._control_channel.recv(timeout=30.0)
-
-        if msg and msg.get("type") == "IPC_SERVER_NAME":
-            server_name = msg["server_name"]
-            group_id = msg["group_id"]
-
-            # Connect to IPC queue and poll it directly
-            # This gives us our own GIL - no contention with other groups!
-            ipc_queue = _pie.FfiIpcQueue.connect(server_name, group_id)
-
-            # Run IPC worker loop (similar to FFI worker but via IPC)
-            _run_ipc_worker_loop(ipc_queue, runtime)
-        else:
-            # Fallback to regular worker loop if no IPC setup
-            runtime.worker_loop()
-    else:
-        # Non-leader ranks use the regular control channel worker loop
-        runtime.worker_loop()
-
-    # Clean exit without running Python finalizers that might hang
-    if dist.is_initialized():
-        dist.destroy_process_group()
-
-    # Cleanup control channel resources
-    if pie_utils._control_channel is not None:
-        pie_utils._control_channel.cleanup()
-        pie_utils._control_channel = None
-
-    # Clear local references
-    control_queues = None
-
-    # Force GC to cleanup Queues and other resources
-    # time imported globally
-
-    # Give background threads a moment to exit
-    time.sleep(0.1)
-
-    gc.collect()
-
-    return
 
 
 def wait_for_backends(
