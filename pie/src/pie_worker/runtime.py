@@ -15,6 +15,7 @@ import random
 import numpy as np
 from . import utils
 import torch
+import torch.distributed as dist
 
 from .config import RuntimeConfig
 from .batching import Batch
@@ -134,17 +135,48 @@ class Runtime:
         if self.log_queue is not None:
             self.log_queue.put({"message": msg, "level": level})
 
-    def __init__(self, config: RuntimeConfig, log_queue: object = None):
+    def __init__(
+        self,
+        config: RuntimeConfig,
+        log_queue: object = None,
+        group_id: int = 0,
+        result_queue: object = None,
+        result_queues: list = None,
+        process_groups: dict = None,
+        compute_process_groups: dict = None,
+        group_topology: list = None,
+    ):
         """
         Initialize the runtime.
 
         Args:
             config: Runtime configuration
             log_queue: Optional queue for sending logs back to controller
+            group_id: Data Parallel Execution Group ID (Default/Local group)
+            result_queue: Optional queue for results (single worker usage)
+            result_queues: List of queues for all groups (Rank 0 only)
+            process_groups: Dict of {group_id: ProcessGroup} for all groups (Rank 0 only)
+            compute_process_groups: Dict of {group_id: ProcessGroup} for TP sync
+            group_topology: List of groups [[rank0, rank1], [rank2, rank3], ...]
         """
         self.config = config
         self.log_queue = log_queue
+        self.group_id = group_id
+        self.result_queue = result_queue
+        self.result_queues = result_queues if result_queues is not None else []
+        self.process_groups = process_groups if process_groups is not None else {}
+        self.compute_process_groups = (
+            compute_process_groups if compute_process_groups is not None else {}
+        )
+        self.group_topology = group_topology if group_topology is not None else []
         self.adapters = {}
+
+        # Determine if this rank is the group leader (lowest rank in its group)
+        self.is_group_leader = False
+        if self.group_topology and 0 <= group_id < len(self.group_topology):
+            my_group = self.group_topology[group_id]
+            if my_group and config.rank == min(my_group):
+                self.is_group_leader = True
 
         # Initialize telemetry (only on rank 0 to avoid duplicate spans)
         if config.rank == 0:
@@ -168,10 +200,12 @@ class Runtime:
         # Load model weights using ModelLoader
         loader = ModelLoader(config, log_queue=log_queue)
 
+        # print(f"[DEBUG R{config.rank}] Runtime: Loading weights...")
         self._log("Loading model weights", "DEBUG")
 
         weights, normalized_arch, self.info = loader.load()
 
+        # print(f"[DEBUG R{config.rank}] Runtime: Weights loaded")
         # Store snapshot_dir for tokenizer loading
         self.snapshot_dir = loader.snapshot_dir
 
@@ -179,6 +213,7 @@ class Runtime:
 
         # Store architecture type
         self.type = self.info["architecture"]["type"]
+        # print(f"[DEBUG R{config.rank}] Runtime: Creating engine for {self.type}...")
 
         # Create model-specific components based on architecture
         match self.type:
@@ -196,6 +231,9 @@ class Runtime:
                     self.model_config,
                     config,
                     weights,
+                    compute_process_group=self.compute_process_groups.get(
+                        self.group_id
+                    ),
                 )
                 # Create adapter cache
                 self.adapter_at_layer = llama3.create_adapter_cache(
@@ -223,6 +261,9 @@ class Runtime:
                     self.model_config,
                     config,
                     weights,
+                    # qwen2 not updated yet, leaving as is or assuming it handles extra kwargs?
+                    # Actually I didn't update qwen2.py. Only qwen3.py.
+                    # Use unmodified qwen2 for now.
                 )
                 # Create adapter cache
                 self.adapter_at_layer = qwen2.create_adapter_cache(
@@ -247,6 +288,9 @@ class Runtime:
                     self.model_config,
                     config,
                     weights,
+                    compute_process_group=self.compute_process_groups.get(
+                        self.group_id
+                    ),
                 )
 
                 # Create adapter cache
@@ -461,9 +505,7 @@ class Runtime:
 
                 adapter.upload(name, data)
 
-    def download_adapter(
-        self, req: message.DownloadAdapterRequest
-    ) -> message.DownloadAdapterResponse:
+    def download_adapter(self, req: message.DownloadAdapterRequest) -> None:
         """Download adapter weights."""
         args = {"adapter_ptr": req.adapter_ptr, "name": req.name}
 
@@ -471,8 +513,7 @@ class Runtime:
             msg = {"type": "DOWNLOAD_ADAPTER", "kwargs": args}
             utils.broadcast_struct(msg, src=0, device=self.config.device)
 
-        data = self._download_adapter(**args)
-        return message.DownloadAdapterResponse(adapter_data=data)
+        self._download_adapter(**args)
 
     def _download_adapter(self, adapter_ptr: int, name: str) -> bytes:
         if adapter_ptr in self.adapters:
@@ -509,11 +550,11 @@ class Runtime:
         # print parameters
         # print(f"Initializing adapter {adapter_ptr} with rank {rank}, alpha {alpha}, population size {population_size}, mu fraction {mu_fraction}, initial sigma {initial_sigma}")
         # Calculate local shard sizes for distributed adapters
-        world_size = self.config.world_size
-        gpu_rank = self.config.rank
+        tp_size = self.config.tensor_parallel_size
+        gpu_rank = self.config.rank % tp_size
 
-        local_num_q_heads = cfg.num_q_heads // world_size
-        local_num_kv_heads = cfg.num_kv_heads // world_size
+        local_num_q_heads = cfg.num_q_heads // tp_size
+        local_num_kv_heads = cfg.num_kv_heads // tp_size
 
         # Local output features (sharded up-projection)
         local_out_features = [
@@ -540,7 +581,7 @@ class Runtime:
             device=self.config.device,
             dtype=self.config.activation_dtype,
             gpu_rank=gpu_rank,
-            world_size=world_size,
+            world_size=tp_size,
         )
 
     @torch.inference_mode()
@@ -585,7 +626,13 @@ class Runtime:
         while not shutdown_requested:
             # Receive control message
             try:
-                msg = utils.broadcast_struct(None, src=0, device=device)
+                # Use compute_process_groups for TP-only broadcast
+                # src must be the leader's GLOBAL rank, not group-local rank
+                my_pg = self.compute_process_groups.get(self.group_id)
+                leader_global_rank = self.group_topology[self.group_id][0]
+                msg = utils.broadcast_struct(
+                    None, src=leader_global_rank, device=device, group=my_pg
+                )
             except Exception:
                 break
 
@@ -599,16 +646,76 @@ class Runtime:
                 msg_type = msg.get("type")
 
                 if msg_type == "STEP":
-                    # Execute inference step
+                    # Execute inference step (tensors already broadcast from Rank 0)
                     inputs = msg["inputs"]
                     sampling_metadata = msg["sampling_metadata"]
                     try:
-                        self._run_step(inputs, sampling_metadata)
+                        result = self._run_step(inputs, sampling_metadata)
+
+                        # If I'm the group leader of a secondary group, push result to result_queue
+                        if (
+                            self.is_group_leader
+                            and self.group_id > 0
+                            and self.result_queue is not None
+                        ):
+                            self.result_queue.put(result)
                     except Exception as e:
                         # Log error but continue - don't let one error hang the whole system
                         print(f"Worker {self.config.rank} _run_step error: {e}")
                         # Sync CUDA to clear any pending operations
                         torch.cuda.synchronize()
+
+                        # Push error result to avoid deadlock
+                        if (
+                            self.is_group_leader
+                            and self.group_id > 0
+                            and self.result_queue is not None
+                        ):
+                            self.result_queue.put(None)
+
+                elif msg_type == "STEP_RAW":
+                    # FAST PATH for DP: Receive raw kwargs, build tensors locally
+                    # This avoids synchronous dist.broadcast() AND Batch building on Rank 0
+                    from .batching import Batch
+
+                    kwargs = msg["kwargs"]
+                    try:
+                        # Build batch and tensors locally
+                        batch = Batch(
+                            kwargs,
+                            self.config.kv_page_size,
+                            self.config.max_dist_size,
+                            self.adapters,
+                        )
+                        device = self.config.device
+                        inputs = batch.get_model_inputs(device)
+                        sampling_metadata = batch.get_sampling_metadata(
+                            device, self.config.activation_dtype
+                        )
+
+                        # Execute inference
+                        sampling_results = self._run_step(inputs, sampling_metadata)
+
+                        # Package responses locally (critical: moves this work to worker)
+                        responses = batch.create_responses(sampling_results)
+                        results = [
+                            {"tokens": resp.tokens, "dists": resp.dists}
+                            for resp in responses
+                        ]
+
+                        # Return fully packaged response dict
+                        if self.result_queue is not None:
+                            self.result_queue.put(
+                                {
+                                    "results": results,
+                                    "batch_size": len(responses),
+                                }
+                            )
+                    except Exception as e:
+                        print(f"Worker {self.config.rank} STEP_RAW error: {e}")
+                        torch.cuda.synchronize()
+                        if self.result_queue is not None:
+                            self.result_queue.put(None)
 
                 elif msg_type == "INIT_ADAPTER":
                     # Initialize adapter
@@ -639,8 +746,18 @@ class Runtime:
         Returns:
             Sampling results (only valid on Rank 0 usually, but we return whatever comes out)
         """
+        # TP Barrier: Only sync if TP degree > 1
         if self.config.world_size > 1:
-            torch.distributed.barrier()
+            # If we have compute process groups, use them for TP sync
+            if self.compute_process_groups:
+                my_compute_pg = self.compute_process_groups.get(self.group_id)
+                # Only barrier if TP degree > 1 (group size > 1)
+                if my_compute_pg and dist.get_world_size(group=my_compute_pg) > 1:
+                    dist.barrier(group=my_compute_pg)
+            else:
+                # Fallback to global barrier (legacy behavior)
+
+                dist.barrier()
 
         # 2. Embed inputs
         input_embeds = self.engine.embed_inputs(inputs)
@@ -730,44 +847,209 @@ class Runtime:
 
         t_start = time.perf_counter()
 
-        # Build internal Batch object from pre-batched data
-        t0 = time.perf_counter()
-        batch = Batch(
-            kwargs,
-            self.config.kv_page_size,
-            self.config.max_dist_size,
-            self.adapters,
+        # Use group_id from kwargs if present (from Rust), else default to local
+        target_group_id = kwargs.get("group_id", self.group_id)
+
+        # Check if this is a remote DP group (only relevant for central coordinator mode)
+        # In symmetric IPC mode, each group leader handles its own group, so this is always False
+        is_remote_dp_group = (
+            target_group_id != 0
+            and self.group_topology
+            and target_group_id < len(self.group_topology)
+            and 0 not in self.group_topology[target_group_id]
         )
-        build_timing = batch.timing
-        t_build_batch = time.perf_counter() - t0
 
-        # Get model inputs and sampling metadata
-        device = self.config.device
-        t0 = time.perf_counter()
-        inputs = batch.get_model_inputs(device)
-        t_get_inputs = time.perf_counter() - t0
+        # SYMMETRIC IPC MODE: If target_group_id == self.group_id, we ARE the group leader
+        # and should execute locally. The Rust server already routed the request to us.
+        # This check supersedes the rank != 0 check for the symmetric architecture.
+        if target_group_id == self.group_id:
+            is_remote_dp_group = False
 
-        t0 = time.perf_counter()
-        sampling_metadata = batch.get_sampling_metadata(
-            device, self.config.activation_dtype
-        )
-        t_get_sampling_meta = time.perf_counter() - t0
-
-        # Broadcast to workers if multi-GPU
-        t0 = time.perf_counter()
-        if self.config.world_size > 1:
-            msg = {
-                "type": "STEP",
-                "inputs": inputs,
-                "sampling_metadata": sampling_metadata,
+        # PROFILING: Track request distribution and timings
+        if not hasattr(self, "_dp_stats"):
+            self._dp_stats = {
+                "group_counts": {},
+                "step_raw_times": [],
+                "local_times": [],
+                "last_report": time.perf_counter(),
             }
-            utils.broadcast_struct(msg, src=0, device=device)
-        t_broadcast = time.perf_counter() - t0
+        stats = self._dp_stats
+        stats["group_counts"][target_group_id] = (
+            stats["group_counts"].get(target_group_id, 0) + 1
+        )
 
-        # Execute inference
-        t0 = time.perf_counter()
-        sampling_results = self._run_step(inputs, sampling_metadata)
-        t_inference = time.perf_counter() - t0
+        if is_remote_dp_group and self.config.world_size > 1:
+            # FAST PATH: Send raw kwargs to group leader, let them build tensors AND package responses
+            # This eliminates ALL Batch processing on Rank 0 for remote DP groups
+            t0 = time.perf_counter()
+            msg = {"type": "STEP_RAW", "kwargs": kwargs}
+            utils._control_channel.send(msg, destination_group=target_group_id)
+            t_broadcast = time.perf_counter() - t0
+
+            # Wait for fully packaged result from worker
+            t0 = time.perf_counter()
+            packaged_result = None
+            if self.result_queues and target_group_id < len(self.result_queues):
+                try:
+                    packaged_result = self.result_queues[target_group_id].get(
+                        timeout=300
+                    )
+                    if packaged_result is None:
+                        print(
+                            f"[Warning] Group {target_group_id} returned error result"
+                        )
+                except Exception as e:
+                    print(
+                        f"[Error] Timeout waiting for group {target_group_id} result: {e}"
+                    )
+            t_inference = time.perf_counter() - t0
+
+            # Use pre-packaged results directly (no Batch building!)
+            if (
+                packaged_result
+                and isinstance(packaged_result, dict)
+                and "results" in packaged_result
+            ):
+                results = packaged_result["results"]
+            else:
+                results = []
+
+            # Dummy timing values (no local batch processing happened)
+            t_build_batch = 0.0
+            t_get_inputs = 0.0
+            t_get_sampling_meta = 0.0
+            t_create_responses = 0.0
+            build_timing = {
+                "decode_u32": 0.0,
+                "mask_loop": 0.0,
+                "brle_decode": 0.0,
+                "sampler_loop": 0.0,
+            }
+
+            t_total = time.perf_counter() - t_start
+
+            # PROFILING: Track timing per path and report periodically
+            stats["step_raw_times"].append(t_total)
+
+            # Report every 10 seconds
+            now = time.perf_counter()
+            if now - stats["last_report"] > 10.0:
+                stats["last_report"] = now
+                total_reqs = sum(stats["group_counts"].values())
+                avg_raw = sum(stats["step_raw_times"]) / max(
+                    len(stats["step_raw_times"]), 1
+                )
+                avg_local = sum(stats["local_times"]) / max(
+                    len(stats["local_times"]), 1
+                )
+                print(
+                    f"[PROFILING] Groups: {stats['group_counts']} | "
+                    f"Total: {total_reqs} | "
+                    f"STEP_RAW avg: {avg_raw*1000:.1f}ms ({len(stats['step_raw_times'])}) | "
+                    f"Local avg: {avg_local*1000:.1f}ms ({len(stats['local_times'])})"
+                )
+                # Reset for next window
+                stats["step_raw_times"] = []
+                stats["local_times"] = []
+
+            # Record latency stats
+            self._latency_stats.record_span(
+                StepTiming(
+                    build_batch=t_build_batch,
+                    get_inputs=t_get_inputs,
+                    get_sampling_meta=t_get_sampling_meta,
+                    broadcast=t_broadcast,
+                    inference=t_inference,
+                    create_responses=t_create_responses,
+                    total=t_total,
+                    decode_u32=build_timing["decode_u32"],
+                    mask_loop=build_timing["mask_loop"],
+                    brle_decode=build_timing["brle_decode"],
+                    sampler_loop=build_timing["sampler_loop"],
+                ),
+            )
+
+            return {"results": results}
+
+        else:
+            # LOCAL PATH: Build tensors and execute (or broadcast for TP groups)
+            t0 = time.perf_counter()
+            batch = Batch(
+                kwargs,
+                self.config.kv_page_size,
+                self.config.max_dist_size,
+                self.adapters,
+            )
+            build_timing = batch.timing
+            t_build_batch = time.perf_counter() - t0
+
+            device = self.config.device
+            t0 = time.perf_counter()
+            inputs = batch.get_model_inputs(device)
+            t_get_inputs = time.perf_counter() - t0
+
+            t0 = time.perf_counter()
+            sampling_metadata = batch.get_sampling_metadata(
+                device, self.config.activation_dtype
+            )
+            t_get_sampling_meta = time.perf_counter() - t0
+
+            # Broadcast to workers if multi-GPU TP group
+            # Skip broadcast if:
+            # - Single process mode (world_size == 1)
+            # - IPC mode (rank != 0) - we're already the group leader processing locally
+            t0 = time.perf_counter()
+            should_broadcast = (
+                self.config.world_size > 1
+                and self.config.rank == 0  # Only group leader (tp_rank 0) broadcasts
+                and target_group_id == self.group_id  # Only for MY TP group
+            )
+            if should_broadcast:
+                msg = {
+                    "type": "STEP",
+                    "inputs": inputs,
+                    "sampling_metadata": sampling_metadata,
+                }
+                # Use compute_process_groups for TP-only broadcast
+                # src must be the leader's GLOBAL rank, not group-local rank
+                target_pg = self.compute_process_groups.get(target_group_id)
+                leader_global_rank = self.group_topology[target_group_id][0]
+                utils.broadcast_struct(
+                    msg,
+                    src=leader_global_rank,
+                    device=device,
+                    group=target_pg,
+                    group_id=target_group_id,
+                )
+            t_broadcast = time.perf_counter() - t0
+
+            # Execute inference locally
+            t0 = time.perf_counter()
+            if target_group_id == self.group_id:
+                sampling_results = self._run_step(inputs, sampling_metadata)
+            else:
+                # TP group with Rank 0: wait for result
+                if self.result_queues and target_group_id < len(self.result_queues):
+                    try:
+                        sampling_results = self.result_queues[target_group_id].get(
+                            timeout=300
+                        )
+                        if sampling_results is None:
+                            print(
+                                f"[Warning] Group {target_group_id} returned error result"
+                            )
+                            sampling_results = []
+                    except Exception as e:
+                        print(
+                            f"[Error] Timeout waiting for group {target_group_id} result: {e}"
+                        )
+                        sampling_results = []
+                else:
+                    print(
+                        f"[Warning] No result_queue for group {target_group_id}, executing locally"
+                    )
+                    sampling_results = self._run_step(inputs, sampling_metadata)
+            t_inference = time.perf_counter() - t0
 
         # Package responses
         t0 = time.perf_counter()
@@ -785,6 +1067,20 @@ class Runtime:
         t_create_responses = time.perf_counter() - t0
 
         t_total = time.perf_counter() - t_start
+
+        # PROFILING: Track timing per path and report periodically
+        if is_remote_dp_group:
+            stats["step_raw_times"].append(t_total)
+        else:
+            stats["local_times"].append(t_total)
+
+        # Report every 10 seconds (simple summary only)
+        now = time.perf_counter()
+        if now - stats["last_report"] > 10.0:
+            stats["last_report"] = now
+            # Reset for next window
+            stats["step_raw_times"] = []
+            stats["local_times"] = []
 
         # Record latency stats
         self._latency_stats.record_span(
@@ -841,3 +1137,6 @@ class Runtime:
         if self.config.world_size > 1 and self.config.rank == 0:
             print("Broadcasting STOP signal to workers...")
             utils.broadcast_struct("STOP", src=0, device=self.config.device)
+
+        if dist.is_initialized():
+            dist.destroy_process_group()

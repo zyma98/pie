@@ -12,7 +12,17 @@ import random
 import asyncio
 import warnings
 from pathlib import Path
+
+# Suppress semaphore leak warnings from multiprocessing resource_tracker
+# These occur when workers are forcefully terminated during shutdown and are cosmetic
+# Set env var so it propagates to child processes (resource_tracker)
+os.environ.setdefault(
+    "PYTHONWARNINGS",
+    "ignore::UserWarning:multiprocessing.resource_tracker",
+)
+warnings.filterwarnings("ignore", message=".*leaked semaphore.*", category=UserWarning)
 from typing import Optional, Any
+import queue  # For Queue type hint logic if needed, but Queue is from MP
 
 import torch
 import torch.multiprocessing as mp
@@ -28,7 +38,6 @@ from . import path as pie_path
 from . import _pie
 
 from pie_worker import utils as pie_utils
-from pie_worker.control_channel import ControlChannel, create_control_channels
 from pie_worker.server import start_ffi_worker
 from pie_worker.config import RuntimeConfig
 from pie_worker.runtime import Runtime
@@ -154,6 +163,22 @@ def start_engine_and_backend(
         device_value = model_config.get("device")
         world_size = len(device_value) if isinstance(device_value, list) else 1
 
+        # Validate that all configured devices are accessible
+        devices_to_validate = (
+            device_value if isinstance(device_value, list) else [device_value]
+        )
+        available_gpus = torch.cuda.device_count()
+
+        for device in devices_to_validate:
+            if device and device.startswith("cuda:"):
+                device_idx = int(device.split(":")[1])
+                if device_idx >= available_gpus:
+                    raise EngineError(
+                        f"Device '{device}' is not accessible. "
+                        f"Only {available_gpus} GPU(s) are visible (cuda:0 to cuda:{available_gpus - 1}). "
+                        f"Check CUDA_VISIBLE_DEVICES environment variable."
+                    )
+
         if world_size > 1:
             # Multi-GPU FFI mode: spawn worker processes
             backend_processes = _start_multi_gpu_ffi_backend(
@@ -168,33 +193,21 @@ def start_engine_and_backend(
             )
             server_handle = backend_processes.pop(0)  # First element is server_handle
         else:
-            # Single-GPU FFI mode: existing in-process path
-            status_update("Initializing backend in-process...")
+            # Single-GPU mode: use same IPC architecture as multi-GPU with world_size=1
+            status_update("Initializing single-GPU backend...")
 
-            # Build the full config for pie_backend
-            full_config = _build_backend_config(
-                engine_config, model_config, authorized_users_path
-            )
-
-            # Initialize Python backend - returns Runtime
-            runtime = _pie.initialize_backend(full_config)
-
-            # Create the FfiQueue FIRST via Python
-            ffi_queue = _pie.FfiQueue()
-
-            # Start the Python worker thread BEFORE starting server
-            # This allows the worker to respond to handshake during Model::new
-            _ffi_worker, stop_event = start_ffi_worker(ffi_queue, runtime)
-
-            # Now start server with FFI mode - the worker is ready to handle requests
-            server_handle = _pie.start_server_with_ffi(
+            # Treat as multi-GPU with 1 device for unified code path
+            backend_processes = _start_multi_gpu_ffi_backend(
+                engine_config,
+                model_config,
                 server_config,
                 authorized_users_path,
-                ffi_queue,
+                [device_value] if isinstance(device_value, str) else device_value,
+                1,  # world_size = 1
+                console,
+                status_update,
             )
-
-            # Wrap worker thread for cleanup
-            backend_processes = [FfiWorkerHandle(_ffi_worker, stop_event)]
+            server_handle = backend_processes.pop(0)  # First element is server_handle
 
     except Exception as e:
         raise EngineError(f"Failed to initialize backend: {e}") from e
@@ -275,13 +288,9 @@ def _build_backend_config(
 def _init_distributed(rank: int, world_size: int, master_port: int, device: str):
     """Initialize torch.distributed for a given rank.
 
-    Sets up environment variables, CUDA device, and process group.
+    Sets up CUDA device and process group using FileStore for rendezvous.
     """
-    # Environment setup
-    os.environ["MASTER_ADDR"] = "localhost"
-    os.environ["MASTER_PORT"] = str(master_port)
-    os.environ["NCCL_TIMEOUT"] = "300"
-    os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
+    import datetime
 
     # Set CUDA device
     torch.cuda.set_device(device)
@@ -291,41 +300,73 @@ def _init_distributed(rank: int, world_size: int, master_port: int, device: str)
         "ignore", message=".*barrier.*device under current context.*"
     )
 
-    # Initialize process group with NCCL options if available
+    # Use FileStore for more robust rendezvous (avoids port conflicts)
+    store_path = f"/tmp/pie_dist_store_{master_port}"
+    store = dist.FileStore(store_path, world_size)
+    timeout = datetime.timedelta(seconds=300)
+
+    # Initialize process group with NCCL
     backend = "nccl" if torch.cuda.is_available() else "gloo"
-    pg_options = None
 
-    if backend == "nccl":
-        try:
-            from torch.distributed import ProcessGroupNCCL
+    # Extract device index for device_id parameter
+    device_id = None
+    if device.startswith("cuda:"):
+        device_id = torch.device(device)
 
-            pg_options = ProcessGroupNCCL.Options()
-            pg_options.config.capture_safe = True
-        except (ImportError, AttributeError):
-            pass
-
-    if pg_options:
-        dist.init_process_group(
-            backend, rank=rank, world_size=world_size, pg_options=pg_options
-        )
-    else:
-        dist.init_process_group(backend, rank=rank, world_size=world_size)
+    dist.init_process_group(
+        backend,
+        store=store,
+        rank=rank,
+        world_size=world_size,
+        timeout=timeout,
+        device_id=device_id,
+    )
 
 
-def _setup_control_channel(rank: int, world_size: int, control_queues: list):
-    """Set up the IPC control channel for this rank."""
+def _setup_process_groups(rank: int, group_topology: list[list[int]]) -> dict:
+    """Create ProcessGroups for each execution group (Rank 0 + Group Workers)."""
+    pg_map = {}
+    for i, group_ranks in enumerate(group_topology):
+        # Comm group includes Rank 0 (Controller) + Group Workers
+        comm_ranks = sorted(list(set([0] + group_ranks)))
+
+        # Create group (Collective: all ranks/participants must call this)
+        # Note: Depending on backend, might need global participation.
+        # For safety in NCCL, everyone calls new_group for all groups.
+        pg = dist.new_group(comm_ranks)
+
+        pg_map[i] = pg
+
+    return pg_map
 
 
-def _setup_control_channel(rank: int, world_size: int, control_queues: list):
-    """Set up the IPC control channel for this rank."""
-    pie_utils._control_channel = ControlChannel(rank, world_size, control_queues)
+def _setup_compute_process_groups(rank: int, group_topology: list[list[int]]) -> dict:
+    """Create ProcessGroups for Tensor Parallel computation (TP ranks only)."""
+    pg_map = {}
+    for i, group_ranks in enumerate(group_topology):
+        # Compute group includes ONLY the TP workers for this group
+        # Sort to ensure consistent ordering
+        comm_ranks = sorted(list(set(group_ranks)))
+
+        # Create group
+        pg = dist.new_group(comm_ranks)
+
+        pg_map[i] = pg
+
+    return pg_map
 
 
-def _create_runtime(config_dict: dict, devices: list[str], rank: int, world_size: int):
-    """Create a Runtime instance for the given rank."""
-
-
-def _create_runtime(config_dict: dict, devices: list[str], rank: int, world_size: int):
+def _create_runtime(
+    config_dict: dict,
+    devices: list[str],
+    rank: int,
+    world_size: int,
+    group_topology: list[list[int]],
+    result_queue: Any | None = None,
+    result_queues: list | None = None,  # All queues (for Rank 0)
+    pg_map: dict | None = None,
+    compute_pg_map: dict | None = None,
+):
     """Create a Runtime instance for the given rank."""
 
     # Remove device/devices from config to avoid duplicate argument
@@ -340,7 +381,24 @@ def _create_runtime(config_dict: dict, devices: list[str], rank: int, world_size
         world_size=world_size,
     )
 
-    return Runtime(config, log_queue=None)
+    # Determine my group ID
+    my_group_id = 0
+    for i, group in enumerate(group_topology):
+        if rank in group:
+            my_group_id = i
+            break
+
+    rt = Runtime(
+        config,
+        log_queue=None,
+        group_id=my_group_id,
+        result_queue=result_queue,
+        result_queues=result_queues,
+        process_groups=pg_map,
+        compute_process_groups=compute_pg_map,
+        group_topology=group_topology,
+    )
+    return rt
 
 
 # =============================================================================
@@ -358,18 +416,18 @@ def _start_multi_gpu_ffi_backend(
     console,
     status_update: callable,
 ) -> list:
-    """Start multi-GPU FFI backend with worker processes.
+    """Start multi-GPU backend with Coordinator + All Workers architecture.
 
-    Spawns worker processes for ranks 1..world_size-1, then initializes rank 0
-    in-process with torch.distributed and the FFI queue.
+    Main Process (Coordinator):
+        - Only runs the Rust server
+        - Does NOT participate in torch.distributed
+        - Does NOT load any model
 
-    Returns:
-        List where first element is ServerHandle, rest are worker processes
-    """
-    """Start multi-GPU FFI backend with worker processes.
-
-    Spawns worker processes for ranks 1..world_size-1, then initializes rank 0
-    in-process with torch.distributed and the FFI queue.
+    Worker Processes (0..world_size-1):
+        - All run identical code
+        - Each participates in torch.distributed
+        - Each loads model on its assigned GPU
+        - Each connects to IPC server
 
     Returns:
         List where first element is ServerHandle, rest are worker processes
@@ -380,95 +438,336 @@ def _start_multi_gpu_ffi_backend(
     # Use 'spawn' context for CUDA compatibility
     mp.set_start_method("spawn", force=True)
 
-    # Generate master port and create control channels
+    # Generate master port
     master_port = 29500 + random.randint(0, 1000)
-    control_queues = create_control_channels(world_size)
 
     # Build config dict for all ranks
     full_config = _build_backend_config(
         engine_config, model_config, authorized_users_path
     )
 
-    # Spawn worker processes for ranks 1..world_size-1
+    # Determine Tensor Parallel degree and topology
+    tp_degree = model_config.get(
+        "tensor_parallel_size", engine_config.get("tensor_parallel_size", 1)
+    )
+    group_topology = _calculate_topology(world_size, tp_degree)
+    num_groups = len(group_topology)
+
+    status_update(f"  Topology: {num_groups} groups (TP={tp_degree})")
+
+    # Phase 1: Start server and get IPC server names for ALL groups
+    # Server starts immediately, workers will connect later
+    partial_handle, ipc_server_names = _pie.start_server_phase1(
+        server_config, authorized_users_path, num_groups
+    )
+
+    # Create ready queue for workers to signal when they've connected to IPC
+    spawn_ctx = mp.get_context("spawn")
+    ready_queue = spawn_ctx.Queue()
+
+    # Spawn ALL worker processes (ranks 0..world_size-1)
+    # All workers run identical code - just with different rank/device
     ctx = mp.spawn(
-        _ffi_worker_process,
-        args=(world_size, devices, master_port, control_queues, full_config),
-        nprocs=world_size - 1,
+        _ipc_worker_process,
+        args=(
+            world_size,
+            devices,
+            master_port,
+            full_config,
+            group_topology,
+            ipc_server_names,
+            ready_queue,
+        ),
+        nprocs=world_size,
         join=False,
         start_method="spawn",
-    )
-    worker_processes = list(ctx.processes)
-
-    # Initialize rank 0 in this process
-    _init_distributed(0, world_size, master_port, devices[0])
-    _setup_control_channel(0, world_size, control_queues)
-    runtime = _create_runtime(full_config, devices, 0, world_size)
-
-    # Sync with workers then start server
-    # Sync with workers then start server
-    dist.barrier()
-
-    ffi_queue = _pie.FfiQueue()
-    _ffi_worker, stop_event = start_ffi_worker(ffi_queue, runtime)
-
-    server_handle = _pie.start_server_with_ffi(
-        server_config, authorized_users_path, ffi_queue
+        daemon=True,  # Workers die automatically when main process exits
     )
 
-    # Return the context objects (ctx) instead of raw processes so we can join gracefully
-    return [server_handle, ctx, FfiWorkerHandle(_ffi_worker, stop_event)]
+    # Wait for ALL workers to signal they've connected to IPC
+    # Each worker sends its rank when ready
+    for _ in range(world_size):
+        rank = ready_queue.get(timeout=120)  # 2 minute timeout for model loading
+
+    # Clean up the ready_queue to prevent semaphore leak
+    ready_queue.close()
+    ready_queue.join_thread()
+
+    # Phase 2: Complete initialization (blocks until handshake succeeds)
+    # All workers are now connected via IPC
+    server_handle = partial_handle.complete()
+
+    # Return server handle and worker context
+    return [server_handle, ctx]
 
 
-def _ffi_worker_process(
-    local_rank: int,  # mp.spawn passes 0-indexed local rank
+def _calculate_topology(world_size: int, tp_degree: int) -> list[list[int]]:
+    """Calculate process groups based on world size and TP degree.
+
+    Returns:
+        List of groups, where each group is a list of ranks.
+        Example: world_size=4, tp=2 -> [[0, 1], [2, 3]]
+    """
+    if world_size % tp_degree != 0:
+        raise ValueError(
+            f"World size ({world_size}) must be divisible by TP degree ({tp_degree})"
+        )
+
+    num_groups = world_size // tp_degree
+    topology = []
+    for g in range(num_groups):
+        group_ranks = list(range(g * tp_degree, (g + 1) * tp_degree))
+        topology.append(group_ranks)
+
+    return topology
+
+
+def _ipc_worker_process(
+    local_rank: int,  # mp.spawn passes 0-indexed local rank (= actual rank for us)
     world_size: int,
     devices: list[str],
     master_port: int,
-    control_queues: list,
     config_dict: dict,
+    group_topology: list[list[int]],
+    ipc_server_names: list[str],
+    ready_queue,  # Queue to signal when connected
 ):
-    """Worker process for multi-GPU FFI mode.
+    """Worker process for Coordinator + All Workers architecture.
 
-    Note: mp.spawn passes local_rank starting at 0, so actual rank = local_rank + 1.
+    All workers run this identical code path. Each worker:
+    1. Initializes torch.distributed
+    2. Loads model on its assigned GPU
+    3. Connects to the IPC server for its group
+    4. Signals ready via ready_queue
+    5. Runs the IPC worker loop
+
+    Args:
+        local_rank: Rank of this worker (0 to world_size-1)
+        world_size: Total number of workers
+        devices: List of device strings
+        master_port: Port for torch.distributed rendezvous
+        config_dict: Runtime configuration
+        group_topology: List of groups, each containing ranks
+        ipc_server_names: IPC server names for each group
+        ready_queue: Queue to signal when ready
     """
-    """Worker process for multi-GPU FFI mode.
+    from pie import _pie
+    from pie_worker.runtime import Runtime
+    from pie_worker.config import RuntimeConfig
 
-    Note: mp.spawn passes local_rank starting at 0, so actual rank = local_rank + 1.
-    """
-    rank = local_rank + 1
+    rank = local_rank  # With nprocs=world_size, local_rank IS the actual rank
 
-    # Ignore SIGTERM initially (parent handles shutdown)
-    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    # Determine my group and TP rank within it
+    my_group_id = 0
+    tp_rank = 0
+    for i, group in enumerate(group_topology):
+        if rank in group:
+            my_group_id = i
+            tp_rank = group.index(rank)  # My position within the TP group
+            break
 
-    # Initialize distributed, control channel, and runtime
+    tp_degree = len(group_topology[my_group_id])  # Number of GPUs in my TP group
+
+    # Initialize distributed
     _init_distributed(rank, world_size, master_port, devices[rank])
-    _setup_control_channel(rank, world_size, control_queues)
-    runtime = _create_runtime(config_dict, devices, rank, world_size)
 
-    # Sync with rank 0 then run worker loop
+    # Setup process groups (collective ops - all ranks must participate)
+    # Capture the mappings to pass to Runtime
+    pg_map = _setup_process_groups(rank, group_topology)
+    compute_pg_map = _setup_compute_process_groups(rank, group_topology)
+
+    # Create runtime config
+    # For TP>1: each worker needs ALL devices in its TP group so devices[tp_rank] works
+    # Get the device list for this TP group (e.g., ["cuda:0", "cuda:1"] for group 0)
+    my_group_ranks = group_topology[my_group_id]
+    group_devices = [devices[r] for r in my_group_ranks]
+
+    filtered_config = {
+        k: v for k, v in config_dict.items() if k not in ("device", "devices")
+    }
+    config = RuntimeConfig.from_args(
+        **filtered_config,
+        devices=group_devices,  # All devices in this TP group
+        rank=tp_rank,  # Position within TP group
+        world_size=tp_degree,  # Size of TP group
+    )
+
+    # Create runtime (loads model on this GPU)
+    # Pass process groups for TP communication
+    runtime = Runtime(
+        config,
+        group_id=my_group_id,
+        process_groups=pg_map,
+        compute_process_groups=compute_pg_map,
+        group_topology=group_topology,
+    )
+
+    # Sync all workers before connecting to server
     dist.barrier()
-    runtime.worker_loop()
 
-    # Clean exit without running Python finalizers that might hang
-    # dist.destroy_process_group() # Can hang in multi-process if not coordinated
+    # Check if I'm a group leader (first rank in my TP group)
+    is_group_leader = tp_rank == 0
 
-    # Cleanup control channel resources
-    if pie_utils._control_channel is not None:
-        pie_utils._control_channel.cleanup()
-        pie_utils._control_channel = None
+    try:
+        if is_group_leader:
+            # Group leader: connect to IPC and handle requests
+            server_name = ipc_server_names[my_group_id]
+            ipc_queue = _pie.FfiIpcQueue.connect(server_name, my_group_id)
 
-    # Clear local references
-    control_queues = None
+            # Signal that we're connected and ready
+            ready_queue.put(rank)
 
-    # Force GC to cleanup Queues and other resources
-    # time imported globally
+            # Run IPC worker loop (handles requests from Rust server)
+            _run_ipc_worker_loop(ipc_queue, runtime)
+        else:
+            # Non-leader: signal ready, then run worker loop waiting for commands from leader
+            ready_queue.put(rank)
+            runtime.worker_loop()
+    finally:
+        # Cleanup - ensure process group is destroyed even on termination
+        if dist.is_initialized():
+            dist.destroy_process_group()
 
-    # Give background threads a moment to exit
-    time.sleep(0.1)
 
-    gc.collect()
+def _run_ipc_worker_loop(ipc_queue, runtime):
+    """Run the IPC worker loop for a group leader.
 
-    return
+    This is similar to the FFI worker loop in server.py, but uses IPC for
+    cross-process communication. This allows each group leader to have its
+    own Python GIL, eliminating GIL contention between groups.
+
+    Args:
+        ipc_queue: FfiIpcQueue instance connected to Rust
+        runtime: Runtime instance to dispatch calls to
+    """
+    import msgpack
+    from pie_worker.server import (
+        STATUS_OK,
+        STATUS_METHOD_NOT_FOUND,
+        STATUS_INTERNAL_ERROR,
+    )
+
+    # Method dispatch table
+    methods = {
+        "handshake": runtime.handshake_rpc,
+        "query": runtime.query_rpc,
+        "fire_batch": runtime.fire_batch,
+        "embed_image": runtime.embed_image_rpc,
+        "initialize_adapter": runtime.initialize_adapter_rpc,
+        "update_adapter": runtime.update_adapter_rpc,
+        "upload_adapter": runtime.upload_adapter_rpc,
+        "download_adapter": runtime.download_adapter_rpc,
+    }
+
+    shutdown_requested = False
+    poll_timeout_ms = 100
+    parent_pid = os.getppid()
+    check_parent_every = 10  # Check parent alive every N poll cycles
+    poll_count = 0
+
+    try:
+        while not shutdown_requested:
+            # Check if parent process is still alive periodically
+            poll_count += 1
+            if poll_count % check_parent_every == 0:
+                try:
+                    os.kill(parent_pid, 0)  # Doesn't kill, just checks existence
+                except OSError:
+                    # Parent process has exited, we should exit too
+                    break
+
+            try:
+                # Poll the IPC queue (releases GIL while waiting)
+                request = ipc_queue.poll_blocking(poll_timeout_ms)
+                if request is None:
+                    continue  # Timeout, try again
+            except Exception:
+                # IPC queue may be closed when server shuts down
+                break
+
+            request_id, method, payload = request
+
+            try:
+                # Unpack args
+                args = msgpack.unpackb(payload)
+
+                # Check for shutdown
+                if method == "shutdown":
+                    shutdown_requested = True
+                    response = msgpack.packb(None)
+                    ipc_queue.respond(request_id, response)
+                    continue
+
+                # Get handler
+                fn = methods.get(method)
+                if fn is None:
+                    response = msgpack.packb(f"Method not found: {method}")
+                    ipc_queue.respond(request_id, response)
+                    continue
+
+                # Call handler
+                if isinstance(args, dict):
+                    result = fn(**args)
+                elif isinstance(args, (list, tuple)):
+                    result = fn(*args)
+                else:
+                    result = fn(args)
+
+                # Pack and respond
+                response = msgpack.packb(result)
+                ipc_queue.respond(request_id, response)
+
+            except Exception as e:
+                import traceback
+
+                tb = traceback.format_exc()
+                print(f"[IPC Worker Error] {method}: {e}\n{tb}")
+                response = msgpack.packb(str(e))
+                ipc_queue.respond(request_id, response)
+    finally:
+        # Ensure cleanup when loop stops
+        runtime.shutdown()
+
+
+def _ipc_group_worker(
+    server_name: str,
+    group_id: int,
+    config_dict: dict,
+    device: str,
+):
+    """IPC worker process for symmetric all-IPC architecture.
+
+    This runs in a separate subprocess with its own GIL.
+    It loads the model on the specified device and connects to the IPC server.
+
+    Args:
+        server_name: IPC server name to connect to
+        group_id: Group ID for this worker
+        config_dict: Runtime configuration
+        device: Device string (e.g., "cuda:0")
+    """
+    from pie import _pie
+    from pie_worker.runtime import Runtime
+    from pie_worker.config import RuntimeConfig
+
+    # Create runtime config for this group
+    filtered_config = {
+        k: v for k, v in config_dict.items() if k not in ("device", "devices")
+    }
+
+    config = RuntimeConfig.from_args(
+        **filtered_config,
+        devices=[device],
+        rank=0,  # Local rank in this process
+        world_size=1,  # Single GPU in this process
+    )
+
+    # Create runtime (loads model on this GPU)
+    runtime = Runtime(config, group_id=group_id)
+
+    # Connect to IPC and run worker loop
+    ipc_queue = _pie.FfiIpcQueue.connect(server_name, group_id)
+    _run_ipc_worker_loop(ipc_queue, runtime)
 
 
 def wait_for_backends(
@@ -576,6 +875,10 @@ def terminate_engine_and_backend(
         backend_processes: List of backend subprocess.Popen objects
         on_message: Optional callback for status messages: (message: str) -> None
     """
+    # Suppress semaphore leak warning during shutdown (cosmetic, happens when workers are killed)
+    warnings.filterwarnings(
+        "ignore", message=".*leaked semaphore.*", category=UserWarning
+    )
 
     def log(msg: str):
         if on_message:
@@ -585,12 +888,21 @@ def terminate_engine_and_backend(
             pass
             # print(f"[Manager] {msg}", file=sys.stderr)
 
-    # 1. Broadcast STOP signal to workers
+    # 1. Shut down the server FIRST - this sends shutdown signal to workers via IPC
+    if server_handle is not None:
+        try:
+            if server_handle.is_running():
+                server_handle.shutdown()
+        except Exception as e:
+            log(f"Error shutting down engine: {e}")
+
+    # 2. Give workers time to shut down gracefully after receiving IPC shutdown
+    time.sleep(1.0)
+
+    # 3. Broadcast STOP signal via control channel (legacy, may not be in use)
     try:
         if pie_utils._control_channel is not None:
-            # log("Debug: Sending STOP signal to workers")
             pie_utils._control_channel.send("STOP")
-            # Give workers time to receive the signal and exit voluntarily
             time.sleep(0.5)
     except ImportError:
         pass
@@ -602,11 +914,19 @@ def terminate_engine_and_backend(
         # It doesn't have a pid attribute directly, but has .processes and .join
         if hasattr(process, "join") and hasattr(process, "processes"):
             try:
-                # log("Debug: Joining SpawnContext")
-                process.join(timeout=5)
-                # log("Debug: SpawnContext joined successfully")
+                # Terminate all worker processes in the spawn context
+                for p in process.processes:
+                    if p.is_alive():
+                        p.terminate()
+                # Wait briefly for termination
+                for p in process.processes:
+                    p.join(timeout=2)
+                    if p.is_alive():
+                        p.kill()  # Force kill if still alive
+                # Finally join the context itself
+                process.join(timeout=1)
             except Exception as e:
-                log(f"Error joining SpawnContext: {e}")
+                log(f"Error terminating SpawnContext: {e}")
             continue
 
         # In FFI mode, backend_processes may contain dispatcher functions (not processes)
@@ -637,14 +957,6 @@ def terminate_engine_and_backend(
                 process.kill()
             except Exception as e:
                 log(f"Error terminating process {pid}: {e}")
-
-    # Gracefully shut down the engine
-    if server_handle is not None:
-        try:
-            if server_handle.is_running():
-                server_handle.shutdown()
-        except Exception as e:
-            log(f"Error shutting down engine: {e}")
 
     # Finalize control channel queues if they exist
     # This prevents "leaked semaphore" warnings from multiprocessing.resource_tracker

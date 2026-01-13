@@ -10,11 +10,7 @@ from typing import Any
 import torch
 
 
-# Module-level variable for IPC control channel (set during multi-GPU init)
-# Used for metadata broadcasts - replaces GLOO for better performance
-_control_channel = None
-
-# Legacy: CPU process group for fallback (deprecated, for compatibility)
+# CPU process group for GLOO-based metadata broadcasts
 _cpu_group = None
 
 
@@ -110,16 +106,21 @@ def get_available_memory(devices: list[torch.device], rank: int = 0) -> int:
 
 
 def broadcast_struct(
-    data: Any, src: int = 0, device: torch.device | None = None
+    data: Any,
+    src: int = 0,
+    device: torch.device | None = None,
+    group: "torch.distributed.ProcessGroup | None" = None,
+    group_id: int | None = None,
 ) -> Any:
     """
     Broadcast a structure of data with embedded tensors efficiently.
 
-    Metadata is broadcast via CPU (pickled), Tensors via GPU (NCCL).
+    Metadata is broadcast via GLOO (CPU), tensors via NCCL (GPU).
     """
     import torch.distributed as dist
 
     rank = dist.get_rank()
+    is_sender = rank == src
     tensors = []
 
     def separate(obj):
@@ -141,25 +142,17 @@ def broadcast_struct(
 
     # 1. Prepare metadata on source
     metadata = None
-    if rank == src:
+    if is_sender:
         metadata = separate(data)
 
-    # 2. Broadcast metadata via IPC control channel (replaces GLOO)
-    if _control_channel is not None:
-        if rank == src:
-            _control_channel.send(metadata)
-        else:
-            metadata = _control_channel.recv()
-    else:
-        # Fallback to GLOO if control channel not initialized
-        meta_list = [metadata]
-        dist.broadcast_object_list(meta_list, src=src, group=_cpu_group)
-        metadata = meta_list[0]
+    # 2. Broadcast metadata via GLOO
+    meta_list = [metadata]
+    dist.broadcast_object_list(meta_list, src=src, group=group or _cpu_group)
+    metadata = meta_list[0]
 
-    # 3. Prepare tensors for broadcast
-    if rank != src:
-        # Receiver: traverse metadata to find tensors and allocate buffers
-        tensor_specs = {}  # index -> (shape, dtype)
+    # 3. Prepare tensors for broadcast (receiver allocates buffers)
+    if not is_sender:
+        tensor_specs = {}
 
         def find_specs(obj):
             if isinstance(obj, dict) and "__TENSOR__" in obj:
@@ -174,18 +167,16 @@ def broadcast_struct(
                 for v in obj:
                     find_specs(v)
 
-        find_specs(metadata)  # Actually traverse to find tensor specs
-
-        # Allocate empty tensors
+        find_specs(metadata)
         tensors = [None] * len(tensor_specs)
         for idx, (shape, dtype) in tensor_specs.items():
             tensors[idx] = torch.empty(shape, dtype=dtype, device=device)
 
-    # 4. Broadcast tensors (contiguous for safety)
+    # 4. Broadcast tensors via NCCL
     for t in tensors:
-        if rank == src:
+        if is_sender:
             t = t.contiguous()
-        dist.broadcast(t, src=src)
+        dist.broadcast(t, src=src, group=group)
 
     # 5. Reconstruct
     def reconstruct(obj):

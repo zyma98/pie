@@ -44,6 +44,7 @@ class RuntimeConfig:
     gpu_mem_utilization: float
     random_seed: int
     use_cuda_graphs: bool
+    tensor_parallel_size: int  # TP degree (1 = DP only, >1 = model split across GPUs)
 
     # Telemetry settings
     telemetry_enabled: bool
@@ -72,8 +73,13 @@ class RuntimeConfig:
 
     @property
     def world_size(self) -> int:
-        """Get the number of devices (tensor parallel world size)."""
+        """Get the number of devices (total GPUs)."""
         return len(self.devices)
+
+    @property
+    def num_groups(self) -> int:
+        """Get the number of Data Parallel groups."""
+        return max(1, self.world_size // self.tensor_parallel_size)
 
     @property
     def needs_quantization(self) -> bool:
@@ -97,8 +103,14 @@ class RuntimeConfig:
     @property
     def quantization(
         self,
-    ) -> Int4WeightOnlyConfig | Int8WeightOnlyConfig | Float8WeightOnlyConfig | None:
+    ) -> (
+        "torchao.quantization.Int4WeightOnlyConfig"
+        | "torchao.quantization.Int8WeightOnlyConfig"
+        | "torchao.quantization.Float8WeightOnlyConfig"
+        | None
+    ):
         """Derive quantization config from weight_dtype (only for quantization types)."""
+        import torchao
 
         match self.weight_dtype:
             case "int4":
@@ -134,6 +146,7 @@ class RuntimeConfig:
         telemetry_service_name: str = "pie",
         random_seed: int = 42,
         use_cuda_graphs: bool = True,
+        tensor_parallel_size: int = 1,
     ) -> "RuntimeConfig":
         """
         Factory method to build a validated and resolved RuntimeConfig.
@@ -223,6 +236,7 @@ class RuntimeConfig:
             rank=rank,
             activation_dtype=resolved_activation_dtype,
             weight_dtype=weight_dtype,
+            tensor_parallel_size=tensor_parallel_size,
         )
 
     def print(self) -> None:

@@ -1,13 +1,12 @@
 pub mod actor;
 pub mod batching;
 pub mod ffi_bridge;
-pub mod ffi_queue;
+pub mod ffi_ipc;
 pub mod request;
 pub mod resource;
 pub mod tokenizer;
 
-use super::model::batching::{AdaptiveScheduler, SharedScheduler};
-use super::model::ffi_bridge::AsyncFfiClient;
+use super::model::batching::SharedScheduler;
 use super::model::request::{
     BatchedForwardPassRequest, BatchedForwardPassResponse, ForwardPassRequest, ForwardPassResponse,
     HandshakeRequest, HandshakeResponse, QueryRequest, QueryResponse, Request,
@@ -18,7 +17,7 @@ use super::runtime::{self, TerminationCause};
 use super::service::ServiceCommand;
 use crate::instance::InstanceId;
 use anyhow::Result;
-use bytes::Bytes;
+
 use futures::future;
 use serde::{de::DeserializeOwned, Serialize};
 use std::collections::HashMap;
@@ -31,14 +30,18 @@ use tokio::task::{self, JoinHandle};
 // Re-export SchedulerConfig for public API
 pub use batching::SchedulerConfig;
 
-/// Backend for RPC calls to Python via FFI.
+/// Backend for RPC calls to Python via IPC.
+/// 
+/// Uses cross-process IPC for GIL isolation in the symmetric worker architecture.
 #[derive(Clone)]
-pub struct RpcBackend(AsyncFfiClient);
+pub struct RpcBackend {
+    client: ffi_bridge::AsyncIpcClient,
+}
 
 impl RpcBackend {
-    /// Create a new RpcBackend from an FFI client.
-    pub fn new(client: AsyncFfiClient) -> Self {
-        RpcBackend(client)
+    /// Create a new RpcBackend from an IPC client.
+    pub fn new_ipc(client: ffi_bridge::AsyncIpcClient) -> Self {
+        Self { client }
     }
 
     /// Call a remote method with typed arguments and return value.
@@ -47,7 +50,7 @@ impl RpcBackend {
         T: Serialize + Send + Sync + Clone + 'static,
         R: DeserializeOwned + Send + 'static,
     {
-        self.0.call(method, args).await
+        self.client.call(method, args).await
     }
 
     /// Call with timeout.
@@ -61,7 +64,7 @@ impl RpcBackend {
         T: Serialize + Send + Sync + Clone + 'static,
         R: DeserializeOwned + Send + 'static,
     {
-        self.0.call_with_timeout(method, args, timeout).await
+        self.client.call_with_timeout(method, args, timeout).await
     }
 
     /// Fire-and-forget notification.
@@ -69,7 +72,7 @@ impl RpcBackend {
     where
         T: Serialize + Send + Sync + Clone + 'static,
     {
-        self.0.notify(method, args).await
+        self.client.notify(method, args).await
     }
 }
 
@@ -298,12 +301,15 @@ pub struct Model {
     info: ModelInfo,
     resource_manager: ResourceManager,
     shutdown_tx: broadcast::Sender<()>,
-    backend: RpcBackend,
+    /// Per-group backends for parallel dispatch
+    backends: Vec<RpcBackend>,
+    /// Primary backend (backends[0]) for global operations
+    primary_backend: RpcBackend,
     /// Batch limits from handshake
     max_batch_tokens: usize,
     max_batch_size: usize,
-    /// Channel for forward pass requests
-    forward_pass_tx: mpsc::UnboundedSender<(ForwardPassRequest, Option<oneshot::Sender<ForwardPassResponse>>)>,
+    /// Channel for forward pass requests (req, response_tx, group_id)
+    forward_pass_tx: mpsc::UnboundedSender<(ForwardPassRequest, Option<oneshot::Sender<ForwardPassResponse>>, usize)>,
     worker_handle: Option<JoinHandle<()>>,
     /// Scheduler configuration
     scheduler_config: SchedulerConfig,
@@ -315,19 +321,13 @@ impl Model {
         &self.info.name
     }
 
-    /// Create a new Model with an FFI backend using a queue.
-    ///
-    /// The queue should be shared with Python which polls it for requests.
-    /// FfiQueue uses internal Arc so cloning shares state.
-    pub async fn new(queue: ffi_queue::FfiQueue, scheduler_config: SchedulerConfig) -> Result<Self> {
-        let ffi_client = AsyncFfiClient::new_with_queue(queue);
-        let backend = RpcBackend::new(ffi_client);
-        Self::new_with_backend(backend, scheduler_config).await
-    }
-
-    /// Internal constructor that works with any backend.
-    async fn new_with_backend(backend: RpcBackend, scheduler_config: SchedulerConfig) -> Result<Self> {
-        let handshake_info = Self::handshake(&backend).await?;
+    /// Constructor that works with per-group IPC backends.
+    pub async fn new_with_backends(backends: Vec<RpcBackend>, scheduler_config: SchedulerConfig) -> Result<Self> {
+        let num_groups = backends.len();
+        let primary_backend = backends[0].clone();
+        
+        // Handshake via primary backend
+        let handshake_info = Self::handshake(&primary_backend).await?;
 
         let (forward_pass_tx, forward_pass_rx) = mpsc::unbounded_channel();
         let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
@@ -335,20 +335,23 @@ impl Model {
         let max_batch_tokens = handshake_info.max_batch_tokens;
         let max_batch_size = handshake_info.max_batch_size;
 
-        // Create shared scheduler for adaptive batching
-        let scheduler = Arc::new(Mutex::new(AdaptiveScheduler::new(
+        // Create shared scheduler for adaptive batching (MultiGroup)
+        // SharedScheduler is alias for Arc<Mutex<MultiGroupScheduler>>
+        let scheduler = Arc::new(Mutex::new(super::model::batching::MultiGroupScheduler::new(
             scheduler_config.clone(),
             max_batch_size,
+            num_groups,
         )));
 
         let worker_handle = tokio::spawn(Self::inference_worker(
-            backend.clone(),
+            backends.clone(),
             forward_pass_rx,
             shutdown_rx,
             max_batch_tokens,
             max_batch_size,
             Arc::clone(&scheduler),
             scheduler_config.max_in_flight_batches,
+            num_groups,
         ));
 
         let tokenizer = Arc::new(BytePairEncoder::new(
@@ -371,12 +374,13 @@ impl Model {
             max_batch_tokens: handshake_info.max_batch_tokens,
         };
 
-        let resource_manager = ResourceManager::new(handshake_info.resources);
+        let resource_manager = ResourceManager::new(handshake_info.resources, num_groups);
 
         Ok(Model {
             info,
             resource_manager,
-            backend,
+            backends,
+            primary_backend,
             max_batch_tokens,
             max_batch_size,
             forward_pass_tx,
@@ -410,35 +414,50 @@ impl Model {
     /// - Multiple batches execute concurrently via spawned tasks (pipelining)
     /// - Scheduler tracks arrival rate and latency to make optimal decisions
     /// - Overlaps batch accumulation with GPU inference for maximum utilization
+    /// - Uses per-group backends for parallel DP execution
     async fn inference_worker(
-        backend: RpcBackend,
-        mut req_rx: mpsc::UnboundedReceiver<(ForwardPassRequest, Option<oneshot::Sender<ForwardPassResponse>>)>,
+        backends: Vec<RpcBackend>,
+        mut req_rx: mpsc::UnboundedReceiver<(ForwardPassRequest, Option<oneshot::Sender<ForwardPassResponse>>, usize)>,
         mut shutdown_rx: broadcast::Receiver<()>,
         max_batch_tokens: usize,
         max_batch_size: usize,
         scheduler: SharedScheduler,
         max_in_flight_batches: usize,
+        num_groups: usize,
     ) {
         const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
         const SCHEDULER_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
-        let mut batch: Vec<(ForwardPassRequest, Option<oneshot::Sender<ForwardPassResponse>>)> = Vec::new();
-        let mut total_tokens = 0usize;
+        // State per group
+        let mut batches: Vec<Vec<(ForwardPassRequest, Option<oneshot::Sender<ForwardPassResponse>>)>> = 
+            (0..num_groups).map(|_| Vec::new()).collect();
+        let mut group_tokens: Vec<usize> = vec![0; num_groups];
+        let mut in_flight_counts: Vec<usize> = vec![0; num_groups];
 
-        // Track in-flight batch tasks for concurrent execution
-        let in_flight_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let (completion_tx, mut completion_rx) = mpsc::unbounded_channel::<(usize, usize, Duration)>();
+        // Channel for batch completions (batch_size, tokens, latency, group_id)
+        let (completion_tx, mut completion_rx) = mpsc::unbounded_channel::<(usize, usize, Duration, usize)>();
+
+        // PROFILING: Track request rates and batch firing
+        let mut prof_requests_received: Vec<usize> = vec![0; num_groups];
+        let mut prof_batches_fired: Vec<usize> = vec![0; num_groups];
+        let mut prof_last_report = Instant::now();
 
         loop {
-            // Process any completed batches (non-blocking)
-            while let Ok((batch_size, tokens_in_batch, latency)) = completion_rx.try_recv() {
-                in_flight_counter.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-                let mut sched = scheduler.lock().unwrap();
-                sched.on_batch_complete(batch_size, tokens_in_batch, latency);
+            // Process any completed batches (non-blocking) - from any group
+            while let Ok((batch_size, tokens_in_batch, latency, group_id)) = completion_rx.try_recv() {
+                if group_id < num_groups {
+                    if in_flight_counts[group_id] > 0 {
+                        in_flight_counts[group_id] -= 1;
+                    }
+                    let mut sched = scheduler.lock().unwrap();
+                    sched.on_batch_complete(group_id, batch_size, tokens_in_batch, latency);
+                }
             }
 
-            // If batch is empty, wait for at least one request
-            if batch.is_empty() {
+            // Check if we have any pending requests in any batch or should wait
+            let all_batches_empty = batches.iter().all(|b| b.is_empty());
+
+            if all_batches_empty {
                 let first_request = tokio::select! {
                     _ = shutdown_rx.recv() => break,
                     maybe_req = req_rx.recv() => {
@@ -449,30 +468,37 @@ impl Model {
                     }
                 };
 
-                // Record arrival and add to batch
+                // Add to appropriate group batch
+                let (req, tx, group_id) = first_request;
+                // Safety: clamp group_id
+                let group_id = std::cmp::min(group_id, num_groups - 1);
+
                 {
                     let mut sched = scheduler.lock().unwrap();
-                    let arrival_time = first_request.0.arrival_time.unwrap_or_else(Instant::now);
-                    sched.on_request_arrival(arrival_time);
+                    let arrival_time = req.arrival_time.unwrap_or_else(Instant::now);
+                    sched.on_request_arrival(group_id, arrival_time);
                 }
-                total_tokens = first_request.0.input_tokens.len();
-                batch.push(first_request);
+                group_tokens[group_id] += req.input_tokens.len();
+                batches[group_id].push((req, tx));
+                prof_requests_received[group_id] += 1;
             }
 
             // Try to accumulate more requests (non-blocking)
             loop {
                 match req_rx.try_recv() {
-                    Ok(req) => {
+                    Ok((req, tx, group_id)) => {
+                        let group_id = std::cmp::min(group_id, num_groups - 1);
                         {
                             let mut sched = scheduler.lock().unwrap();
-                            let arrival_time = req.0.arrival_time.unwrap_or_else(Instant::now);
-                            sched.on_request_arrival(arrival_time);
+                            let arrival_time = req.arrival_time.unwrap_or_else(Instant::now);
+                            sched.on_request_arrival(group_id, arrival_time);
                         }
-                        total_tokens += req.0.input_tokens.len();
-                        batch.push(req);
+                        group_tokens[group_id] += req.input_tokens.len();
+                        batches[group_id].push((req, tx));
+                        prof_requests_received[group_id] += 1;
 
-                        // Check capacity limits
-                        if batch.len() >= max_batch_size || total_tokens >= max_batch_tokens {
+                        // Stop accumulating if THIS group hit capacity to avoid latency spikes
+                        if batches[group_id].len() >= max_batch_size || group_tokens[group_id] >= max_batch_tokens {
                             break;
                         }
                     }
@@ -480,86 +506,127 @@ impl Model {
                 }
             }
 
-            let in_flight = in_flight_counter.load(std::sync::atomic::Ordering::SeqCst);
+            // Check all groups for firing
+            let mut fired_any = false;
+            for group_id in 0..num_groups {
+                let batch_len = batches[group_id].len();
+                if batch_len == 0 {
+                    continue;
+                }
 
-            // Check if scheduler recommends firing
-            let should_fire = {
-                let sched = scheduler.lock().unwrap();
-                sched.should_fire(batch.len(), total_tokens, max_batch_size, max_batch_tokens, in_flight)
-            };
+                let total_tok = group_tokens[group_id];
+                let in_flight = in_flight_counts[group_id];
 
-            // Also check if we're at in-flight limit - if so, must wait for completion
-            if should_fire && in_flight < max_in_flight_batches {
-                // Fire the batch concurrently (non-blocking)
-                let batch_to_fire = std::mem::take(&mut batch);
-                let batch_size = batch_to_fire.len();
-                let tokens_in_batch = total_tokens;
-                total_tokens = 0;
-
-                // Mark batch as fired and increment in-flight counter
-                {
+                let should_fire = {
                     let mut sched = scheduler.lock().unwrap();
-                    sched.on_batch_fired();
-                }
-                in_flight_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    sched.should_fire(group_id, batch_len, total_tok, max_batch_size, max_batch_tokens, in_flight)
+                };
 
-                // Spawn batch execution as a background task (concurrent pipelining)
-                let backend_clone = backend.clone();
-                let completion_tx_clone = completion_tx.clone();
-                tokio::spawn(async move {
-                    let start_time = Instant::now();
-                    Self::execute_forward_pass_batch(&backend_clone, batch_to_fire, REQUEST_TIMEOUT).await;
-                    let latency = start_time.elapsed();
-                    // Report completion for scheduler feedback
-                    completion_tx_clone.send((batch_size, tokens_in_batch, latency)).ok();
-                });
-            } else if in_flight >= max_in_flight_batches {
-                // At in-flight limit - wait for a batch to complete before continuing
-                tokio::select! {
-                    _ = shutdown_rx.recv() => break,
-                    maybe_completion = completion_rx.recv() => {
-                        if let Some((batch_size, tokens_in_batch, latency)) = maybe_completion {
-                            in_flight_counter.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-                            let mut sched = scheduler.lock().unwrap();
-                            sched.on_batch_complete(batch_size, tokens_in_batch, latency);
-                        }
+                if should_fire && in_flight < max_in_flight_batches {
+                    // Fire!
+                    let batch_to_fire = std::mem::take(&mut batches[group_id]);
+                    group_tokens[group_id] = 0;
+                    in_flight_counts[group_id] += 1;
+                    fired_any = true;
+                    prof_batches_fired[group_id] += 1;
+
+                     {
+                        let mut sched = scheduler.lock().unwrap();
+                        sched.on_batch_fired(group_id);
                     }
+
+                    // Spawn batch execution using group-specific backend
+                    let backend_clone = backends[group_id].clone();
+                    let completion_tx_clone = completion_tx.clone();
+                    let batch_size = batch_len;
+                    let tokens_in_batch = total_tok;
+                    
+                    tokio::spawn(async move {
+                         let start_time = Instant::now();
+                         Self::execute_forward_pass_batch(&backend_clone, batch_to_fire, group_id, REQUEST_TIMEOUT).await;
+                         let latency = start_time.elapsed();
+                         completion_tx_clone.send((batch_size, tokens_in_batch, latency, group_id)).ok();
+                    });
                 }
-            } else {
-                // Wait briefly for more requests before checking again
-                tokio::select! {
-                    _ = shutdown_rx.recv() => break,
-                    _ = tokio::time::sleep(SCHEDULER_POLL_INTERVAL) => {}
-                    maybe_req = req_rx.recv() => {
-                        match maybe_req {
-                            Some(req) => {
-                                {
+            }
+
+            // PROFILING: Report every 10 seconds
+            if prof_last_report.elapsed().as_secs() >= 10 {
+                let total_reqs: usize = prof_requests_received.iter().sum();
+                let total_batches: usize = prof_batches_fired.iter().sum();
+                eprintln!("[RUST PROFILING] Reqs: {:?} ({}) | Batches: {:?} ({}) | InFlight: {:?}",
+                    prof_requests_received, total_reqs,
+                    prof_batches_fired, total_batches,
+                    in_flight_counts);
+                // Reset counters
+                for c in &mut prof_requests_received { *c = 0; }
+                for c in &mut prof_batches_fired { *c = 0; }
+                prof_last_report = Instant::now();
+            }
+
+            // Wait logic
+            if !fired_any {
+                 // If any group is at in-flight limit, we must wait for completion
+                 let any_at_limit = in_flight_counts.iter().any(|&c| c >= max_in_flight_batches);
+                 
+                 if any_at_limit {
+                     // Wait for completion (limiting factors) OR shutdown
+                     tokio::select! {
+                        _ = shutdown_rx.recv() => break,
+                        maybe_completion = completion_rx.recv() => {
+                            if let Some((batch_size, tokens_in_batch, latency, group_id)) = maybe_completion {
+                                if group_id < num_groups {
+                                    if in_flight_counts[group_id] > 0 {
+                                        in_flight_counts[group_id] -= 1;
+                                    }
                                     let mut sched = scheduler.lock().unwrap();
-                                    let arrival_time = req.0.arrival_time.unwrap_or_else(Instant::now);
-                                    sched.on_request_arrival(arrival_time);
+                                    sched.on_batch_complete(group_id, batch_size, tokens_in_batch, latency);
                                 }
-                                total_tokens += req.0.input_tokens.len();
-                                batch.push(req);
                             }
-                            None => break,
                         }
                     }
-                }
+                 } else {
+                     // Just wait briefly for more requests
+                     tokio::select! {
+                        _ = shutdown_rx.recv() => break,
+                        _ = tokio::time::sleep(SCHEDULER_POLL_INTERVAL) => {}
+                        maybe_req = req_rx.recv() => {
+                             match maybe_req {
+                                Some((req, tx, group_id)) => {
+                                    let group_id = std::cmp::min(group_id, num_groups - 1);
+                                    {
+                                        let mut sched = scheduler.lock().unwrap();
+                                        let arrival_time = req.arrival_time.unwrap_or_else(Instant::now);
+                                        sched.on_request_arrival(group_id, arrival_time);
+                                    }
+                                    group_tokens[group_id] += req.input_tokens.len();
+                                    batches[group_id].push((req, tx));
+                                }
+                                None => break,
+                            }
+                         }
+                     }
+                 }
             }
         }
 
-        // On shutdown, fire any remaining batch and wait for in-flight batches
-        if !batch.is_empty() {
-            Self::execute_forward_pass_batch(&backend, batch, REQUEST_TIMEOUT).await;
+        // Shutdown cleanup: Fire remaining batches using group-specific backend
+        for group_id in 0..num_groups {
+            if !batches[group_id].is_empty() {
+                let batch = std::mem::take(&mut batches[group_id]);
+                Self::execute_forward_pass_batch(&backends[group_id], batch, group_id, REQUEST_TIMEOUT).await;
+            }
         }
 
-        // Wait for all in-flight batches to complete
-        while in_flight_counter.load(std::sync::atomic::Ordering::SeqCst) > 0 {
-            if completion_rx.recv().await.is_some() {
-                in_flight_counter.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-            } else {
-                break;
-            }
+        // Wait for all in-flight batches (sum of all counts)
+        while in_flight_counts.iter().sum::<usize>() > 0 {
+             if let Some((_, _, _, group_id)) = completion_rx.recv().await {
+                 if group_id < num_groups && in_flight_counts[group_id] > 0 {
+                     in_flight_counts[group_id] -= 1;
+                 }
+             } else {
+                 break;
+             }
         }
     }
 
@@ -572,9 +639,12 @@ impl Model {
     async fn execute_forward_pass_batch(
         backend: &RpcBackend,
         requests: Vec<(ForwardPassRequest, Option<oneshot::Sender<ForwardPassResponse>>)>,
+        group_id: usize,
         timeout: Duration,
     ) {
+        // println!("[DEBUG Rust] Firing batch for group {}", group_id);
         let mut batch_req = BatchedForwardPassRequest::new();
+        batch_req.group_id = Some(group_id);
         for (fp_req, _) in &requests {
             batch_req.add_request(fp_req);
         }
@@ -630,13 +700,20 @@ impl Model {
             Request::ForwardPass(mut fp_req, resp_tx) => {
                 // Capture arrival time before queuing to avoid measurement distortion
                 // when requests pile up behind the in-flight limit.
-                fp_req.arrival_time = Some(Instant::now());
-                if self.forward_pass_tx.send((fp_req, resp_tx)).is_err() {
+                
+                // Lookup group ID from resource manager
+                let group_id = if let Some(inst_id) = fp_req.inst_id {
+                    self.resource_manager.get_group(&inst_id).unwrap_or(0)
+                } else {
+                    0
+                };
+
+                if self.forward_pass_tx.send((fp_req, resp_tx, group_id)).is_err() {
                     eprintln!("[Error] Forward pass channel closed");
                 }
             }
             Request::Query(query_req, resp_tx) => {
-                let backend_clone = self.backend.clone();
+                let backend_clone = self.primary_backend.clone();
                 tokio::spawn(async move {
                     if let Some(resp) = Self::execute_query(&backend_clone, query_req).await {
                         resp_tx.send(resp).ok();
@@ -644,7 +721,7 @@ impl Model {
                 });
             }
             Request::EmbedImage(req) => {
-                let backend = self.backend.clone();
+                let backend = self.primary_backend.clone();
                 tokio::spawn(async move {
                     if let Err(e) = backend.notify("embed_image", &req).await {
                         eprintln!("[Error] embed_image failed: {:?}", e);
@@ -652,7 +729,7 @@ impl Model {
                 });
             }
             Request::InitializeAdapter(req) => {
-                let backend = self.backend.clone();
+                let backend = self.primary_backend.clone();
                 tokio::spawn(async move {
                     if let Err(e) = backend.notify("initialize_adapter", &req).await {
                         eprintln!("[Error] initialize_adapter failed: {:?}", e);
@@ -660,7 +737,7 @@ impl Model {
                 });
             }
             Request::UpdateAdapter(req) => {
-                let backend = self.backend.clone();
+                let backend = self.primary_backend.clone();
                 tokio::spawn(async move {
                     if let Err(e) = backend.notify("update_adapter", &req).await {
                         eprintln!("[Error] update_adapter failed: {:?}", e);
@@ -668,21 +745,18 @@ impl Model {
                 });
             }
             Request::UploadAdapter(req) => {
-                let backend = self.backend.clone();
+                let backend = self.primary_backend.clone();
                 tokio::spawn(async move {
                     if let Err(e) = backend.notify("upload_adapter", &req).await {
                         eprintln!("[Error] upload_adapter failed: {:?}", e);
                     }
                 });
             }
-            Request::DownloadAdapter(req, resp_tx) => {
-                let backend = self.backend.clone();
+            Request::DownloadAdapter(req) => {
+                let backend = self.primary_backend.clone();
                 tokio::spawn(async move {
-                    let result: Result<Vec<u8>, _> = backend
-                        .call_with_timeout("download_adapter", &req, Duration::from_secs(60))
-                        .await;
-                    if let Ok(data) = result {
-                        resp_tx.send(Bytes::from(data)).ok();
+                    if let Err(e) = backend.notify("download_adapter", &req).await {
+                        eprintln!("[Error] download_adapter failed: {:?}", e);
                     }
                 });
             }

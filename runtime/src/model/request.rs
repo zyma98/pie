@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Instant;
 use tokio::sync::oneshot;
+use uuid::Uuid;
 
 pub static HANDSHAKE_ID: u32 = 0;
 
@@ -29,7 +30,7 @@ pub enum Request {
     InitializeAdapter(InitializeAdapterRequest),
     UpdateAdapter(UpdateAdapterRequest),
     UploadAdapter(UploadAdapterRequest),
-    DownloadAdapter(DownloadAdapterRequest, oneshot::Sender<Bytes>),
+    DownloadAdapter(DownloadAdapterRequest),
 }
 
 impl Request {
@@ -52,7 +53,6 @@ impl Request {
             Request::Handshake(_, _) => true,
             Request::Query(_, _) => true,
             Request::ForwardPass(_, r) => r.is_some(),
-            Request::DownloadAdapter(_, _) => true,
             _ => false,
         }
     }
@@ -68,7 +68,7 @@ impl Request {
             Request::InitializeAdapter(_) => INITIALIZE_ADAPTER_ID,
             Request::UpdateAdapter(_) => UPDATE_ADAPTER_ID,
             Request::UploadAdapter(_) => UPLOAD_ADAPTER_ID,
-            Request::DownloadAdapter(_, _) => DOWNLOAD_ADAPTER_ID,
+            Request::DownloadAdapter(_) => DOWNLOAD_ADAPTER_ID,
         }
     }
 
@@ -82,7 +82,7 @@ impl Request {
             Request::InitializeAdapter(req) => Bytes::from(rmp_serde::to_vec_named(&req)?),
             Request::UpdateAdapter(req) => Bytes::from(rmp_serde::to_vec_named(&req)?),
             Request::UploadAdapter(req) => Bytes::from(rmp_serde::to_vec_named(&req)?),
-            Request::DownloadAdapter(req, _) => Bytes::from(rmp_serde::to_vec_named(&req)?),
+            Request::DownloadAdapter(req) => Bytes::from(rmp_serde::to_vec_named(&req)?),
         };
         Ok(b)
     }
@@ -102,9 +102,6 @@ impl Request {
                 if let Some(tx) = resp {
                     tx.send(r).ok();
                 }
-            }
-            Request::DownloadAdapter(_, resp) => {
-                resp.send(b).ok();
             }
             _ => {
                 bail!("cannot deserialize response for request {:?}", self);
@@ -156,6 +153,7 @@ pub struct ForwardPassRequest {
     pub input_token_positions: Vec<u32>,
     pub input_embed_ptrs: Vec<u32>,
     pub input_embed_positions: Vec<u32>,
+    pub inst_id: Option<Uuid>,
     pub adapter: Option<u32>,
     pub adapter_seed: Option<i64>,
     pub mask: Vec<Vec<u32>>,
@@ -293,6 +291,9 @@ pub struct BatchedForwardPassRequest {
     // Trace context for cross-language propagation (W3C traceparent)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trace_context: Option<String>,
+
+    // Target group ID for Data Parallelism routing
+    pub group_id: Option<usize>,
 }
 
 impl BatchedForwardPassRequest {
@@ -322,6 +323,7 @@ impl BatchedForwardPassRequest {
             output_embed_indices: Vec::new(),
             single_token_mode: true,
             trace_context: None,
+            group_id: None,
         }
     }
 

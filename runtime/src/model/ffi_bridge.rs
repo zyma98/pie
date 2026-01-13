@@ -1,64 +1,26 @@
-//! FFI bridge for direct Python calls from the Rust runtime.
+//! IPC bridge for cross-process Python communication.
 //!
-//! This module provides an async wrapper that uses a lock-free queue
-//! to communicate with Python without spawn_blocking overhead.
-//!
-//! # Architecture
-//!
-//! ```text
-//! ┌─────────────────────────────────────────────────────────────────┐
-//! │  Rust Async Runtime                                             │
-//! │                                                                 │
-//! │   client.call("fire_batch", args).await                         │
-//! │     → serialize args                                            │
-//! │     → queue.send_request(payload)  [lock-free push]             │
-//! │     → await response channel                                    │
-//! └───────────────────────────────────────────────────────────────┬─┘
-//!                                                                 │
-//! ┌───────────────────────────────────────────────────────────────▼─┐
-//! │  Python Worker (owns CUDA)                                     │
-//! │                                                                 │
-//! │   request = queue.poll_blocking(100)                            │
-//! │   result = fire_batch(...)                                      │
-//! │   queue.respond(id, result)                                     │
-//! └─────────────────────────────────────────────────────────────────┘
-//! ```
+//! This module provides an async wrapper for IPC-based communication with
+//! Python worker processes in the symmetric worker architecture.
 
-use crate::model::ffi_queue::FfiQueue;
 use anyhow::Result;
 use serde::{de::DeserializeOwned, Serialize};
 
-/// Async FFI client that uses a queue-based approach.
+/// Async IPC client for cross-process communication.
 ///
-/// This avoids spawn_blocking overhead by using a lock-free queue
-/// that Python polls directly.
+/// Uses ipc-channel to communicate with Python processes in other PIDs.
 #[derive(Clone)]
-pub struct AsyncFfiClient {
-    queue: FfiQueue,
+pub struct AsyncIpcClient {
+    backend: std::sync::Arc<crate::model::ffi_ipc::FfiIpcBackend>,
 }
 
-impl AsyncFfiClient {
-    /// Create a new AsyncFfiClient with a shared queue.
-    ///
-    /// The queue should be passed to Python for polling.
-    pub fn new_with_queue(queue: FfiQueue) -> Self {
-        Self { queue }
+impl AsyncIpcClient {
+    /// Create a new IPC client from an FfiIpcBackend.
+    pub fn new(backend: std::sync::Arc<crate::model::ffi_ipc::FfiIpcBackend>) -> Self {
+        Self { backend }
     }
-
-    /// Get a reference to the underlying queue.
-    pub fn queue(&self) -> &FfiQueue {
-        &self.queue
-    }
-
-    /// Call a Python method asynchronously.
-    ///
-    /// This serializes the args, pushes to the queue (lock-free),
-    /// and awaits the response from Python.
-    #[tracing::instrument(
-        name = "rust.ffi_call",
-        skip(self, args),
-        fields(rpc_method = %method)
-    )]
+    
+    /// Call a Python method asynchronously via IPC.
     pub async fn call<T, R>(&self, method: &str, args: &T) -> Result<R>
     where
         T: Serialize,
@@ -67,20 +29,15 @@ impl AsyncFfiClient {
         // Serialize arguments
         let payload = rmp_serde::to_vec_named(args)
             .map_err(|e| anyhow::anyhow!("Failed to serialize args: {}", e))?;
-
-        // Send to queue and get response channel
-        let (_id, rx) = self.queue.send_request(method.to_string(), payload);
-
-        // Await response (this doesn't block the executor)
-        let response = rx
-            .await
-            .map_err(|_| anyhow::anyhow!("Response channel closed"))?;
-
+        
+        // Send via IPC
+        let response = self.backend.call(method, payload).await?;
+        
         // Deserialize response
         rmp_serde::from_slice(&response)
             .map_err(|e| anyhow::anyhow!("Failed to deserialize response: {}", e))
     }
-
+    
     /// Fire-and-forget notification.
     pub async fn notify<T>(&self, method: &str, args: &T) -> Result<()>
     where
@@ -89,7 +46,7 @@ impl AsyncFfiClient {
         let _: () = self.call(method, args).await?;
         Ok(())
     }
-
+    
     /// Call with timeout.
     pub async fn call_with_timeout<T, R>(
         &self,
@@ -103,16 +60,6 @@ impl AsyncFfiClient {
     {
         tokio::time::timeout(timeout, self.call(method, args))
             .await
-            .map_err(|_| anyhow::anyhow!("FFI call timed out"))?
+            .map_err(|_| anyhow::anyhow!("IPC call timed out"))?
     }
-}
-
-/// Timing breakdown for profiling (kept for compatibility).
-#[derive(Debug, Default)]
-pub struct FfiTiming {
-    pub serialize_us: u64,
-    pub queue_push_us: u64,
-    pub response_wait_us: u64,
-    pub deserialize_us: u64,
-    pub total_us: u64,
 }
