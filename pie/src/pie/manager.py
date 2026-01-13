@@ -306,12 +306,26 @@ def _init_distributed(rank: int, world_size: int, master_port: int, device: str)
         except (ImportError, AttributeError):
             pass
 
+    # Extract device index from device string (e.g., "cuda:0" -> 0)
+    device_id = None
+    if device.startswith("cuda:"):
+        device_id = int(device.split(":")[1])
+
     if pg_options:
         dist.init_process_group(
-            backend, rank=rank, world_size=world_size, pg_options=pg_options
+            backend,
+            rank=rank,
+            world_size=world_size,
+            pg_options=pg_options,
+            device_id=torch.device(device) if device_id is not None else None,
         )
     else:
-        dist.init_process_group(backend, rank=rank, world_size=world_size)
+        dist.init_process_group(
+            backend,
+            rank=rank,
+            world_size=world_size,
+            device_id=torch.device(device) if device_id is not None else None,
+        )
 
 
 def _setup_control_channel(rank: int, world_size: int, control_queues: list):
