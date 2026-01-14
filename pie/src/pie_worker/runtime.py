@@ -607,6 +607,7 @@ class Runtime:
             dtype=self.config.activation_dtype,
             gpu_rank=gpu_rank,
             world_size=tp_size,
+            adapter_path=self.config.adapter_path,
         )
 
     @torch.inference_mode()
@@ -1155,11 +1156,10 @@ class Runtime:
         req = message.UploadAdapterRequest(**kwargs)
         self.upload_adapter(req)
 
-    def download_adapter_rpc(self, **kwargs) -> bytes:
+    def download_adapter_rpc(self, **kwargs) -> None:
         """Handle download_adapter RPC."""
         req = message.DownloadAdapterRequest(**kwargs)
-        resp = self.download_adapter(req)
-        return resp.adapter_data
+        self.download_adapter(req)
 
     def shutdown(self):
         """
