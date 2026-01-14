@@ -323,6 +323,7 @@ class Runtime:
                     self.model_config,
                     config,
                     weights,
+                    compute_process_group=compute_process_group,
                 )
                 # Create adapter cache
                 self.adapter_at_layer = gpt_oss.create_adapter_cache(
