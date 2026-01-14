@@ -4,6 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
+import traceback
+
+# Debug log file
+_LOG_FILE = "/tmp/pie_monitor.log"
+
+
+def _log(msg):
+    with open(_LOG_FILE, "a") as f:
+        f.write(f"{msg}\n")
+
+
 import threading
 import time
 from typing import TYPE_CHECKING, List
@@ -33,7 +45,7 @@ class PieMetricsProvider:
         port: int,
         internal_token: str,
         config: dict | None = None,
-        poll_interval: float = 0.5,
+        poll_interval: float = 1.0,
         max_history: int = 500,
     ):
         self._host = host
@@ -130,15 +142,16 @@ class PieMetricsProvider:
                                 instances = await client.list_instances()
                                 with self._lock:
                                     self._latest_instances = instances
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                _log(f"[Monitor] list_instances error: {e}")
 
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            _log(f"[Monitor] poll error: {e}")
 
                         await asyncio.sleep(self._poll_interval)
 
-            except Exception:
+            except Exception as e:
+                _log(f"[Monitor] connection error: {e}")
                 with self._lock:
                     self._connected = False
                 await asyncio.sleep(1.0)
@@ -229,6 +242,10 @@ class PieMetricsProvider:
 
         # Build map of instance ID -> KV pages from stats
         inst_kv_map = {}
+        # Debug: print instance KV keys for troubleshooting
+        kv_keys = [k for k in stats.keys() if "kv_pages" in k]
+        if kv_keys:
+            _log(f"[Monitor] Instance KV keys: {kv_keys[:5]}...")
         for key, value in stats.items():
             if key.startswith("instance.") and key.endswith(".kv_pages"):
                 try:
@@ -278,7 +295,10 @@ class PieMetricsProvider:
             except Exception:
                 pass
 
-        # Update history
+        # Sort by KV cache usage (descending) and limit to top 50
+        inferlets.sort(key=lambda x: x.kv_cache, reverse=True)
+        inferlets = inferlets[:50]
+
         self.kv_cache_history.append(kv_cache_usage)
         self.token_tput_history.append(self._estimated_tput)
         self.latency_history.append(self._estimated_latency)

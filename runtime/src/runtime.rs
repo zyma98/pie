@@ -372,7 +372,7 @@ impl Service for Runtime {
             Command::ListInstances { username, event } => {
                 // Internal users (from monitor) can see all instances
                 let show_all = username == "internal";
-                let instances: Vec<message::InstanceInfo> = self
+                let mut instances: Vec<message::InstanceInfo> = self
                     .running_instances
                     .iter()
                     .chain(self.finished_instances.iter())
@@ -386,6 +386,10 @@ impl Service for Runtime {
                         kv_pages_used: 0, // TODO: query from resource_manager
                     })
                     .collect();
+                
+                // Sort by elapsed time (most recent first) and limit to 50 for performance
+                instances.sort_by(|a, b| a.elapsed_secs.cmp(&b.elapsed_secs));
+                instances.truncate(50);
 
                 event.send(instances).unwrap();
             }

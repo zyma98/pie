@@ -613,13 +613,7 @@ class ModelLoader:
                 from .model import qwen2
 
                 model_config = qwen2.ModelConfig.from_dict(hf_config)
-                # Qwen2 schema currently uses a static constant QWEN2_SCHEMA,
-                # but we usually need to pass dimensions for fusion/quantization if they were dynamic.
-                # Looking at qwen2.py, QWEN2_SCHEMA is a global variable.
-                # However, usually schemas might need to know about quantization or specific layer counts?
-                # Actually QWEN2_SCHEMA in the file is defined using "layers.*..." which handles any number of layers.
-                # So we just use it.
-                schema = qwen2.QWEN2_SCHEMA
+                schema = qwen2.create_schema(model_config)
                 num_layers = model_config.num_layers
 
             case "qwen3":

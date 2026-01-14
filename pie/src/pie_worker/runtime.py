@@ -261,9 +261,9 @@ class Runtime:
                     self.model_config,
                     config,
                     weights,
-                    # qwen2 not updated yet, leaving as is or assuming it handles extra kwargs?
-                    # Actually I didn't update qwen2.py. Only qwen3.py.
-                    # Use unmodified qwen2 for now.
+                    compute_process_group=self.compute_process_groups.get(
+                        self.group_id
+                    ),
                 )
                 # Create adapter cache
                 self.adapter_at_layer = qwen2.create_adapter_cache(
@@ -323,6 +323,7 @@ class Runtime:
                     self.model_config,
                     config,
                     weights,
+                    compute_process_group=compute_process_group,
                 )
                 # Create adapter cache
                 self.adapter_at_layer = gpt_oss.create_adapter_cache(
