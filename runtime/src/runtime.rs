@@ -225,10 +225,12 @@ struct InstanceHandle {
     username: String,
     program_hash: String,
     arguments: Vec<String>,
+    start_time: std::time::Instant,
     output_delivery_ctrl: OutputDeliveryCtrl,
     running_state: InstanceRunningState,
     join_handle: tokio::task::JoinHandle<()>,
 }
+
 
 impl Service for Runtime {
     type Command = Command;
@@ -368,20 +370,26 @@ impl Service for Runtime {
                 event.send(QueryResponse { value: res }).unwrap();
             }
             Command::ListInstances { username, event } => {
+                // Internal users (from monitor) can see all instances
+                let show_all = username == "internal";
                 let instances: Vec<message::InstanceInfo> = self
                     .running_instances
                     .iter()
                     .chain(self.finished_instances.iter())
-                    .filter(|item| item.value().username == username)
+                    .filter(|item| show_all || item.value().username == username)
                     .map(|item| message::InstanceInfo {
                         id: item.key().to_string(),
                         arguments: item.value().arguments.clone(),
                         status: item.value().running_state.clone().into(),
+                        username: item.value().username.clone(),
+                        elapsed_secs: item.value().start_time.elapsed().as_secs(),
+                        kv_pages_used: 0, // TODO: query from resource_manager
                     })
                     .collect();
 
                 event.send(instances).unwrap();
             }
+
         }
     }
 }
@@ -520,6 +528,7 @@ impl Runtime {
             username,
             program_hash,
             arguments,
+            start_time: std::time::Instant::now(),
             output_delivery_ctrl,
             running_state,
             join_handle,
@@ -615,6 +624,7 @@ impl Runtime {
             username,
             program_hash,
             arguments,
+            start_time: std::time::Instant::now(),
             output_delivery_ctrl,
             running_state: InstanceRunningState::Detached,
             join_handle,

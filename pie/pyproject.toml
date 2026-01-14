@@ -40,6 +40,7 @@ dependencies = [
     "typer>=0.12",
     "websockets>=15.0",
     "ztensor>=0.1.4",
+    "textual>=7.2.0",
 ]
 
 [project.optional-dependencies]
