@@ -453,8 +453,12 @@ class Schema:
                         f"Cannot interleaved-shard tensor {t.shape}: dim 0 not divisible by tp_size={config.tensor_parallel_size}"
                     )
                 # Ensure we have a clean copy in memory (avoid ztensor/mmap issues with views)
-                t_clone = t.clone()
-                chunk = torch.chunk(t_clone, config.tensor_parallel_size, dim=0)[
+                # chunk = torch.chunk(t, config.tensor_parallel_size, dim=0)[
+                #    config.rank % config.tensor_parallel_size
+                # ]
+                # Actually, simply remove t.clone() and use t.
+                # Use t directly (even if it's mmapped, slicing is fine)
+                chunk = torch.chunk(t, config.tensor_parallel_size, dim=0)[
                     config.rank % config.tensor_parallel_size
                 ]
                 # Check chunk validity

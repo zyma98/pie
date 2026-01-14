@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.10, <3.13"
 resolution-markers = [
     "python_full_version >= '3.12'",
@@ -222,7 +222,7 @@ name = "click"
 version = "8.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-10-pie-server-cu126' and extra == 'extra-10-pie-server-cu128') or (extra == 'extra-10-pie-server-cu126' and extra == 'extra-10-pie-server-cu130') or (extra == 'extra-10-pie-server-cu126' and extra == 'extra-10-pie-server-metal') or (extra == 'extra-10-pie-server-cu128' and extra == 'extra-10-pie-server-cu130') or (extra == 'extra-10-pie-server-cu128' and extra == 'extra-10-pie-server-metal') or (extra == 'extra-10-pie-server-cu130' and extra == 'extra-10-pie-server-metal')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/3d/fa/656b739db8587d7b5dfa22e22ed02566950fbfbcdc20311993483657a5c0/click-8.3.1.tar.gz", hash = "sha256:12ff4785d337a1bb490bb7e9c2b1ee5da3112e94a8622f26a6c77f5d2fc6842a", size = 295065, upload-time = "2025-11-15T20:45:42.706Z" }
 wheels = [
@@ -1463,7 +1463,7 @@ requires-dist = [
 
 [[package]]
 name = "pie-server"
-version = "0.2.4"
+version = "0.2.5"
 source = { editable = "." }
 dependencies = [
     { name = "einops" },
@@ -2027,7 +2027,7 @@ name = "tqdm"
 version = "4.67.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-10-pie-server-cu126' and extra == 'extra-10-pie-server-cu128') or (extra == 'extra-10-pie-server-cu126' and extra == 'extra-10-pie-server-cu130') or (extra == 'extra-10-pie-server-cu126' and extra == 'extra-10-pie-server-metal') or (extra == 'extra-10-pie-server-cu128' and extra == 'extra-10-pie-server-cu130') or (extra == 'extra-10-pie-server-cu128' and extra == 'extra-10-pie-server-metal') or (extra == 'extra-10-pie-server-cu130' and extra == 'extra-10-pie-server-metal')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a8/4b/29b4ef32e036bb34e4ab51796dd745cdba7ed47ad142a9f4a1eb8e0c744d/tqdm-4.67.1.tar.gz", hash = "sha256:f8aef9c52c08c13a65f30ea34f4e5aac3fd1a34959879d7e59e63027286627f2", size = 169737, upload-time = "2024-11-24T20:12:22.481Z" }
 wheels = [
