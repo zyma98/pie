@@ -461,8 +461,12 @@ class Runtime:
         if self.config.world_size > 1:
             msg = {"type": "INIT_ADAPTER", "kwargs": args}
             my_pg = self.compute_process_groups.get(self.group_id)
-            leader_global_rank = self.group_topology[self.group_id][0] if self.group_topology else 0
-            utils.broadcast_struct(msg, src=leader_global_rank, device=self.config.device, group=my_pg)
+            leader_global_rank = (
+                self.group_topology[self.group_id][0] if self.group_topology else 0
+            )
+            utils.broadcast_struct(
+                msg, src=leader_global_rank, device=self.config.device, group=my_pg
+            )
 
         self._initialize_adapter(**args)
 
@@ -478,8 +482,12 @@ class Runtime:
         if self.config.world_size > 1:
             msg = {"type": "UPDATE_ADAPTER", "kwargs": args}
             my_pg = self.compute_process_groups.get(self.group_id)
-            leader_global_rank = self.group_topology[self.group_id][0] if self.group_topology else 0
-            utils.broadcast_struct(msg, src=leader_global_rank, device=self.config.device, group=my_pg)
+            leader_global_rank = (
+                self.group_topology[self.group_id][0] if self.group_topology else 0
+            )
+            utils.broadcast_struct(
+                msg, src=leader_global_rank, device=self.config.device, group=my_pg
+            )
 
         self._update_adapter(**args)
 
@@ -494,8 +502,12 @@ class Runtime:
         if self.config.world_size > 1:
             msg = {"type": "UPLOAD_ADAPTER", "kwargs": args}
             my_pg = self.compute_process_groups.get(self.group_id)
-            leader_global_rank = self.group_topology[self.group_id][0] if self.group_topology else 0
-            utils.broadcast_struct(msg, src=leader_global_rank, device=self.config.device, group=my_pg)
+            leader_global_rank = (
+                self.group_topology[self.group_id][0] if self.group_topology else 0
+            )
+            utils.broadcast_struct(
+                msg, src=leader_global_rank, device=self.config.device, group=my_pg
+            )
 
         self._upload_adapter(**args)
 
@@ -519,8 +531,12 @@ class Runtime:
         if self.config.world_size > 1:
             msg = {"type": "DOWNLOAD_ADAPTER", "kwargs": args}
             my_pg = self.compute_process_groups.get(self.group_id)
-            leader_global_rank = self.group_topology[self.group_id][0] if self.group_topology else 0
-            utils.broadcast_struct(msg, src=leader_global_rank, device=self.config.device, group=my_pg)
+            leader_global_rank = (
+                self.group_topology[self.group_id][0] if self.group_topology else 0
+            )
+            utils.broadcast_struct(
+                msg, src=leader_global_rank, device=self.config.device, group=my_pg
+            )
 
         self._download_adapter(**args)
 
@@ -601,10 +617,18 @@ class Runtime:
         seeds: list[int],
         max_sigma: float,
     ):
+        # Synchronize before adapter update to ensure any pending inference is complete
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(self.config.device)
+
         if adapter_ptr in self.adapters:
             adapter = self.adapters[adapter_ptr]
             if isinstance(adapter, CmaesAdapter):
                 adapter.update(scores, seeds, max_sigma)
+
+        # Synchronize after to ensure adapter update is complete before next inference
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(self.config.device)
 
     # ========================================================================
     # Batch Execution
