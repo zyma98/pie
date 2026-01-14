@@ -259,6 +259,7 @@ def _build_backend_config(
         "max_batch_tokens": model_config.get("max_batch_tokens", 10240),
         "max_num_adapters": model_config.get("max_num_adapters", 48),
         "max_adapter_rank": model_config.get("max_adapter_rank", 8),
+        "adapter_path": model_config.get("adapter_path"),
         "gpu_mem_utilization": model_config.get("gpu_mem_utilization", 0.9),
         "max_batch_size": model_config.get("max_batch_size", 128),
         "activation_dtype": model_config.get("activation_dtype", "bfloat16"),
