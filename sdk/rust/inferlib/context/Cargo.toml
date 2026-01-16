@@ -1,0 +1,17 @@
+[package]
+name = "inferlib-context"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+name = "inferlib_context"
+
+[dependencies]
+wit-bindgen = { workspace = true }
+
+# Import bindings from other inferlib modules instead of regenerating
+inferlib-model-bindings = { path = "../model-bindings" }
+inferlib-queue-bindings = { path = "../queue-bindings" }
+inferlib-chat-bindings = { path = "../chat-bindings" }
+inferlib-brle-bindings = { path = "../brle-bindings" }
