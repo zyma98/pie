@@ -1,7 +1,7 @@
 use crate::crypto::ParsedPrivateKey;
 use crate::message::{
-    CHUNK_SIZE_BYTES, ClientMessage, EventCode, InstanceInfo, QUERY_PROGRAM_EXISTS, ServerMessage,
-    StreamingOutput,
+    CHUNK_SIZE_BYTES, ClientMessage, EventCode, InstanceInfo, LibraryInfo, QUERY_PROGRAM_EXISTS,
+    ServerMessage, StreamingOutput,
 };
 use crate::utils::IdPool;
 use anyhow::{Context, Result, anyhow};
@@ -55,6 +55,7 @@ struct ClientInner {
     corr_id_pool: IdPool<CorrId>,
     pending_requests: DashMap<CorrId, oneshot::Sender<(bool, String)>>,
     pending_list_requests: DashMap<CorrId, oneshot::Sender<Vec<InstanceInfo>>>,
+    pending_list_library_requests: DashMap<CorrId, oneshot::Sender<Vec<LibraryInfo>>>,
     pending_launch_requests:
         DashMap<CorrId, oneshot::Sender<Result<(InstanceId, mpsc::Receiver<InstanceEvent>)>>>,
     pending_attach_requests: DashMap<
@@ -160,6 +161,7 @@ impl Client {
             corr_id_pool: IdPool::new(CorrId::MAX),
             pending_requests: DashMap::new(),
             pending_list_requests: DashMap::new(),
+            pending_list_library_requests: DashMap::new(),
             pending_launch_requests: DashMap::new(),
             pending_attach_requests: DashMap::new(),
             inst_event_tx: DashMap::new(),
@@ -491,6 +493,77 @@ impl Client {
         self.send_list_msg_and_wait(msg).await
     }
 
+    /// Uploads a library component to the server.
+    ///
+    /// Libraries are WASM components that export interfaces. Other libraries
+    /// and programs can import these interfaces. Libraries must be loaded
+    /// in dependency order (dependencies first).
+    ///
+    /// # Arguments
+    /// * `name` - Unique name/identifier for the library
+    /// * `blob` - Raw WASM component bytes
+    /// * `dependencies` - Names of libraries this library depends on
+    pub async fn upload_library(
+        &self,
+        name: &str,
+        blob: &[u8],
+        dependencies: Vec<String>,
+    ) -> Result<()> {
+        let corr_id_guard = self.inner.corr_id_pool.acquire().await?;
+        let (tx, rx) = oneshot::channel();
+        self.inner.pending_requests.insert(*corr_id_guard, tx);
+
+        let total_size = blob.len();
+        let total_chunks = if total_size == 0 {
+            1
+        } else {
+            total_size.div_ceil(CHUNK_SIZE_BYTES)
+        };
+
+        for chunk_index in 0..total_chunks {
+            let start = chunk_index * CHUNK_SIZE_BYTES;
+            let end = (start + CHUNK_SIZE_BYTES).min(total_size);
+            let msg = ClientMessage::UploadLibrary {
+                corr_id: *corr_id_guard,
+                name: name.to_string(),
+                dependencies: dependencies.clone(),
+                chunk_index,
+                total_chunks,
+                chunk_data: blob[start..end].to_vec(),
+            };
+            self.inner
+                .ws_writer_tx
+                .send(Message::Binary(Bytes::from(encode::to_vec_named(&msg)?)))?;
+        }
+
+        let (successful, result) = rx.await?;
+
+        if successful {
+            Ok(())
+        } else {
+            anyhow::bail!("Library upload failed: {}", result)
+        }
+    }
+
+    /// Lists all loaded libraries on the server.
+    pub async fn list_libraries(&self) -> Result<Vec<LibraryInfo>> {
+        let corr_id_guard = self.inner.corr_id_pool.acquire().await?;
+        let msg = ClientMessage::ListLibraries {
+            corr_id: *corr_id_guard,
+        };
+
+        let (tx, rx) = oneshot::channel();
+        self.inner
+            .pending_list_library_requests
+            .insert(*corr_id_guard, tx);
+        self.inner
+            .ws_writer_tx
+            .send(Message::Binary(Bytes::from(encode::to_vec_named(&msg)?)))?;
+
+        let libraries = rx.await?;
+        Ok(libraries)
+    }
+
     /// Terminates an instance by its ID (fire-and-forget).
     pub async fn terminate_instance(&self, instance_id: &str) -> Result<()> {
         let msg = ClientMessage::TerminateInstance {
@@ -647,6 +720,11 @@ async fn handle_server_message(
                 sender.send(instances).ok();
             }
         }
+        ServerMessage::LoadedLibraries { corr_id, libraries } => {
+            if let Some((_, sender)) = inner.pending_list_library_requests.remove(&corr_id) {
+                sender.send(libraries).ok();
+            }
+        }
         ServerMessage::StreamingOutput {
             instance_id,
             output,
@@ -669,6 +747,7 @@ async fn handle_server_message(
 async fn handle_server_termination(inner: &Arc<ClientInner>) {
     inner.pending_requests.clear();
     inner.pending_list_requests.clear();
+    inner.pending_list_library_requests.clear();
     inner.pending_launch_requests.clear();
     inner.pending_attach_requests.clear();
     inner.inst_event_tx.clear();
