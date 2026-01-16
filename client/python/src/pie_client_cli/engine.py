@@ -322,9 +322,21 @@ def attach_instance(client: PieClient, instance_id: str) -> Instance:
     )
 
 
-def upload_program(client: PieClient, program_bytes: bytes) -> None:
-    """Upload a program (sync wrapper)."""
-    asyncio.get_event_loop().run_until_complete(client.upload_program(program_bytes))
+def upload_program(
+    client: PieClient,
+    program_bytes: bytes,
+    dependencies: list[str] | None = None,
+) -> None:
+    """Upload a program (sync wrapper).
+
+    Args:
+        client: The PieClient instance.
+        program_bytes: Raw WASM component bytes.
+        dependencies: Names of libraries this program depends on.
+    """
+    asyncio.get_event_loop().run_until_complete(
+        client.upload_program(program_bytes, dependencies)
+    )
 
 
 def program_exists(client: PieClient, program_hash: str) -> bool:
@@ -339,10 +351,20 @@ def launch_instance(
     program_hash: str,
     arguments: list[str],
     detached: bool = False,
+    dependencies: list[str] | None = None,
 ) -> Instance:
-    """Launch an instance (sync wrapper)."""
+    """Launch an instance (sync wrapper).
+
+    Args:
+        client: The PieClient instance.
+        program_hash: The hash of the program to launch.
+        arguments: Command-line arguments to pass to the program.
+        detached: If True, the instance runs in detached mode.
+        dependencies: Names of libraries this program depends on.
+                     If non-empty, overrides the program's upload-time dependencies.
+    """
     return asyncio.get_event_loop().run_until_complete(
-        client.launch_instance(program_hash, arguments, detached)
+        client.launch_instance(program_hash, arguments, detached, dependencies)
     )
 
 

@@ -457,10 +457,23 @@ class PieClient:
 
         return result
 
-    async def upload_program(self, program_bytes: bytes):
-        """Upload a program to the server in chunks."""
+    async def upload_program(
+        self, program_bytes: bytes, dependencies: list[str] | None = None
+    ):
+        """
+        Upload a program to the server in chunks.
+
+        :param program_bytes: Raw WASM component bytes.
+        :param dependencies: Names of libraries this program depends on.
+        """
+        if dependencies is None:
+            dependencies = []
         program_hash = blake3.blake3(program_bytes).hexdigest()
-        template = {"type": "upload_program", "program_hash": program_hash}
+        template = {
+            "type": "upload_program",
+            "program_hash": program_hash,
+            "dependencies": dependencies,
+        }
         await self._upload_chunked(program_bytes, template)
 
     async def upload_blob(self, instance_id: str, blob_bytes: bytes):
@@ -478,13 +491,24 @@ class PieClient:
         program_hash: str,
         arguments: list[str] | None = None,
         detached: bool = False,
+        dependencies: list[str] | None = None,
     ) -> Instance:
-        """Launch an instance of a program."""
+        """
+        Launch an instance of a program.
+
+        :param program_hash: The hash of the program to launch.
+        :param arguments: Command-line arguments to pass to the program.
+        :param detached: If True, the instance runs in detached mode.
+        :param dependencies: List of library dependencies.
+                            If non-empty, overrides the program's upload-time dependencies.
+        :return: An Instance object for the launched program.
+        """
         corr_id = self._get_next_corr_id()
         msg = {
             "type": "launch_instance",
             "corr_id": corr_id,
             "program_hash": program_hash,
+            "dependencies": dependencies or [],  # Empty list means use upload-time dependencies
             "arguments": arguments or [],
             "detached": detached,
         }

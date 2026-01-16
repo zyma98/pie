@@ -274,11 +274,20 @@ impl Service for Server {
     }
 }
 
-/// A generic struct to manage chunked, in-flight uploads for both programs and blobs.
+/// A generic struct to manage chunked, in-flight uploads for blobs.
 struct InFlightUpload {
     total_chunks: usize,
     buffer: Vec<u8>,
     next_chunk_index: usize,
+}
+
+/// In-flight program upload state
+struct InFlightProgramUpload {
+    total_chunks: usize,
+    buffer: Vec<u8>,
+    next_chunk_index: usize,
+    /// Names of libraries this program depends on
+    dependencies: Vec<String>,
 }
 
 /// In-flight library upload state
@@ -296,7 +305,7 @@ struct Session {
 
     state: Arc<ServerState>,
 
-    inflight_program_upload: Option<InFlightUpload>,
+    inflight_program_upload: Option<InFlightProgramUpload>,
     inflight_blob_uploads: DashMap<String, InFlightUpload>,
     inflight_library_upload: Option<InFlightLibraryUpload>,
     attached_instances: Vec<InstanceId>,
@@ -564,6 +573,7 @@ impl Session {
                 ClientMessage::UploadProgram {
                     corr_id,
                     program_hash,
+                    dependencies,
                     chunk_index,
                     total_chunks,
                     chunk_data,
@@ -571,6 +581,7 @@ impl Session {
                     self.handle_upload_program(
                         corr_id,
                         program_hash,
+                        dependencies,
                         chunk_index,
                         total_chunks,
                         chunk_data,
@@ -580,10 +591,11 @@ impl Session {
                 ClientMessage::LaunchInstance {
                     corr_id,
                     program_hash,
+                    dependencies,
                     arguments,
                     detached,
                 } => {
-                    self.handle_launch_instance(corr_id, program_hash, arguments, detached)
+                    self.handle_launch_instance(corr_id, program_hash, dependencies, arguments, detached)
                         .await
                 }
                 ClientMessage::LaunchInstanceFromRegistry {
@@ -942,6 +954,7 @@ impl Session {
         &mut self,
         corr_id: u32,
         program_hash: String,
+        dependencies: Vec<String>,
         chunk_index: usize,
         total_chunks: usize,
         mut chunk_data: Vec<u8>,
@@ -968,10 +981,11 @@ impl Session {
                     .await;
                 return;
             }
-            self.inflight_program_upload = Some(InFlightUpload {
+            self.inflight_program_upload = Some(InFlightProgramUpload {
                 total_chunks,
                 buffer: Vec::new(),
                 next_chunk_index: 0,
+                dependencies: dependencies.clone(),
             });
         }
 
@@ -1028,11 +1042,14 @@ impl Session {
                 runtime::Command::UploadProgram {
                     hash: final_hash.clone(),
                     raw: mem::take(&mut inflight.buffer),
+                    dependencies: inflight.dependencies.clone(),
                     event: evt_tx,
                 }
                 .dispatch();
-                evt_rx.await.unwrap().unwrap();
-                self.send_response(corr_id, true, final_hash).await;
+                match evt_rx.await.unwrap() {
+                    Ok(_) => self.send_response(corr_id, true, final_hash).await,
+                    Err(e) => self.send_response(corr_id, false, e.to_string()).await,
+                }
             }
             self.inflight_program_upload = None;
         }
@@ -1042,6 +1059,7 @@ impl Session {
         &mut self,
         corr_id: u32,
         program_hash: String,
+        dependencies: Vec<String>,
         arguments: Vec<String>,
         detached: bool,
     ) {
@@ -1050,6 +1068,7 @@ impl Session {
         runtime::Command::LaunchInstance {
             username: self.username.clone(),
             program_hash,
+            dependencies,
             arguments,
             detached,
             event: evt_tx,
@@ -1114,10 +1133,12 @@ impl Session {
         {
             Ok((program_hash, program_data)) => {
                 // Upload the program to the runtime (registers it for execution)
+                // Registry inferlets don't specify dependencies at upload time
                 let (evt_tx, evt_rx) = oneshot::channel();
                 runtime::Command::UploadProgram {
                     hash: program_hash.clone(),
                     raw: program_data,
+                    dependencies: Vec::new(),
                     event: evt_tx,
                 }
                 .dispatch();
@@ -1133,7 +1154,8 @@ impl Session {
                 }
 
                 // Now launch the instance using the same flow as handle_launch_instance
-                self.handle_launch_instance(corr_id, program_hash, arguments, detached)
+                // Registry inferlets use their upload-time dependencies (empty vec means use stored)
+                self.handle_launch_instance(corr_id, program_hash, Vec::new(), arguments, detached)
                     .await;
             }
             Err(e) => {

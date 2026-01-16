@@ -306,9 +306,10 @@ export class PieClient {
     /**
      * Uploads a program to the server in chunks.
      * @param {Uint8Array} programBytes The program content as a byte array.
+     * @param {string[]} [dependencies=[]] Names of libraries this program depends on.
      * @returns {Promise<void>}
      */
-    async uploadProgram(programBytes) {
+    async uploadProgram(programBytes, dependencies = []) {
         const programHash = blake3(programBytes).toString('hex');
         const chunkSize = 256 * 1024; // 256 KiB, must match server
         const totalChunks = Math.ceil(programBytes.length / chunkSize);
@@ -326,6 +327,7 @@ export class PieClient {
                 type: "upload_program",
                 corr_id: corr_id,
                 program_hash: programHash,
+                dependencies: dependencies,
                 chunk_index: i,
                 total_chunks: totalChunks,
                 chunk_data: chunkData,
@@ -345,13 +347,17 @@ export class PieClient {
      * Launches an instance of a program.
      * @param {string} programHash The hash of the program to launch.
      * @param {string[]} [args=[]] Optional command-line arguments.
+     * @param {boolean} [detached=false] If true, the instance runs in detached mode.
+     * @param {string[]|null} [dependencies=null] Optional library dependencies (overrides upload-time if provided).
      * @returns {Promise<Instance>}
      */
-    async launchInstance(programHash, args = []) {
+    async launchInstance(programHash, args = [], detached = false, dependencies = []) {
         const msg = {
             type: "launch_instance",
             program_hash: programHash,
+            dependencies: dependencies,  // empty array means use upload-time dependencies
             arguments: args,
+            detached: detached,
         };
         const { successful, result } = await this._sendMsgAndWait(msg);
         if (successful) {
