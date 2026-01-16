@@ -36,6 +36,15 @@ class InstanceInfo:
     kv_pages_used: int = 0
 
 
+@dataclass
+class LibraryInfo:
+    """Information about a loaded library."""
+
+    name: str
+    dependencies: list[str]
+    load_order: int
+
+
 class Instance:
     """Represents a running instance of a program on the server."""
 
@@ -92,8 +101,10 @@ class PieClient:
         self.pending_launch_requests = {}
         self.pending_attach_requests = {}
         self.pending_list_requests = {}
+        self.pending_list_library_requests = {}
         self.inst_event_queues = {}
         self.pending_downloads = {}  # For reassembling blob chunks
+        self.inflight_library_upload = None  # For chunked library uploads
 
         # Buffer for early events to prevent race conditions.
         self.orphan_events = {}
@@ -199,6 +210,21 @@ class PieClient:
                     for inst in instances_raw
                 ]
                 future.set_result(instances)
+
+        elif msg_type == "loaded_libraries":
+            corr_id = message.get("corr_id")
+            if corr_id in self.pending_list_library_requests:
+                future = self.pending_list_library_requests.pop(corr_id)
+                libraries_raw = message.get("libraries", [])
+                libraries = [
+                    LibraryInfo(
+                        name=lib.get("name"),
+                        dependencies=lib.get("dependencies", []),
+                        load_order=lib.get("load_order", 0),
+                    )
+                    for lib in libraries_raw
+                ]
+                future.set_result(libraries)
 
         elif msg_type == "instance_event":
             instance_id = message.get("instance_id")
@@ -547,6 +573,84 @@ class PieClient:
 
         future = asyncio.get_event_loop().create_future()
         self.pending_list_requests[corr_id] = future
+        encoded = msgpack.packb(msg, use_bin_type=True)
+        await self.ws.send(encoded)
+
+        return await future
+
+    async def upload_library(
+        self,
+        name: str,
+        library_bytes: bytes,
+        dependencies: list[str] | None = None,
+    ) -> None:
+        """
+        Upload a library component to the server.
+
+        Libraries are WASM components that export interfaces. Other libraries
+        and programs can import these interfaces. Libraries must be loaded
+        in dependency order (dependencies first).
+
+        :param name: Unique name/identifier for the library.
+        :param library_bytes: Raw WASM component bytes.
+        :param dependencies: Names of libraries this library depends on.
+        :raises Exception: If upload fails.
+        """
+        if dependencies is None:
+            dependencies = []
+
+        chunk_size = 256 * 1024
+        total_size = len(library_bytes)
+        total_chunks = (
+            (total_size + chunk_size - 1) // chunk_size if total_size > 0 else 1
+        )
+
+        corr_id = self._get_next_corr_id()
+        future = asyncio.get_event_loop().create_future()
+        self.pending_requests[corr_id] = future
+
+        if total_size == 0:
+            msg = {
+                "type": "upload_library",
+                "corr_id": corr_id,
+                "name": name,
+                "dependencies": dependencies,
+                "chunk_index": 0,
+                "total_chunks": 1,
+                "chunk_data": b"",
+            }
+            await self.ws.send(msgpack.packb(msg, use_bin_type=True))
+        else:
+            for chunk_index in range(total_chunks):
+                start = chunk_index * chunk_size
+                end = min(start + chunk_size, total_size)
+                msg = {
+                    "type": "upload_library",
+                    "corr_id": corr_id,
+                    "name": name,
+                    "dependencies": dependencies,
+                    "chunk_index": chunk_index,
+                    "total_chunks": total_chunks,
+                    "chunk_data": library_bytes[start:end],
+                }
+                await self.ws.send(msgpack.packb(msg, use_bin_type=True))
+
+        successful, result = await future
+
+        if not successful:
+            raise Exception(f"Library upload failed: {result}")
+
+    async def list_libraries(self) -> list[LibraryInfo]:
+        """
+        Get a list of all loaded libraries on the server.
+
+        :return: List of LibraryInfo objects.
+        """
+        corr_id = self._get_next_corr_id()
+        msg = {"type": "list_libraries", "corr_id": corr_id}
+
+        future = asyncio.get_event_loop().create_future()
+        self.pending_list_library_requests[corr_id] = future
         encoded = msgpack.packb(msg, use_bin_type=True)
         await self.ws.send(encoded)
 

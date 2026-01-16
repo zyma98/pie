@@ -15,7 +15,7 @@ from typing import Optional
 
 import typer
 
-from pie_client import PieClient, Event, Instance, InstanceInfo
+from pie_client import PieClient, Event, Instance, InstanceInfo, LibraryInfo
 from pie_client.crypto import ParsedPrivateKey
 
 from . import path as path_utils
@@ -367,3 +367,20 @@ def launch_instance_from_registry(
 def close_client(client: PieClient) -> None:
     """Close the client (sync wrapper)."""
     asyncio.get_event_loop().run_until_complete(client.close())
+
+
+def upload_library(
+    client: PieClient,
+    name: str,
+    library_bytes: bytes,
+    dependencies: list[str] | None = None,
+) -> None:
+    """Upload a library (sync wrapper)."""
+    asyncio.get_event_loop().run_until_complete(
+        client.upload_library(name, library_bytes, dependencies)
+    )
+
+
+def list_libraries(client: PieClient) -> list[LibraryInfo]:
+    """List loaded libraries (sync wrapper)."""
+    return asyncio.get_event_loop().run_until_complete(client.list_libraries())
