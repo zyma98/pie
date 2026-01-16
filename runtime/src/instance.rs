@@ -120,6 +120,11 @@ pub struct InstanceState {
     http_ctx: WasiHttpCtx,
     // virtual resources
     resources: HashMap<(usize, ResourceTypeId), ResourceIdMapper>,
+
+    // Dynamic linking state: maps host rep -> provider's ResourceAny
+    pub dynamic_resource_map: HashMap<u32, wasmtime::component::ResourceAny>,
+    // Counter for generating unique dynamic resource reps
+    next_dynamic_rep: u32,
 }
 
 impl WasiView for InstanceState {
@@ -172,9 +177,18 @@ impl InstanceState {
             resource_table: ResourceTable::new(),
             http_ctx: WasiHttpCtx::new(),
             resources: HashMap::new(),
+            dynamic_resource_map: HashMap::new(),
+            next_dynamic_rep: 1,
         };
 
         (state, streaming_ctrl)
+    }
+
+    /// Allocate a unique rep for dynamic resource mapping
+    pub fn alloc_dynamic_rep(&mut self) -> u32 {
+        let rep = self.next_dynamic_rep;
+        self.next_dynamic_rep += 1;
+        rep
     }
 
     pub fn id(&self) -> InstanceId {

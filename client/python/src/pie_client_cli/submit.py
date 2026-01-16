@@ -99,6 +99,7 @@ def handle_submit_command(
     private_key_path: Optional[Path] = None,
     detached: bool = False,
     link: Optional[list[Path]] = None,
+    dependencies: Optional[list[str]] = None,
     arguments: Optional[list[str]] = None,
 ) -> None:
     """Handle the `pie-cli submit` command.
@@ -113,7 +114,7 @@ def handle_submit_command(
     2. Connects to the Pie engine server
     3. If using path and libraries are specified, composes them with the inferlet using wac
     4. Uploads the composed inferlet if not already on server (path mode only)
-    5. Launches the inferlet with the provided arguments
+    5. Launches the inferlet with the provided arguments and dependencies
     6. In non-detached mode, streams the inferlet output with signal handling
     """
     # Validate at least one of inferlet or path is provided
@@ -129,6 +130,7 @@ def handle_submit_command(
         inferlet = None
 
     link = link or []
+    dependencies = dependencies or []
     arguments = arguments or []
 
     client_config = engine.ClientConfig.create(
@@ -161,7 +163,7 @@ def handle_submit_command(
 
             # Upload the composed inferlet to the server
             if not engine.program_exists(client, program_hash):
-                engine.upload_program(client, final_blob)
+                engine.upload_program(client, final_blob, dependencies)
                 typer.echo("✅ Inferlet upload successful.")
             else:
                 typer.echo("Inferlet already exists on server.")
@@ -172,6 +174,7 @@ def handle_submit_command(
                 program_hash,
                 arguments,
                 detached,
+                dependencies,
             )
         else:
             # Launch from registry

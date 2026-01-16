@@ -83,6 +83,8 @@ pub enum ClientMessage {
     UploadProgram {
         corr_id: u32,
         program_hash: String,
+        /// Names of libraries this program depends on
+        dependencies: Vec<String>,
         chunk_index: usize,
         total_chunks: usize,
         #[serde(with = "serde_bytes")]
@@ -93,6 +95,9 @@ pub enum ClientMessage {
     LaunchInstance {
         corr_id: u32,
         program_hash: String,
+        /// Names of libraries this program depends on (overrides upload-time dependencies if non-empty)
+        #[serde(default)]
+        dependencies: Vec<String>,
         arguments: Vec<String>,
         detached: bool,
     },
