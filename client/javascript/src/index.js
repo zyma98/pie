@@ -116,6 +116,7 @@ export class PieClient {
         this.ws = null;
         this.corrIdCounter = 0;
         this.pendingRequests = new Map();
+        this.pendingLibraryRequests = new Map();
         this.instEventQueues = new Map();
         this.connectionPromise = null;
     }
@@ -191,7 +192,7 @@ export class PieClient {
      * @param {object} message The decoded message object.
      */
     _processServerMessage(message) {
-        const { type, corr_id, instance_id, event, message: msg, successful, result } = message;
+        const { type, corr_id, instance_id, event, message: msg, successful, result, libraries } = message;
 
         switch (type) {
             case 'response':
@@ -204,6 +205,13 @@ export class PieClient {
             case 'instance_event':
                 if (this.instEventQueues.has(instance_id)) {
                     this.instEventQueues.get(instance_id).put([event, msg]);
+                }
+                break;
+            case 'loaded_libraries':
+                if (this.pendingLibraryRequests.has(corr_id)) {
+                    const promiseControls = this.pendingLibraryRequests.get(corr_id);
+                    promiseControls.resolve(libraries || []);
+                    this.pendingLibraryRequests.delete(corr_id);
                 }
                 break;
             case 'server_event':
@@ -383,6 +391,78 @@ export class PieClient {
         } else {
             throw new Error(`Failed to launch instance from registry: ${result}`);
         }
+    }
+
+    /**
+     * Uploads a library component to the server.
+     * 
+     * Libraries are WASM components that export interfaces. Other libraries
+     * and programs can import these interfaces. Libraries must be loaded
+     * in dependency order (dependencies first).
+     * 
+     * @param {string} name Unique name/identifier for the library.
+     * @param {Uint8Array} libraryBytes Raw WASM component bytes.
+     * @param {string[]} [dependencies=[]] Names of libraries this library depends on.
+     * @returns {Promise<void>}
+     */
+    async uploadLibrary(name, libraryBytes, dependencies = []) {
+        const chunkSize = 256 * 1024; // 256 KiB, must match server
+        const totalChunks = Math.ceil(libraryBytes.length / chunkSize) || 1;
+        const corr_id = this._getNextCorrId();
+
+        const uploadPromise = new Promise((resolve, reject) => {
+            this.pendingRequests.set(corr_id, { resolve, reject });
+        });
+
+        for (let i = 0; i < totalChunks; i++) {
+            const start = i * chunkSize;
+            const end = Math.min(start + chunkSize, libraryBytes.length);
+            const chunkData = libraryBytes.slice(start, end);
+            const msg = {
+                type: "upload_library",
+                corr_id: corr_id,
+                name: name,
+                dependencies: dependencies,
+                chunk_index: i,
+                total_chunks: totalChunks,
+                chunk_data: chunkData,
+            };
+            await this._sendMsg(msg);
+        }
+
+        const { successful, result } = await uploadPromise;
+        if (successful) {
+            console.log(`[PieClient] Library uploaded successfully: ${result}`);
+        } else {
+            throw new Error(`Library upload failed: ${result}`);
+        }
+    }
+
+    /**
+     * Lists all loaded libraries on the server.
+     * @returns {Promise<Array<{name: string, dependencies: string[], load_order: number}>>}
+     */
+    async listLibraries() {
+        return new Promise(async (resolve, reject) => {
+            if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+                return reject(new Error("WebSocket is not connected."));
+            }
+            const corr_id = this._getNextCorrId();
+            const msg = {
+                type: "list_libraries",
+                corr_id: corr_id,
+            };
+
+            this.pendingLibraryRequests.set(corr_id, { resolve, reject });
+
+            try {
+                const encoded = msgpack.encode(msg);
+                this.ws.send(encoded);
+            } catch (error) {
+                this.pendingLibraryRequests.delete(corr_id);
+                reject(error);
+            }
+        });
     }
 
     /**

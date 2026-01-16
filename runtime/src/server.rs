@@ -99,7 +99,6 @@ pub enum InternalEvent {
         cur_num_rejected_backends: Option<u32>,
         tx: oneshot::Sender<(u32, u32)>,
     },
-
 }
 
 impl ServiceCommand for ServerEvent {
@@ -270,7 +269,6 @@ impl Service for Server {
                         tx,
                     );
                 }
-
             },
         }
     }
@@ -278,6 +276,15 @@ impl Service for Server {
 
 /// A generic struct to manage chunked, in-flight uploads for both programs and blobs.
 struct InFlightUpload {
+    total_chunks: usize,
+    buffer: Vec<u8>,
+    next_chunk_index: usize,
+}
+
+/// In-flight library upload state
+struct InFlightLibraryUpload {
+    name: String,
+    dependencies: Vec<String>,
     total_chunks: usize,
     buffer: Vec<u8>,
     next_chunk_index: usize,
@@ -291,6 +298,7 @@ struct Session {
 
     inflight_program_upload: Option<InFlightUpload>,
     inflight_blob_uploads: DashMap<String, InFlightUpload>,
+    inflight_library_upload: Option<InFlightLibraryUpload>,
     attached_instances: Vec<InstanceId>,
 
     ws_msg_tx: mpsc::Sender<WsMessage>,
@@ -363,6 +371,7 @@ impl Session {
             state,
             inflight_program_upload: None,
             inflight_blob_uploads: DashMap::new(),
+            inflight_library_upload: None,
             attached_instances: Vec::new(),
             ws_msg_tx,
             client_cmd_rx,
@@ -574,13 +583,8 @@ impl Session {
                     arguments,
                     detached,
                 } => {
-                    self.handle_launch_instance(
-                        corr_id,
-                        program_hash,
-                        arguments,
-                        detached,
-                    )
-                    .await
+                    self.handle_launch_instance(corr_id, program_hash, arguments, detached)
+                        .await
                 }
                 ClientMessage::LaunchInstanceFromRegistry {
                     corr_id,
@@ -589,10 +593,7 @@ impl Session {
                     detached,
                 } => {
                     self.handle_launch_instance_from_registry(
-                        corr_id,
-                        inferlet,
-                        arguments,
-                        detached,
+                        corr_id, inferlet, arguments, detached,
                     )
                     .await
                 }
@@ -608,13 +609,8 @@ impl Session {
                     program_hash,
                     arguments,
                 } => {
-                    self.handle_launch_server_instance(
-                        corr_id,
-                        port,
-                        program_hash,
-                        arguments,
-                    )
-                    .await
+                    self.handle_launch_server_instance(corr_id, port, program_hash, arguments)
+                        .await
                 }
                 ClientMessage::SignalInstance {
                     instance_id,
@@ -661,6 +657,27 @@ impl Session {
                 }
                 ClientMessage::ListInstances { corr_id } => {
                     self.handle_list_instances(corr_id).await;
+                }
+                ClientMessage::UploadLibrary {
+                    corr_id,
+                    name,
+                    dependencies,
+                    chunk_index,
+                    total_chunks,
+                    chunk_data,
+                } => {
+                    self.handle_upload_library(
+                        corr_id,
+                        name,
+                        dependencies,
+                        chunk_index,
+                        total_chunks,
+                        chunk_data,
+                    )
+                    .await;
+                }
+                ClientMessage::ListLibraries { corr_id } => {
+                    self.handle_list_libraries(corr_id).await;
                 }
             },
             SessionEvent::InstanceEvent(cmd) => match cmd {
@@ -797,6 +814,127 @@ impl Session {
         let instances = evt_rx.await.unwrap();
 
         self.send(ServerMessage::LiveInstances { corr_id, instances })
+            .await;
+    }
+
+    async fn handle_upload_library(
+        &mut self,
+        corr_id: u32,
+        name: String,
+        dependencies: Vec<String>,
+        chunk_index: usize,
+        total_chunks: usize,
+        mut chunk_data: Vec<u8>,
+    ) {
+        if chunk_data.len() > message::CHUNK_SIZE_BYTES {
+            self.send_response(
+                corr_id,
+                false,
+                format!(
+                    "Chunk size {} exceeds limit {}",
+                    chunk_data.len(),
+                    message::CHUNK_SIZE_BYTES
+                ),
+            )
+            .await;
+            self.inflight_library_upload = None;
+            return;
+        }
+
+        // Initialize upload on first chunk
+        if self.inflight_library_upload.is_none() {
+            if chunk_index != 0 {
+                self.send_response(corr_id, false, "First chunk index must be 0".to_string())
+                    .await;
+                return;
+            }
+            self.inflight_library_upload = Some(InFlightLibraryUpload {
+                name: name.clone(),
+                dependencies: dependencies.clone(),
+                total_chunks,
+                buffer: Vec::new(),
+                next_chunk_index: 0,
+            });
+        }
+
+        let inflight = self.inflight_library_upload.as_ref().unwrap();
+
+        // Validate chunk consistency
+        if total_chunks != inflight.total_chunks {
+            self.send_response(
+                corr_id,
+                false,
+                format!(
+                    "Chunk count mismatch: expected {}, got {}",
+                    inflight.total_chunks, total_chunks
+                ),
+            )
+            .await;
+            self.inflight_library_upload = None;
+            return;
+        }
+        if chunk_index != inflight.next_chunk_index {
+            self.send_response(
+                corr_id,
+                false,
+                format!(
+                    "Out-of-order chunk: expected {}, got {}",
+                    inflight.next_chunk_index, chunk_index
+                ),
+            )
+            .await;
+            self.inflight_library_upload = None;
+            return;
+        }
+        if name != inflight.name {
+            self.send_response(
+                corr_id,
+                false,
+                format!(
+                    "Library name mismatch: expected {}, got {}",
+                    inflight.name, name
+                ),
+            )
+            .await;
+            self.inflight_library_upload = None;
+            return;
+        }
+
+        let inflight = self.inflight_library_upload.as_mut().unwrap();
+
+        inflight.buffer.append(&mut chunk_data);
+        inflight.next_chunk_index += 1;
+
+        // On final chunk, upload to runtime
+        if inflight.next_chunk_index == total_chunks {
+            let (evt_tx, evt_rx) = oneshot::channel();
+            runtime::Command::UploadLibrary {
+                name: inflight.name.clone(),
+                raw: mem::take(&mut inflight.buffer),
+                dependencies: inflight.dependencies.clone(),
+                event: evt_tx,
+            }
+            .dispatch();
+
+            match evt_rx.await.unwrap() {
+                Ok(lib_name) => {
+                    self.send_response(corr_id, true, lib_name).await;
+                }
+                Err(e) => {
+                    self.send_response(corr_id, false, e.to_string()).await;
+                }
+            }
+            self.inflight_library_upload = None;
+        }
+    }
+
+    async fn handle_list_libraries(&self, corr_id: u32) {
+        let (evt_tx, evt_rx) = oneshot::channel();
+        runtime::Command::ListLibraries { event: evt_tx }.dispatch();
+
+        let libraries = evt_rx.await.unwrap();
+
+        self.send(ServerMessage::LoadedLibraries { corr_id, libraries })
             .await;
     }
 
@@ -985,8 +1123,12 @@ impl Session {
                 .dispatch();
 
                 if let Err(e) = evt_rx.await.unwrap() {
-                    self.send_launch_result(corr_id, false, format!("Failed to register program: {}", e))
-                        .await;
+                    self.send_launch_result(
+                        corr_id,
+                        false,
+                        format!("Failed to register program: {}", e),
+                    )
+                    .await;
                     return;
                 }
 
@@ -995,8 +1137,7 @@ impl Session {
                     .await;
             }
             Err(e) => {
-                self.send_launch_result(corr_id, false, e.to_string())
-                    .await;
+                self.send_launch_result(corr_id, false, e.to_string()).await;
             }
         }
     }
@@ -1331,8 +1472,6 @@ impl Drop for Session {
     }
 }
 
-
-
 /// Parses an inferlet name into (namespace, name, version).
 ///
 /// Supported formats:
@@ -1384,9 +1523,9 @@ async fn download_inferlet_from_registry(
             version,
             cache_path
         );
-        let data = tokio::fs::read(&cache_path).await.map_err(|e| {
-            anyhow!("Failed to read cached inferlet at {:?}: {}", cache_path, e)
-        })?;
+        let data = tokio::fs::read(&cache_path)
+            .await
+            .map_err(|e| anyhow!("Failed to read cached inferlet at {:?}: {}", cache_path, e))?;
         let hash = blake3::hash(&data).to_hex().to_string();
         return Ok((hash, data));
     }
@@ -1453,13 +1592,13 @@ async fn download_inferlet_from_registry(
 
     // Cache the downloaded inferlet
     if let Some(parent) = cache_path.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|e| {
-            anyhow!("Failed to create cache directory {:?}: {}", parent, e)
-        })?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| anyhow!("Failed to create cache directory {:?}: {}", parent, e))?;
     }
-    tokio::fs::write(&cache_path, &data).await.map_err(|e| {
-        anyhow!("Failed to cache inferlet at {:?}: {}", cache_path, e)
-    })?;
+    tokio::fs::write(&cache_path, &data)
+        .await
+        .map_err(|e| anyhow!("Failed to cache inferlet at {:?}: {}", cache_path, e))?;
 
     tracing::info!(
         "Cached inferlet {}/{} @ {} to {:?} (hash: {})",

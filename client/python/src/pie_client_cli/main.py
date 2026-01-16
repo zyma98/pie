@@ -12,6 +12,7 @@ from . import abort as abort_cmd
 from . import attach as attach_cmd
 from . import config as config_cmd
 from . import list as list_cmd
+from . import load as load_cmd
 from . import ping as ping_cmd
 from . import submit as submit_cmd
 
@@ -176,7 +177,7 @@ def list_instances(
         bool, typer.Option("--long", help="Display the first 8 characters of the UUID.")
     ] = False,
 ) -> None:
-    """List all running inferlet instances."""
+    """List all loaded libraries and running inferlet instances."""
     try:
         list_cmd.handle_list_command(
             config=expand_path(config),
@@ -186,6 +187,61 @@ def list_instances(
             private_key_path=expand_path(private_key_path),
             full=full,
             long=long,
+        )
+    except Exception as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+
+
+# ============================================================================
+# Load command
+# ============================================================================
+
+
+@app.command()
+def load(
+    path: Annotated[
+        Path,
+        typer.Argument(help="Path to the library .wasm file to load"),
+    ],
+    name: Annotated[
+        Optional[str],
+        typer.Option("--name", "-n", help="Name for the library (defaults to file stem)"),
+    ] = None,
+    dependency: Annotated[
+        Optional[list[str]],
+        typer.Option(
+            "--dependency",
+            "-d",
+            help="Name of a library this library depends on (can be specified multiple times)",
+        ),
+    ] = None,
+    config: ConfigOption = None,
+    host: HostOption = None,
+    port: PortOption = None,
+    username: UsernameOption = None,
+    private_key_path: PrivateKeyPathOption = None,
+) -> None:
+    """Load a library component into the Pie engine.
+
+    Libraries are WASM components that export interfaces. Other libraries
+    and inferlets can import these interfaces. Libraries must be loaded
+    in dependency order (dependencies first).
+
+    Examples:
+        pie-client load ./logging.wasm
+        pie-client load ./calculator.wasm --name calc --dependency logging
+    """
+    try:
+        load_cmd.handle_load_command(
+            path=expand_path(path),
+            name=name,
+            dependencies=dependency,
+            config=expand_path(config),
+            host=host,
+            port=port,
+            username=username,
+            private_key_path=expand_path(private_key_path),
         )
     except Exception as e:
         typer.echo(f"Error: {e}", err=True)

@@ -50,6 +50,13 @@ pub struct InstanceInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LibraryInfo {
+    pub name: String,
+    pub dependencies: Vec<String>,
+    pub load_order: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub enum StreamingOutput {
     Stdout(String),
     Stderr(String),
@@ -145,6 +152,20 @@ pub enum ClientMessage {
 
     #[serde(rename = "list_instances")]
     ListInstances { corr_id: u32 },
+
+    #[serde(rename = "upload_library")]
+    UploadLibrary {
+        corr_id: u32,
+        name: String,
+        dependencies: Vec<String>,
+        chunk_index: usize,
+        total_chunks: usize,
+        #[serde(with = "serde_bytes")]
+        chunk_data: Vec<u8>,
+    },
+
+    #[serde(rename = "list_libraries")]
+    ListLibraries { corr_id: u32 },
 }
 
 /// Messages from server -> client
@@ -206,5 +227,11 @@ pub enum ServerMessage {
     StreamingOutput {
         instance_id: String,
         output: StreamingOutput,
+    },
+
+    #[serde(rename = "loaded_libraries")]
+    LoadedLibraries {
+        corr_id: u32,
+        libraries: Vec<LibraryInfo>,
     },
 }

@@ -6,13 +6,15 @@ use crate::model::request::QueryResponse;
 use crate::service::ServiceCommand;
 use dashmap::DashMap;
 use hyper::server::conn::http1;
-use pie_client::message;
+use pie_client::message::{self, LibraryInfo};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock};
 use thiserror::Error;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 use wasmtime::component::Resource;
+use wasmtime::component::types::ComponentItem;
 use wasmtime::{Config, Engine, Store, component::Component, component::Linker};
 use wasmtime_wasi_http::WasiHttpView;
 use wasmtime_wasi_http::bindings::exports::wasi::http::incoming_handler::{
@@ -27,6 +29,10 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The sender of the command channel, which is used to send commands to the
 /// handler task.
 static COMMAND_DISPATCHER: OnceLock<CommandDispatcher<Command>> = OnceLock::new();
+
+/// Marker type for stub resources used during library validation.
+/// These resources are registered in the validation linker but never actually used.
+struct StubResource;
 
 /// Starts the runtime service. A daemon task will be spawned to handle the
 /// commands dispatched from other services.
@@ -59,6 +65,22 @@ pub enum RuntimeError {
         #[source]
         source: wasmtime::Error,
     },
+
+    /// Library already exists
+    #[error("Library '{0}' already exists")]
+    LibraryExists(String),
+
+    /// Library not found
+    #[error("Library '{0}' not found")]
+    LibraryNotFound(String),
+
+    /// Library dependency not found
+    #[error("Library dependency '{0}' not found")]
+    MissingDependency(String),
+
+    /// Library imports cannot be satisfied by its dependencies
+    #[error("Library imports not satisfiable: {0}")]
+    UnsatisfiableImports(String),
 
     /// Fallback for unexpected cases
     #[error("Runtime error: {0}")]
@@ -134,6 +156,23 @@ pub enum Command {
         username: String,
         event: oneshot::Sender<Vec<message::InstanceInfo>>,
     },
+
+    /// Upload a library component and register its exports.
+    /// The library can specify dependencies on other libraries.
+    UploadLibrary {
+        /// Unique name/identifier for the library
+        name: String,
+        /// Raw WASM component bytes
+        raw: Vec<u8>,
+        /// Names of libraries this library depends on
+        dependencies: Vec<String>,
+        event: oneshot::Sender<Result<String, RuntimeError>>,
+    },
+
+    /// List all loaded libraries
+    ListLibraries {
+        event: oneshot::Sender<Vec<LibraryInfo>>,
+    },
 }
 
 impl ServiceCommand for Command {
@@ -142,6 +181,17 @@ impl ServiceCommand for Command {
 
 /// Holds the “global” or “runtime” data that the controller needs to manage
 /// instances, compiled programs, etc.
+/// Information about a loaded library
+struct LoadedLibrary {
+    /// The library name
+    name: String,
+    /// The compiled component (stored for potential future use)
+    #[allow(dead_code)]
+    component: Component,
+    /// Names of libraries this library depends on
+    dependencies: Vec<String>,
+}
+
 struct Runtime {
     /// The Wasmtime engine (global)
     engine: Engine,
@@ -163,6 +213,12 @@ struct Runtime {
 
     /// Running server instances
     running_server_instances: DashMap<InstanceId, InstanceHandle>,
+
+    /// Loaded libraries, keyed by library name
+    loaded_libraries: HashMap<String, LoadedLibrary>,
+
+    /// Order in which libraries were loaded (for displaying)
+    library_load_order: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -394,6 +450,20 @@ impl Service for Runtime {
                 event.send(instances).unwrap();
             }
 
+            Command::UploadLibrary {
+                name,
+                raw,
+                dependencies,
+                event,
+            } => {
+                let res = self.upload_library(name, raw, dependencies).await;
+                event.send(res).unwrap();
+            }
+
+            Command::ListLibraries { event } => {
+                let libraries = self.list_libraries();
+                event.send(libraries).unwrap();
+            }
         }
     }
 }
@@ -435,6 +505,8 @@ impl Runtime {
             running_instances: DashMap::new(),
             finished_instances: DashMap::new(),
             running_server_instances: DashMap::new(),
+            loaded_libraries: HashMap::new(),
+            library_load_order: Vec::new(),
         }
     }
 
@@ -620,7 +692,8 @@ impl Runtime {
         ));
 
         // Create a dummy output delivery controller for server instances (not used since each request gets its own instance)
-        let (dummy_state, output_delivery_ctrl) = InstanceState::new(Uuid::new_v4(), username.clone(), vec![]).await;
+        let (dummy_state, output_delivery_ctrl) =
+            InstanceState::new(Uuid::new_v4(), username.clone(), vec![]).await;
         drop(dummy_state); // We don't actually use this
 
         // Record in the "running_instances" so we can manage it later
@@ -718,6 +791,231 @@ impl Runtime {
         }
     }
 
+    /// Upload a library component and register its exports.
+    /// The library can specify dependencies on other libraries.
+    async fn upload_library(
+        &mut self,
+        name: String,
+        raw: Vec<u8>,
+        dependencies: Vec<String>,
+    ) -> Result<String, RuntimeError> {
+        // Check if library already exists
+        if self.loaded_libraries.contains_key(&name) {
+            return Err(RuntimeError::LibraryExists(name));
+        }
+
+        // Check that all dependencies exist by name
+        for dep in &dependencies {
+            if !self.loaded_libraries.contains_key(dep) {
+                return Err(RuntimeError::MissingDependency(dep.clone()));
+            }
+        }
+
+        // Compile the component to validate it's a proper WASM component
+        let component = Component::from_binary(&self.engine, &raw)
+            .map_err(|e| RuntimeError::Other(format!("Failed to compile library: {e}")))?;
+
+        // Perform rigorous dependency validation using instantiate_pre
+        self.validate_library_imports(&component, &dependencies)?;
+
+        // Store the loaded library
+        let loaded_library = LoadedLibrary {
+            name: name.clone(),
+            component,
+            dependencies,
+        };
+
+        self.loaded_libraries.insert(name.clone(), loaded_library);
+        self.library_load_order.push(name.clone());
+
+        tracing::info!("Library '{}' loaded successfully", name);
+        Ok(name)
+    }
+
+    /// Validate that a library component's imports can be satisfied by the host
+    /// interfaces and the declared dependencies.
+    ///
+    /// This creates a validation linker with:
+    /// 1. Host-defined interfaces (WASI, HTTP, Pie API)
+    /// 2. Stub definitions for all exports from dependencies (recursively)
+    ///
+    /// Then uses `instantiate_pre` to verify that all imports are satisfiable.
+    fn validate_library_imports(
+        &self,
+        component: &Component,
+        dependencies: &[String],
+    ) -> Result<(), RuntimeError> {
+        // Create a fresh linker for validation
+        let mut validation_linker = Linker::<InstanceState>::new(&self.engine);
+
+        // Add host-defined interfaces
+        wasmtime_wasi::p2::add_to_linker_async(&mut validation_linker)
+            .map_err(|e| RuntimeError::Other(format!("Failed to link WASI: {e}")))?;
+        wasmtime_wasi_http::add_only_http_to_linker_async(&mut validation_linker)
+            .map_err(|e| RuntimeError::Other(format!("Failed to link WASI HTTP: {e}")))?;
+        api::add_to_linker(&mut validation_linker)
+            .map_err(|e| RuntimeError::Other(format!("Failed to link Pie API: {e}")))?;
+
+        // Collect all dependencies (recursively) in topological order
+        let all_deps = self.collect_recursive_dependencies(dependencies)?;
+
+        // Add stub definitions for all dependency exports
+        for dep_name in &all_deps {
+            if let Some(dep_lib) = self.loaded_libraries.get(dep_name) {
+                self.add_stub_definitions_for_component(&mut validation_linker, &dep_lib.component)
+                    .map_err(|e| {
+                        RuntimeError::Other(format!(
+                            "Failed to add stub definitions for '{}': {e}",
+                            dep_name
+                        ))
+                    })?;
+            }
+        }
+
+        // Try to create an InstancePre to verify all imports are satisfiable
+        validation_linker.instantiate_pre(component).map_err(|e| {
+            RuntimeError::UnsatisfiableImports(format!(
+                "Library imports not satisfiable. \
+                 Declared dependencies: [{}]. \
+                 Available dependencies: [{}]. \
+                 Error: {e}",
+                dependencies.join(", "),
+                all_deps.join(", ")
+            ))
+        })?;
+
+        Ok(())
+    }
+
+    /// Collect all dependencies recursively in topological order (dependencies before dependents).
+    fn collect_recursive_dependencies(
+        &self,
+        direct_deps: &[String],
+    ) -> Result<Vec<String>, RuntimeError> {
+        let mut result = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+
+        fn visit(
+            dep_name: &str,
+            loaded_libraries: &HashMap<String, LoadedLibrary>,
+            result: &mut Vec<String>,
+            visited: &mut std::collections::HashSet<String>,
+        ) -> Result<(), RuntimeError> {
+            if visited.contains(dep_name) {
+                return Ok(());
+            }
+            visited.insert(dep_name.to_string());
+
+            if let Some(lib) = loaded_libraries.get(dep_name) {
+                // Visit transitive dependencies first
+                for transitive_dep in &lib.dependencies {
+                    visit(transitive_dep, loaded_libraries, result, visited)?;
+                }
+            }
+
+            result.push(dep_name.to_string());
+            Ok(())
+        }
+
+        for dep in direct_deps {
+            visit(dep, &self.loaded_libraries, &mut result, &mut visited)?;
+        }
+
+        Ok(result)
+    }
+
+    /// Add stub definitions for all exports of a component to the linker.
+    ///
+    /// This scans the component's exports and creates stub functions with matching
+    /// signatures. The stubs are never actually called - they're only used for
+    /// validation via `instantiate_pre`.
+    fn add_stub_definitions_for_component(
+        &self,
+        linker: &mut Linker<InstanceState>,
+        component: &Component,
+    ) -> Result<(), wasmtime::Error> {
+        // Get the component's type to iterate exports
+        let component_type = linker.substituted_component_type(component)?;
+
+        // Iterate directly over interface exports without collecting into a vector
+        for (export_name, export_item) in component_type.exports(&self.engine) {
+            if let ComponentItem::ComponentInstance(instance_type) = export_item {
+                self.add_stub_definitions_for_interface(linker, export_name, &instance_type)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Add stub definitions for an interface to the linker.
+    fn add_stub_definitions_for_interface(
+        &self,
+        linker: &mut Linker<InstanceState>,
+        interface_name: &str,
+        instance_type: &wasmtime::component::types::ComponentInstance,
+    ) -> Result<(), wasmtime::Error> {
+        // Try to get or create the instance; if it fails, the interface is already defined
+        let mut root = linker.root();
+        let mut inst = match root.instance(interface_name) {
+            Ok(inst) => inst,
+            Err(_) => return Ok(()), // Interface already fully defined, skip
+        };
+
+        // Register both resources and functions
+        for (export_name, export_item) in instance_type.exports(&self.engine) {
+            match export_item {
+                ComponentItem::Resource(_) => {
+                    // Register a stub resource with a no-op destructor
+                    // Silently skip if already defined
+                    let _ = inst.resource_async(
+                        export_name,
+                        wasmtime::component::ResourceType::host::<StubResource>(),
+                        |_store, _rep| Box::new(async { Ok(()) }),
+                    );
+                }
+                ComponentItem::ComponentFunc(_) => {
+                    // Create a stub function that matches the signature.
+                    // Since we're only validating via instantiate_pre, these stubs will never
+                    // actually be called - they just need to exist with matching signatures.
+                    let func_name = export_name.to_string();
+
+                    // Silently skip if already defined
+                    let _ =
+                        inst.func_new_async(export_name, move |_store, _func, _args, _results| {
+                            let func_name = func_name.clone();
+                            Box::new(async move {
+                                // This stub should never be called during validation.
+                                // instantiate_pre only checks that imports are defined,
+                                // it doesn't actually call them.
+                                unreachable!(
+                                    "Stub function '{}' was unexpectedly called during validation",
+                                    func_name
+                                );
+                            })
+                        });
+                }
+                _ => {}
+            }
+        }
+
+        Ok(())
+    }
+
+    /// List all loaded libraries
+    fn list_libraries(&self) -> Vec<LibraryInfo> {
+        self.library_load_order
+            .iter()
+            .enumerate()
+            .filter_map(|(index, name)| {
+                self.loaded_libraries.get(name).map(|lib| LibraryInfo {
+                    name: lib.name.clone(),
+                    dependencies: lib.dependencies.clone(),
+                    load_order: index as u32,
+                })
+            })
+            .collect()
+    }
+
     async fn handle_server_request(
         engine: Engine,
         linker: Arc<Linker<InstanceState>>,
@@ -727,7 +1025,8 @@ impl Runtime {
         req: hyper::Request<hyper::body::Incoming>,
     ) -> anyhow::Result<hyper::Response<HyperOutgoingBody>> {
         let inst_id = Uuid::new_v4();
-        let (inst_state, _output_delivery_ctrl) = InstanceState::new(inst_id, username, arguments).await;
+        let (inst_state, _output_delivery_ctrl) =
+            InstanceState::new(inst_id, username, arguments).await;
 
         let mut store = Store::new(&engine, inst_state);
         let (sender, receiver) = oneshot::channel();
@@ -848,7 +1147,8 @@ impl Runtime {
         output_delivery_ctrl_tx: oneshot::Sender<OutputDeliveryCtrl>,
     ) {
         // Create the instance state and output delivery controller
-        let (inst_state, output_delivery_ctrl) = InstanceState::new(instance_id, username, arguments).await;
+        let (inst_state, output_delivery_ctrl) =
+            InstanceState::new(instance_id, username, arguments).await;
 
         let output_delivery = if detached {
             OutputDelivery::Buffered
