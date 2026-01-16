@@ -1,0 +1,52 @@
+// WARNING: This file is the source of truth for the brle interface.
+// It is accessed from multiple locations:
+//   - inferlib/brle/wit/brle.wit (this file, source)
+//   - Other locations via symlinks
+// Any changes made here will be reflected in all locations that symlink to this file.
+
+package inferlib:brle;
+
+/// Interface for Binary Run-Length Encoding (BRLE) operations
+/// BRLE efficiently stores large sequences of booleans by encoding
+/// the lengths of consecutive runs of false and true values.
+interface encoding {
+    /// A BRLE resource for efficient boolean sequence storage
+    resource brle {
+        /// Creates a new BRLE instance representing `size` false values
+        constructor(size: u32);
+
+        /// Creates a BRLE from a boolean slice
+        from-bools: static func(values: list<bool>) -> brle;
+
+        /// Returns the total number of booleans in the sequence
+        len: func() -> u32;
+
+        /// Returns true if the sequence is empty
+        is-empty: func() -> bool;
+
+        /// Appends a boolean value to the end of the sequence
+        append: func(flag: bool);
+
+        /// Gets the underlying buffer of run lengths
+        /// Even indices are for false runs, odd for true
+        get-buffer: func() -> list<u32>;
+
+        /// Decodes the BRLE into a list of booleans
+        to-bools: func() -> list<bool>;
+
+        /// Creates a clone of this BRLE instance
+        clone: func() -> brle;
+
+        /// Sets a range of booleans to a specified value (start..end exclusive)
+        mask-range: func(start: u32, end: u32, flag: bool);
+
+        /// Sets multiple indices to a specified value
+        mask: func(indices: list<u32>, flag: bool);
+
+        /// Removes a range of boolean values (start..end exclusive)
+        remove-range: func(start: u32, end: u32);
+
+        /// Checks if all values in a range equal the expected value
+        is-range-all-value: func(start: u32, end: u32, expected-value: bool) -> bool;
+    }
+}
