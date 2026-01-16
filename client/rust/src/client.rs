@@ -348,7 +348,22 @@ impl Client {
             .map(|r| r == "true")
     }
 
+    /// Uploads a program to the server.
+    /// This is a convenience method that uploads a program with no dependencies.
     pub async fn upload_program(&self, blob: &[u8]) -> Result<()> {
+        self.upload_program_with_dependencies(blob, Vec::new()).await
+    }
+
+    /// Uploads a program to the server with specified library dependencies.
+    ///
+    /// # Arguments
+    /// * `blob` - Raw WASM component bytes
+    /// * `dependencies` - Names of libraries this program depends on
+    pub async fn upload_program_with_dependencies(
+        &self,
+        blob: &[u8],
+        dependencies: Vec<String>,
+    ) -> Result<()> {
         let program_hash = hash_blob(blob);
         let corr_id_guard = self.inner.corr_id_pool.acquire().await?;
         let (tx, rx) = oneshot::channel();
@@ -367,6 +382,7 @@ impl Client {
             let msg = ClientMessage::UploadProgram {
                 corr_id: *corr_id_guard,
                 program_hash: program_hash.clone(),
+                dependencies: dependencies.clone(),
                 chunk_index,
                 total_chunks,
                 chunk_data: blob[start..end].to_vec(),
@@ -385,9 +401,29 @@ impl Client {
         }
     }
 
+    /// Launches an instance of a program.
+    /// Uses the program's upload-time dependencies.
     pub async fn launch_instance(
         &self,
         program_hash: String,
+        arguments: Vec<String>,
+        detached: bool,
+    ) -> Result<Instance> {
+        self.launch_instance_with_dependencies(program_hash, Vec::new(), arguments, detached)
+            .await
+    }
+
+    /// Launches an instance of a program with dependency override.
+    ///
+    /// # Arguments
+    /// * `program_hash` - The hash of the program to launch
+    /// * `dependencies` - List of library dependencies (overrides upload-time dependencies if non-empty)
+    /// * `arguments` - Command-line arguments to pass to the program
+    /// * `detached` - If true, the instance runs in detached mode
+    pub async fn launch_instance_with_dependencies(
+        &self,
+        program_hash: String,
+        dependencies: Vec<String>,
         arguments: Vec<String>,
         detached: bool,
     ) -> Result<Instance> {
@@ -395,6 +431,7 @@ impl Client {
         let msg = ClientMessage::LaunchInstance {
             corr_id: *corr_id_guard,
             program_hash,
+            dependencies,
             arguments,
             detached,
         };

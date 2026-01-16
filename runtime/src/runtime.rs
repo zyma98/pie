@@ -13,7 +13,7 @@ use std::sync::{Arc, OnceLock};
 use thiserror::Error;
 use tokio::sync::oneshot;
 use uuid::Uuid;
-use wasmtime::component::Resource;
+use wasmtime::component::{Func, Resource, ResourceAny, ResourceType, Val};
 use wasmtime::component::types::ComponentItem;
 use wasmtime::{Config, Engine, Store, component::Component, component::Linker};
 use wasmtime_wasi_http::WasiHttpView;
@@ -100,12 +100,16 @@ pub enum Command {
     UploadProgram {
         hash: String,
         raw: Vec<u8>,
+        /// Names of libraries this program depends on
+        dependencies: Vec<String>,
         event: oneshot::Sender<Result<String, RuntimeError>>,
     },
 
     LaunchInstance {
         username: String,
         program_hash: String,
+        /// Names of libraries this program depends on (overrides upload-time dependencies if non-empty)
+        dependencies: Vec<String>,
         arguments: Vec<String>,
         detached: bool,
         event: oneshot::Sender<Result<InstanceId, RuntimeError>>,
@@ -179,14 +183,22 @@ impl ServiceCommand for Command {
     const DISPATCHER: &'static OnceLock<CommandDispatcher<Self>> = &COMMAND_DISPATCHER;
 }
 
-/// Holds the “global” or “runtime” data that the controller needs to manage
+/// Holds the "global" or "runtime" data that the controller needs to manage
 /// instances, compiled programs, etc.
+
+/// Information about a loaded program
+struct LoadedProgram {
+    /// The compiled component
+    component: Component,
+    /// Names of libraries this program depends on
+    dependencies: Vec<String>,
+}
+
 /// Information about a loaded library
 struct LoadedLibrary {
     /// The library name
     name: String,
-    /// The compiled component (stored for potential future use)
-    #[allow(dead_code)]
+    /// The compiled component
     component: Component,
     /// Names of libraries this library depends on
     dependencies: Vec<String>,
@@ -195,14 +207,15 @@ struct LoadedLibrary {
 struct Runtime {
     /// The Wasmtime engine (global)
     engine: Engine,
-    linker: Arc<Linker<InstanceState>>,
+    /// Base linker with host-defined interfaces (WASI, HTTP, Pie API)
+    base_linker: Arc<Linker<InstanceState>>,
 
     cache_dir: std::path::PathBuf,
 
-    /// Pre-compiled WASM components, keyed by BLAKE3 hex string
-    programs_in_memory: DashMap<String, Component>,
+    /// Pre-compiled WASM programs, keyed by BLAKE3 hex string
+    programs_in_memory: DashMap<String, LoadedProgram>,
 
-    /// Paths to compiled modules on disk
+    /// Paths to compiled modules on disk (just the raw bytes, no metadata)
     programs_in_disk: DashMap<String, std::path::PathBuf>,
 
     /// Running instances
@@ -299,11 +312,34 @@ impl Service for Runtime {
                 event.send(exists).unwrap();
             }
 
-            Command::UploadProgram { hash, raw, event } => {
+            Command::UploadProgram {
+                hash,
+                raw,
+                dependencies,
+                event,
+            } => {
+                // Validate that all dependencies exist
+                for dep in &dependencies {
+                    if !self.loaded_libraries.contains_key(dep) {
+                        event
+                            .send(Err(RuntimeError::MissingDependency(dep.clone())))
+                            .unwrap();
+                        return;
+                    }
+                }
+
                 if self.programs_in_memory.contains_key(&hash) {
+                    // Update dependencies even if program already exists
+                    if let Some(mut program) = self.programs_in_memory.get_mut(&hash) {
+                        program.dependencies = dependencies;
+                    }
                     event.send(Ok(hash)).unwrap();
                 } else if let Ok(component) = Component::from_binary(&self.engine, raw.as_slice()) {
-                    self.programs_in_memory.insert(hash.to_string(), component);
+                    let loaded_program = LoadedProgram {
+                        component,
+                        dependencies,
+                    };
+                    self.programs_in_memory.insert(hash.to_string(), loaded_program);
 
                     // Write to disk
                     let file_path = std::path::Path::new(&self.cache_dir).join(&hash);
@@ -320,12 +356,13 @@ impl Service for Runtime {
             Command::LaunchInstance {
                 username,
                 program_hash,
+                dependencies,
                 event,
                 arguments,
                 detached,
             } => {
                 let res = self
-                    .launch_instance(username, program_hash, arguments, detached)
+                    .launch_instance(username, program_hash, dependencies, arguments, detached)
                     .await;
                 event
                     .send(res)
@@ -480,17 +517,17 @@ impl Runtime {
 
         let engine = Engine::new(&config).unwrap();
 
-        let mut linker = Linker::<InstanceState>::new(&engine);
+        let mut base_linker = Linker::<InstanceState>::new(&engine);
 
-        // Add to linker
-        wasmtime_wasi::p2::add_to_linker_async(&mut linker)
+        // Add host-defined interfaces to the base linker
+        wasmtime_wasi::p2::add_to_linker_async(&mut base_linker)
             .map_err(|e| RuntimeError::Other(format!("Failed to link WASI: {e}")))
             .unwrap();
-        wasmtime_wasi_http::add_only_http_to_linker_async(&mut linker)
+        wasmtime_wasi_http::add_only_http_to_linker_async(&mut base_linker)
             .map_err(|e| RuntimeError::Other(format!("Failed to link WASI: {e}")))
             .unwrap();
 
-        api::add_to_linker(&mut linker).unwrap();
+        api::add_to_linker(&mut base_linker).unwrap();
 
         let cache_dir = cache_dir.as_ref().join("programs");
         // Ensure the cache directory exists
@@ -498,7 +535,7 @@ impl Runtime {
 
         Self {
             engine,
-            linker: Arc::new(linker),
+            base_linker: Arc::new(base_linker),
             cache_dir,
             programs_in_memory: DashMap::new(),
             programs_in_disk: DashMap::new(),
@@ -524,13 +561,13 @@ impl Runtime {
         Ok(())
     }
 
-    fn get_component(&self, hash: &str) -> Result<Component, RuntimeError> {
-        // 1) Make sure the `Component` is loaded in memory
+    /// Get the component and its dependencies for a program hash.
+    /// If the program is not in memory, it will be loaded from disk with empty dependencies.
+    fn get_program(&self, hash: &str) -> Result<(Component, Vec<String>), RuntimeError> {
+        // 1) Make sure the program is loaded in memory
         if self.programs_in_memory.get(hash).is_none() {
             // load from disk if possible
             if let Some(path_entry) = self.programs_in_disk.get(hash) {
-                // Use a custom error variant for compile errors
-
                 let component =
                     Component::from_file(&self.engine, path_entry.value()).map_err(|err| {
                         RuntimeError::CompileWasm {
@@ -538,54 +575,96 @@ impl Runtime {
                             source: err,
                         }
                     })?;
-                self.programs_in_memory.insert(hash.to_string(), component);
+                // Programs loaded from disk don't have stored dependencies
+                // (dependencies can be provided at launch time)
+                let loaded_program = LoadedProgram {
+                    component,
+                    dependencies: Vec::new(),
+                };
+                self.programs_in_memory
+                    .insert(hash.to_string(), loaded_program);
             } else {
                 // If not on disk either, return a custom error
                 return Err(RuntimeError::MissingProgram(hash.to_string()));
             }
         }
 
-        // 2) Now we have a compiled component
-        let component = match self.programs_in_memory.get(hash) {
-            Some(c) => c.clone(),
+        // 2) Now we have a compiled program
+        let program = match self.programs_in_memory.get(hash) {
+            Some(p) => (p.component.clone(), p.dependencies.clone()),
             None => {
                 return Err(RuntimeError::Other(
-                    "Failed to get component from memory".into(),
+                    "Failed to get program from memory".into(),
                 ));
             }
         };
 
-        Ok(component)
+        Ok(program)
     }
 
-    /// Actually start a program instance
+    /// Actually start a program instance with dynamic linking support.
+    /// If `dependencies` is non-empty, use those dependencies instead of the program's stored dependencies.
     async fn launch_instance(
-        &self,
+        &mut self,
         username: String,
         program_hash: String,
+        dependencies: Vec<String>,
         arguments: Vec<String>,
         detached: bool,
     ) -> Result<InstanceId, RuntimeError> {
-        let component = self.get_component(&program_hash)?;
+        let (component, stored_dependencies) = self.get_program(&program_hash)?;
         let instance_id = Uuid::new_v4();
+
+        // Use provided dependencies if non-empty, otherwise use stored dependencies
+        let dependencies = if dependencies.is_empty() {
+            stored_dependencies
+        } else {
+            dependencies
+        };
+
+        // Validate that all dependencies exist
+        for dep in &dependencies {
+            if !self.loaded_libraries.contains_key(dep) {
+                return Err(RuntimeError::MissingDependency(dep.clone()));
+            }
+        }
+
+        // Collect all dependencies (recursively) in topological order
+        let all_deps = self.collect_recursive_dependencies(&dependencies)?;
+
+        // Validate that all recursive dependencies exist
+        for dep in &all_deps {
+            if !self.loaded_libraries.contains_key(dep) {
+                return Err(RuntimeError::MissingDependency(dep.clone()));
+            }
+        }
 
         // Instantiate and run in a task
         let engine = self.engine.clone();
-        let linker = self.linker.clone();
+
+        // Collect library components for the dependencies
+        let library_components: Vec<(String, Component)> = all_deps
+            .iter()
+            .filter_map(|name| {
+                self.loaded_libraries
+                    .get(name)
+                    .map(|lib| (name.clone(), lib.component.clone()))
+            })
+            .collect();
 
         // Create a oneshot channel to signal when the task can start
         let (start_tx, start_rx) = oneshot::channel();
         // Create a oneshot channel to receive the output delivery controller
         let (output_delivery_ctrl_tx, output_delivery_ctrl_rx) = oneshot::channel();
 
-        let join_handle = tokio::spawn(Self::launch(
+        let join_handle = tokio::spawn(Self::launch_with_linking(
             instance_id,
             username.clone(),
             component,
+            library_components,
             arguments.clone(),
             detached,
             engine,
-            linker,
             start_rx,
             output_delivery_ctrl_tx,
         ));
@@ -662,7 +741,8 @@ impl Runtime {
         }
     }
 
-    /// Actually start a program instance
+    /// Actually start a server program instance (HTTP server mode).
+    /// Note: Server instances currently don't support dynamic linking - they use the base linker.
     async fn launch_server_instance(
         &self,
         username: String,
@@ -671,11 +751,11 @@ impl Runtime {
         arguments: Vec<String>,
     ) -> Result<InstanceId, RuntimeError> {
         let instance_id = Uuid::new_v4();
-        let component = self.get_component(&program_hash)?;
+        let (component, _dependencies) = self.get_program(&program_hash)?;
 
         // Instantiate and run in a task
         let engine = self.engine.clone();
-        let linker = self.linker.clone();
+        let linker = self.base_linker.clone();
         let addr = SocketAddr::from(([127, 0, 0, 1], port as u16));
 
         // Create a oneshot channel to signal when the task can start
@@ -1227,4 +1307,447 @@ impl Runtime {
             }
         }
     }
+
+    /// Launch an instance with dynamic linking support.
+    /// This creates a fresh linker, instantiates dependencies, and registers forwarding implementations.
+    async fn launch_with_linking(
+        instance_id: InstanceId,
+        username: String,
+        component: Component,
+        library_components: Vec<(String, Component)>,
+        arguments: Vec<String>,
+        detached: bool,
+        engine: Engine,
+        start_rx: oneshot::Receiver<()>,
+        output_delivery_ctrl_tx: oneshot::Sender<OutputDeliveryCtrl>,
+    ) {
+        // Create the instance state and output delivery controller
+        let (inst_state, output_delivery_ctrl) =
+            InstanceState::new(instance_id, username, arguments).await;
+
+        let output_delivery = if detached {
+            OutputDelivery::Buffered
+        } else {
+            OutputDelivery::Streamed
+        };
+
+        // Set the initial output delivery mode
+        output_delivery_ctrl.set_output_delivery(output_delivery);
+
+        // Send the output delivery controller back before starting
+        output_delivery_ctrl_tx
+            .send(output_delivery_ctrl)
+            .map_err(|_| "Failed to send output delivery controller")
+            .unwrap();
+
+        // Wait for the signal to start
+        start_rx.await.unwrap();
+
+        // Wrap everything in a closure returning a Result
+        let result = async {
+            // Create the store with the instance state
+            let mut store = Store::new(&engine, inst_state);
+
+            // Create a fresh linker and add host-defined interfaces
+            let mut linker = Linker::<InstanceState>::new(&engine);
+            wasmtime_wasi::p2::add_to_linker_async(&mut linker)
+                .map_err(|e| RuntimeError::Other(format!("Failed to link WASI: {e}")))?;
+            wasmtime_wasi_http::add_only_http_to_linker_async(&mut linker)
+                .map_err(|e| RuntimeError::Other(format!("Failed to link WASI HTTP: {e}")))?;
+            api::add_to_linker(&mut linker)
+                .map_err(|e| RuntimeError::Other(format!("Failed to link Pie API: {e}")))?;
+
+            // Instantiate each library in dependency order and register forwarding implementations
+            for (lib_name, lib_component) in library_components {
+                let lib_instance = linker
+                    .instantiate_async(&mut store, &lib_component)
+                    .await
+                    .map_err(|e| {
+                        RuntimeError::Other(format!(
+                            "Failed to instantiate library '{}': {e}",
+                            lib_name
+                        ))
+                    })?;
+
+                // Register forwarding implementations for this library's exports
+                Self::register_library_exports(&engine, &mut linker, &mut store, &lib_component, lib_instance)
+                    .map_err(|e| {
+                        RuntimeError::Other(format!(
+                            "Failed to register exports for library '{}': {e}",
+                            lib_name
+                        ))
+                    })?;
+            }
+
+            // Instantiate the main program
+            let instance = linker
+                .instantiate_async(&mut store, &component)
+                .await
+                .map_err(|e| RuntimeError::Other(format!("Instantiation error: {e}")))?;
+
+            // Attempt to call "run"
+            let (_, run_export) = instance
+                .get_export(&mut store, None, "inferlet:core/run")
+                .ok_or_else(|| RuntimeError::Other("No 'run' function found".into()))?;
+
+            let (_, run_func_export) = instance
+                .get_export(&mut store, Some(&run_export), "run")
+                .ok_or_else(|| RuntimeError::Other("No 'run' function found".into()))?;
+
+            let run_func = instance
+                .get_typed_func::<(), (Result<(), String>,)>(&mut store, &run_func_export)
+                .map_err(|e| RuntimeError::Other(format!("Failed to get 'run' function: {e}")))?;
+
+            return match run_func.call_async(&mut store, ()).await {
+                Ok((Ok(()),)) => {
+                    let return_value = store.data().return_value();
+                    Ok(return_value)
+                }
+                Ok((Err(runtime_err),)) => Err(RuntimeError::Other(runtime_err)),
+                Err(call_err) => Err(RuntimeError::Other(format!("Call error: {call_err}"))),
+            };
+        }
+        .await;
+
+        match result {
+            Ok(return_value) => {
+                Command::FinishInstance {
+                    inst_id: instance_id,
+                    cause: TerminationCause::Normal(return_value.unwrap_or_default()),
+                }
+                .dispatch();
+            }
+            Err(err) => {
+                tracing::info!("Instance {instance_id} failed: {err}");
+                Command::FinishInstance {
+                    inst_id: instance_id,
+                    cause: TerminationCause::Exception(err.to_string()),
+                }
+                .dispatch();
+            }
+        }
+    }
+
+    /// Register forwarding implementations for a library's exports.
+    /// This scans the library component's exports and registers functions that forward calls
+    /// to the library instance.
+    fn register_library_exports(
+        engine: &Engine,
+        linker: &mut Linker<InstanceState>,
+        store: &mut Store<InstanceState>,
+        library_component: &Component,
+        library_instance: wasmtime::component::Instance,
+    ) -> Result<(), wasmtime::Error> {
+        // Get the component's type to iterate exports
+        let component_type = linker.substituted_component_type(library_component)?;
+
+        // Iterate over interface exports
+        for (export_name, export_item) in component_type.exports(engine) {
+            if let ComponentItem::ComponentInstance(instance_type) = export_item {
+                Self::register_interface_exports(
+                    engine,
+                    linker,
+                    store,
+                    &export_name,
+                    &instance_type,
+                    library_instance,
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Register forwarding implementations for an interface.
+    fn register_interface_exports(
+        engine: &Engine,
+        linker: &mut Linker<InstanceState>,
+        store: &mut Store<InstanceState>,
+        interface_name: &str,
+        instance_type: &wasmtime::component::types::ComponentInstance,
+        library_instance: wasmtime::component::Instance,
+    ) -> Result<(), wasmtime::Error> {
+        // Get the interface export index from the library
+        let (_, interface_idx) = match library_instance.get_export(&mut *store, None, interface_name) {
+            Some(idx) => idx,
+            None => return Ok(()), // Interface not exported, skip
+        };
+
+        let mut root = linker.root();
+        let mut inst = match root.instance(interface_name) {
+            Ok(inst) => inst,
+            Err(_) => return Ok(()), // Interface already fully defined, skip
+        };
+
+        // Collect resources first
+        let mut resources: Vec<Arc<str>> = Vec::new();
+        let mut functions = Vec::new();
+
+        for (export_name, export_item) in instance_type.exports(engine) {
+            match export_item {
+                ComponentItem::Resource(_) => {
+                    let resource_name_arc: Arc<str> = export_name.into();
+                    resources.push(resource_name_arc.clone());
+
+                    // Register a stub resource with a destructor that forwards to the library
+                    let iface = Arc::<str>::from(interface_name);
+                    let res = resource_name_arc;
+
+                    let _ = inst.resource_async(
+                        export_name,
+                        ResourceType::host::<DynamicResource>(),
+                        move |mut store, rep| {
+                            let iface = iface.clone();
+                            let res = res.clone();
+
+                            Box::new(async move {
+                                tracing::debug!(
+                                    "Resource destructor called: {}::{} rep={}",
+                                    iface, res, rep
+                                );
+
+                                // Look up the provider resource from the resource map
+                                let provider_resource = store.data_mut().dynamic_resource_map.remove(&rep);
+
+                                if let Some(resource_any) = provider_resource {
+                                    resource_any.resource_drop_async(&mut store).await?;
+                                }
+
+                                Ok(())
+                            })
+                        },
+                    );
+                }
+                ComponentItem::ComponentFunc(func_type) => {
+                    functions.push((export_name.to_string(), func_type));
+                }
+                _ => {}
+            }
+        }
+
+        // Process functions
+        for (export_name, func_type) in functions {
+            // Look up the function export index
+            let (_, func_idx) = match library_instance.get_export(&mut *store, Some(&interface_idx), &export_name) {
+                Some(idx) => idx,
+                None => continue, // Function not found, skip
+            };
+
+            // Resolve the Func handle
+            let provider_func = match library_instance.get_func(&mut *store, &func_idx) {
+                Some(f) => f,
+                None => continue, // Not a function, skip
+            };
+
+            // Categorize the function
+            let func_category = categorize_function(&export_name, &resources);
+
+            match func_category {
+                FuncCategory::Constructor { resource: _ } => {
+                    Self::register_constructor_forwarding(&mut inst, &export_name, provider_func)?;
+                }
+                FuncCategory::Method { resource: _ } => {
+                    Self::register_method_forwarding(&mut inst, &export_name, &func_type, provider_func)?;
+                }
+                FuncCategory::StaticMethod { .. } | FuncCategory::FreeFunction => {
+                    Self::register_static_function_forwarding(&mut inst, &export_name, &func_type, provider_func)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Register a constructor function that forwards to the library
+    fn register_constructor_forwarding(
+        inst: &mut wasmtime::component::LinkerInstance<'_, InstanceState>,
+        func_name: &str,
+        provider_func: Func,
+    ) -> Result<(), wasmtime::Error> {
+        let func_name_for_log: Arc<str> = func_name.into();
+
+        inst.func_new_async(func_name, move |mut store, _func, args, results| {
+            let func_name_for_log = func_name_for_log.clone();
+
+            Box::new(async move {
+                tracing::debug!("Constructor {} called with {} args", func_name_for_log, args.len());
+
+                // Call provider's constructor
+                let mut ctor_results = vec![Val::Bool(false)];
+                provider_func.call_async(&mut store, args, &mut ctor_results).await?;
+                provider_func.post_return_async(&mut store).await?;
+
+                // Get the ResourceAny from the result
+                let provider_resource = match &ctor_results[0] {
+                    Val::Resource(r) => r.clone(),
+                    _ => return Err(wasmtime::Error::msg("constructor did not return resource")),
+                };
+
+                // Allocate a host rep and store the mapping
+                let rep = store.data_mut().alloc_dynamic_rep();
+                store.data_mut().dynamic_resource_map.insert(rep, provider_resource);
+
+                // Create host resource and convert to ResourceAny for the return value
+                let host_resource = Resource::<DynamicResource>::new_own(rep);
+                let host_resource_any = ResourceAny::try_from_resource(host_resource, &mut store)?;
+                results[0] = Val::Resource(host_resource_any);
+
+                Ok(())
+            })
+        })?;
+
+        Ok(())
+    }
+
+    /// Register a method function that forwards to the library
+    fn register_method_forwarding(
+        inst: &mut wasmtime::component::LinkerInstance<'_, InstanceState>,
+        func_name: &str,
+        func_type: &wasmtime::component::types::ComponentFunc,
+        provider_func: Func,
+    ) -> Result<(), wasmtime::Error> {
+        let _has_results = func_type.results().len() > 0;
+        let func_name_for_log: Arc<str> = func_name.into();
+
+        inst.func_new_async(func_name, move |mut store, _func, args, results| {
+            let func_name_for_log = func_name_for_log.clone();
+            let num_results = results.len();
+
+            Box::new(async move {
+                tracing::debug!("Method {} called with {} args", func_name_for_log, args.len());
+
+                // First arg is the resource handle
+                let host_resource_any = match &args[0] {
+                    Val::Resource(r) => r.clone(),
+                    _ => return Err(wasmtime::Error::msg("expected resource as first argument")),
+                };
+
+                // Convert to typed Resource to get the rep
+                let host_resource: Resource<DynamicResource> =
+                    Resource::try_from_resource_any(host_resource_any, &mut store)?;
+                let rep = host_resource.rep();
+
+                // Get the provider resource
+                let provider_resource = store
+                    .data()
+                    .dynamic_resource_map
+                    .get(&rep)
+                    .cloned()
+                    .ok_or_else(|| wasmtime::Error::msg(format!("unknown resource rep={}", rep)))?;
+
+                // Build args for provider call: first element is the provider resource, rest are from args[1..]
+                let provider_args: Vec<Val> = std::iter::once(Val::Resource(provider_resource))
+                    .chain(args[1..].iter().cloned())
+                    .collect();
+
+                // Call provider's method
+                if num_results > 0 {
+                    let mut method_results = vec![Val::Bool(false); num_results];
+                    provider_func.call_async(&mut store, &provider_args, &mut method_results).await?;
+                    provider_func.post_return_async(&mut store).await?;
+                    for (i, r) in method_results.into_iter().enumerate() {
+                        results[i] = r;
+                    }
+                } else {
+                    provider_func.call_async(&mut store, &provider_args, &mut []).await?;
+                    provider_func.post_return_async(&mut store).await?;
+                }
+
+                Ok(())
+            })
+        })?;
+
+        Ok(())
+    }
+
+    /// Register a static function that forwards to the library
+    fn register_static_function_forwarding(
+        inst: &mut wasmtime::component::LinkerInstance<'_, InstanceState>,
+        func_name: &str,
+        func_type: &wasmtime::component::types::ComponentFunc,
+        provider_func: Func,
+    ) -> Result<(), wasmtime::Error> {
+        let _has_results = func_type.results().len() > 0;
+        let func_name_for_log: Arc<str> = func_name.into();
+
+        inst.func_new_async(func_name, move |mut store, _func, args, results| {
+            let func_name_for_log = func_name_for_log.clone();
+            let num_results = results.len();
+
+            Box::new(async move {
+                tracing::debug!("Static function {} called with {} args", func_name_for_log, args.len());
+
+                // Call provider's function directly
+                if num_results > 0 {
+                    let mut func_results = vec![Val::Bool(false); num_results];
+                    provider_func.call_async(&mut store, args, &mut func_results).await?;
+                    provider_func.post_return_async(&mut store).await?;
+                    for (i, r) in func_results.into_iter().enumerate() {
+                        results[i] = r;
+                    }
+                } else {
+                    provider_func.call_async(&mut store, args, &mut []).await?;
+                    provider_func.post_return_async(&mut store).await?;
+                }
+
+                Ok(())
+            })
+        })?;
+
+        Ok(())
+    }
+}
+
+/// Dynamic marker type for host-defined resources used in dynamic linking.
+/// This is a phantom type used to create host resource handles.
+struct DynamicResource;
+
+/// Categories of functions in the component model
+enum FuncCategory {
+    Constructor { resource: Arc<str> },
+    Method { resource: Arc<str> },
+    StaticMethod { _resource: Arc<str> },
+    FreeFunction,
+}
+
+/// Categorize a function based on its name and the known resources
+fn categorize_function(func_name: &str, resources: &[Arc<str>]) -> FuncCategory {
+    // Check for constructor: [constructor]resource-name
+    if let Some(resource_name) = func_name.strip_prefix("[constructor]") {
+        let resource = resources
+            .iter()
+            .find(|r| r.as_ref() == resource_name)
+            .cloned()
+            .unwrap_or_else(|| resource_name.into());
+        return FuncCategory::Constructor { resource };
+    }
+
+    // Check for method: [method]resource-name.method-name
+    if let Some(rest) = func_name.strip_prefix("[method]") {
+        if let Some(dot_pos) = rest.find('.') {
+            let resource_name = &rest[..dot_pos];
+            let resource = resources
+                .iter()
+                .find(|r| r.as_ref() == resource_name)
+                .cloned()
+                .unwrap_or_else(|| resource_name.into());
+            return FuncCategory::Method { resource };
+        }
+    }
+
+    // Check for static method: [static]resource-name.method-name
+    if let Some(rest) = func_name.strip_prefix("[static]") {
+        if let Some(dot_pos) = rest.find('.') {
+            let resource_name = &rest[..dot_pos];
+            let resource = resources
+                .iter()
+                .find(|r| r.as_ref() == resource_name)
+                .cloned()
+                .unwrap_or_else(|| resource_name.into());
+            return FuncCategory::StaticMethod { _resource: resource };
+        }
+    }
+
+    // Otherwise it's a free function
+    FuncCategory::FreeFunction
 }

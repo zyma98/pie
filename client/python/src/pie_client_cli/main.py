@@ -96,11 +96,19 @@ def submit(
     private_key_path: PrivateKeyPathOption = None,
     detached: Annotated[
         bool,
-        typer.Option("-d", "--detached", help="Run the inferlet in detached mode."),
+        typer.Option("--detached", help="Run the inferlet in detached mode."),
     ] = False,
     link: Annotated[
         Optional[list[Path]],
-        typer.Option("-l", "--link", help="Paths to .wasm library files to link."),
+        typer.Option("-l", "--link", help="Paths to .wasm library files to statically link."),
+    ] = None,
+    dependency: Annotated[
+        Optional[list[str]],
+        typer.Option(
+            "-d",
+            "--dependency",
+            help="Name of a loaded library to dynamically link (can be specified multiple times).",
+        ),
     ] = None,
     arguments: Annotated[
         Optional[list[str]], typer.Argument(help="Arguments to pass to the inferlet.")
@@ -112,6 +120,9 @@ def submit(
 
     - By registry: pie-client submit std/text-completion@0.1.0
     - By path: pie-client submit --path ./my_inferlet.wasm
+
+    Use --link for static linking (composing WASM files at submit time using wac).
+    Use --dependency for dynamic linking (resolving imports at runtime from loaded libraries).
     """
     try:
         submit_cmd.handle_submit_command(
@@ -124,6 +135,7 @@ def submit(
             private_key_path=expand_path(private_key_path),
             detached=detached,
             link=[expand_path(p) for p in link] if link else None,
+            dependencies=dependency,
             arguments=arguments,
         )
     except Exception as e:
