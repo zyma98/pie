@@ -1,0 +1,5 @@
+package inferlib:brle-bindings;
+
+world brle-bindings {
+    import inferlib:brle/encoding;
+}
