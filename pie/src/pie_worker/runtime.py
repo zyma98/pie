@@ -21,12 +21,13 @@ from .config import RuntimeConfig
 from .batching import Batch
 from .loader import ModelLoader
 from .adapter import AdapterSubpass, CmaesAdapter
-from .model import llama3, qwen2, qwen3, common
+from .model import llama3, qwen2, qwen3, gemma2, common
 from .model.chat_templates import (
     Llama3Template,
     Qwen2_5Template,
     Qwen3Template,
     GPTOSSTemplate,
+    Gemma2Template,
     ChatTemplate,
 )
 
@@ -339,6 +340,33 @@ class Runtime:
                     self.model_config, config
                 )
 
+            case "gemma2":
+                # Create model config
+                self.model_config = gemma2.ModelConfig.from_dict(normalized_arch)
+
+                # Evaluate and store max_num_kv_pages in config FIRST
+                config.max_num_kv_pages = self.model_config.eval_max_num_kv_pages(
+                    config
+                )
+
+                # Create forward pass with weights
+                self.engine = gemma2.ForwardPass(
+                    self.model_config,
+                    config,
+                    weights,
+                    compute_process_group=self.compute_process_groups.get(
+                        self.group_id
+                    ),
+                )
+                # Create adapter cache
+                self.adapter_at_layer = gemma2.create_adapter_cache(
+                    self.model_config, config
+                )
+                # Create KV cache
+                self.kv_cache_at_layer = gemma2.create_kv_cache(
+                    self.model_config, config
+                )
+
             case _:
                 raise ValueError(f"Unsupported architecture type: {self.type}")
 
@@ -410,6 +438,8 @@ class Runtime:
             template = Qwen3Template
         elif self.type == "gptoss":
             template = GPTOSSTemplate
+        elif self.type == "gemma2":
+            template = Gemma2Template
 
         if template:
             return {
