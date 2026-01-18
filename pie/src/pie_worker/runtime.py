@@ -369,8 +369,15 @@ class Runtime:
         self.kv_cache_at_layer = create_kv_cache(self.model_config, self.config)
         self.adapter_at_layer = create_adapter_cache(self.model_config, self.config)
 
-        # Dummy tokenizer info - no snapshot_dir means we'll return minimal info
-        self.snapshot_dir = None
+        # Load tokenizer from HuggingFace (doesn't require GPU)
+        # This is needed for the Rust tokenizer to work properly
+        try:
+            self.snapshot_dir = hf_utils.get_hf_snapshot_dir(self.config.hf_repo)
+            self._log(f"Loaded tokenizer from {self.config.hf_repo}", "DEBUG")
+        except Exception as e:
+            self._log(f"Could not load tokenizer: {e}. Using empty tokenizer.", "WARN")
+            self.snapshot_dir = None
+
         self.info = {
             "architecture": {"type": "dummy"},
             "vocab_size": self.model_config.vocab_size,
@@ -394,7 +401,8 @@ class Runtime:
         """Get chat template configuration based on model type."""
         template: ChatTemplate | None = None
 
-        if self.type == "llama3" or self.type == "l4ma":
+        if self.type == "llama3" or self.type == "l4ma" or self.type == "dummy":
+            # Use Llama3Template for dummy mode too (since default hf_repo is Llama)
             template = Llama3Template
         elif self.type == "qwen2":
             template = Qwen2_5Template
