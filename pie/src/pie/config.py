@@ -1,11 +1,11 @@
 """Configuration utilities for Pie."""
 
-import torch
-
 DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
 
 
 def get_default_device() -> str:
+    import torch
+
     """Get the default device based on the platform."""
     if torch.cuda.is_available():
         return "cuda:0"
@@ -62,6 +62,7 @@ max_num_embeds = 128
 # Adapter (LoRA) settings
 max_num_adapters = 32
 max_adapter_rank = 8
+adapter_path = "~/.pie/adapters/"
 
 # Memory management
 gpu_mem_utilization = 0.8

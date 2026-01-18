@@ -13,7 +13,6 @@ from rich.panel import Panel
 from rich.text import Text
 
 from pie import path as pie_path
-from pie import manager
 
 console = Console()
 
@@ -105,6 +104,9 @@ def serve(
     interactive: bool = typer.Option(
         False, "--interactive", "-i", help="Enable interactive shell mode"
     ),
+    monitor: bool = typer.Option(
+        False, "--monitor", "-m", help="Launch real-time TUI monitor"
+    ),
 ) -> None:
     """Start the Pie engine and enter an interactive session.
 
@@ -150,6 +152,8 @@ def serve(
 
     try:
         # Start engine and backends
+        from pie import manager
+
         server_handle, backend_processes = manager.start_engine_and_backend(
             engine_config, model_configs, console=console
         )
@@ -158,6 +162,31 @@ def serve(
             console.print("[dim]Type 'help' for commands, ↑/↓ for history[/dim]")
             console.print()
             manager.run_interactive_shell(engine_config, server_handle.internal_token)
+        elif monitor:
+            # Launch real-time TUI monitor
+            from pie_cli.monitor.app import LLMMonitorApp
+            from pie_cli.monitor.provider import PieMetricsProvider
+
+            provider = PieMetricsProvider(
+                host=engine_config.get("host", "127.0.0.1"),
+                port=engine_config.get("port", 8000),
+                internal_token=server_handle.internal_token,
+                config={
+                    "model": (
+                        model_configs[0].get("name", "Unknown")
+                        if model_configs
+                        else "Unknown"
+                    ),
+                    "tp_size": engine_config.get("tp_size", 1),
+                    "max_batch": engine_config.get("max_batch_size", 32),
+                },
+            )
+            provider.start()
+
+            app = LLMMonitorApp(provider=provider)
+            app.run()
+
+            provider.stop()
         else:
             import time
 
@@ -188,10 +217,12 @@ def serve(
         with console.status("[dim]Shutting down...[/dim]"):
             manager.terminate_engine_and_backend(server_handle, backend_processes)
         console.print("[green]✓[/green] Shutdown complete")
-    except manager.EngineError as e:
-        console.print(f"[red]✗[/red] {e}")
-        raise typer.Exit(1)
     except Exception as e:
+        from pie import manager
+
+        if isinstance(e, manager.EngineError):
+            console.print(f"[red]✗[/red] {e}")
+            raise typer.Exit(1)
         console.print(f"[red]✗[/red] Error: {e}")
         manager.terminate_engine_and_backend(server_handle, backend_processes)
         raise typer.Exit(1)

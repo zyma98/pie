@@ -13,37 +13,9 @@ import asyncio
 import warnings
 from pathlib import Path
 
-# Suppress semaphore leak warnings from multiprocessing resource_tracker
-# These occur when workers are forcefully terminated during shutdown and are cosmetic
-# Set env var so it propagates to child processes (resource_tracker)
-os.environ.setdefault(
-    "PYTHONWARNINGS",
-    "ignore::UserWarning:multiprocessing.resource_tracker",
-)
-warnings.filterwarnings("ignore", message=".*leaked semaphore.*", category=UserWarning)
+
 from typing import Optional, Any
 import queue  # For Queue type hint logic if needed, but Queue is from MP
-
-import torch
-import torch.multiprocessing as mp
-import torch.distributed as dist
-
-
-import blake3
-
-
-from rich.console import Console
-
-from . import path as pie_path
-from . import _pie
-
-from pie_worker import utils as pie_utils
-from pie_worker.server import start_ffi_worker
-from pie_worker.config import RuntimeConfig
-from pie_worker.runtime import Runtime
-
-
-from pie_client import PieClient, Event
 
 
 class EngineError(Exception):
@@ -123,6 +95,10 @@ def start_engine_and_backend(
         if on_message:
             on_message(level, msg)
 
+    from . import path as pie_path
+    from . import _pie
+    import torch
+
     # Load authorized users if auth is enabled
     authorized_users_path = None
     if engine_config.get("enable_auth", True):
@@ -190,6 +166,7 @@ def start_engine_and_backend(
                 world_size,
                 console,
                 status_update,
+                timeout,
             )
             server_handle = backend_processes.pop(0)  # First element is server_handle
         else:
@@ -206,6 +183,7 @@ def start_engine_and_backend(
                 1,  # world_size = 1
                 console,
                 status_update,
+                timeout,
             )
             server_handle = backend_processes.pop(0)  # First element is server_handle
 
@@ -257,6 +235,7 @@ def _build_backend_config(
         "max_batch_tokens": model_config.get("max_batch_tokens", 10240),
         "max_num_adapters": model_config.get("max_num_adapters", 48),
         "max_adapter_rank": model_config.get("max_adapter_rank", 8),
+        "adapter_path": model_config.get("adapter_path"),
         "gpu_mem_utilization": model_config.get("gpu_mem_utilization", 0.9),
         "max_batch_size": model_config.get("max_batch_size", 128),
         "activation_dtype": model_config.get("activation_dtype", "bfloat16"),
@@ -269,7 +248,7 @@ def _build_backend_config(
             "service_name", "pie"
         ),
         "random_seed": model_config.get("random_seed", 42),
-        "use_cuda_graphs": model_config.get("use_cuda_graphs", True),
+        "use_cuda_graphs": model_config.get("use_cuda_graphs", False),
     }
 
     # Add device with correct key
@@ -291,6 +270,8 @@ def _init_distributed(rank: int, world_size: int, master_port: int, device: str)
     Sets up CUDA device and process group using FileStore for rendezvous.
     """
     import datetime
+    import torch
+    import torch.distributed as dist
 
     # Set CUDA device
     torch.cuda.set_device(device)
@@ -325,6 +306,8 @@ def _init_distributed(rank: int, world_size: int, master_port: int, device: str)
 
 def _setup_process_groups(rank: int, group_topology: list[list[int]]) -> dict:
     """Create ProcessGroups for each execution group (Rank 0 + Group Workers)."""
+    import torch.distributed as dist
+
     pg_map = {}
     for i, group_ranks in enumerate(group_topology):
         # Comm group includes Rank 0 (Controller) + Group Workers
@@ -342,6 +325,8 @@ def _setup_process_groups(rank: int, group_topology: list[list[int]]) -> dict:
 
 def _setup_compute_process_groups(rank: int, group_topology: list[list[int]]) -> dict:
     """Create ProcessGroups for Tensor Parallel computation (TP ranks only)."""
+    import torch.distributed as dist
+
     pg_map = {}
     for i, group_ranks in enumerate(group_topology):
         # Compute group includes ONLY the TP workers for this group
@@ -368,6 +353,9 @@ def _create_runtime(
     compute_pg_map: dict | None = None,
 ):
     """Create a Runtime instance for the given rank."""
+
+    from pie_worker.config import RuntimeConfig
+    from pie_worker.runtime import Runtime
 
     # Remove device/devices from config to avoid duplicate argument
     filtered_config = {
@@ -415,6 +403,7 @@ def _start_multi_gpu_ffi_backend(
     world_size: int,
     console,
     status_update: callable,
+    timeout: float,
 ) -> list:
     """Start multi-GPU backend with Coordinator + All Workers architecture.
 
@@ -435,6 +424,10 @@ def _start_multi_gpu_ffi_backend(
 
     status_update(f"Initializing multi-GPU backend ({world_size} devices)...")
 
+    import torch.multiprocessing as mp
+    from . import _pie
+    from . import path as pie_path
+
     # Use 'spawn' context for CUDA compatibility
     mp.set_start_method("spawn", force=True)
 
@@ -448,8 +441,17 @@ def _start_multi_gpu_ffi_backend(
 
     # Determine Tensor Parallel degree and topology
     tp_degree = model_config.get(
-        "tensor_parallel_size", engine_config.get("tensor_parallel_size", 1)
+        "tensor_parallel_size", engine_config.get("tensor_parallel_size")
     )
+    if tp_degree is None:
+        # Default to world_size (TP across all devices) to avoid OOM by default
+        # If users want DP, they should explicitly set tensor_parallel_size=1
+        tp_degree = world_size
+        if console:
+            console.print(
+                f"[yellow]![/yellow] tensor_parallel_size not set, defaulting to {tp_degree} (use all GPUs)"
+            )
+
     group_topology = _calculate_topology(world_size, tp_degree)
     num_groups = len(group_topology)
 
@@ -486,8 +488,40 @@ def _start_multi_gpu_ffi_backend(
 
     # Wait for ALL workers to signal they've connected to IPC
     # Each worker sends its rank when ready
-    for _ in range(world_size):
-        rank = ready_queue.get(timeout=240)  # 2 minute timeout for model loading
+    # Wait for ALL workers to signal they've connected to IPC
+    # Monitor processes while waiting to catch early exits (e.g. OOM)
+    connected_ranks = set()
+    start_wait = time.time()
+
+    # We need to wait for world_size ranks
+    while len(connected_ranks) < world_size:
+        # 1. Check if processes are alive to catch early exits (e.g. OOM)
+        for p in ctx.processes:
+            if not p.is_alive():
+                exitcode = p.exitcode
+                if exitcode != 0:
+                    raise RuntimeError(
+                        f"Worker process {p.pid} died unexpectedly with exit code {exitcode}"
+                    )
+
+        # 2. Check for timeout
+        if time.time() - start_wait > timeout:
+            # Clean up
+            ready_queue.close()
+            ready_queue.join_thread()
+            raise TimeoutError(f"Timed out waiting for {world_size} workers to connect")
+
+        # 3. Try access queue
+        try:
+            # Use non-blocking get
+            rank = ready_queue.get(timeout=0.2)
+            connected_ranks.add(rank)
+            if console:
+                status_update(
+                    f"  Worker {rank} ready ({len(connected_ranks)}/{world_size})"
+                )
+        except queue.Empty:
+            continue
 
     # Clean up the ready_queue to prevent semaphore leak
     ready_queue.close()
@@ -554,6 +588,7 @@ def _ipc_worker_process(
     from pie import _pie
     from pie_worker.runtime import Runtime
     from pie_worker.config import RuntimeConfig
+    import torch.distributed as dist
 
     rank = local_rank  # With nprocs=world_size, local_rank IS the actual rank
 
@@ -590,6 +625,7 @@ def _ipc_worker_process(
         devices=group_devices,  # All devices in this TP group
         rank=tp_rank,  # Position within TP group
         world_size=tp_degree,  # Size of TP group
+        tensor_parallel_size=tp_degree,  # Ensure sharding is enabled!
     )
 
     # Create runtime (loads model on this GPU)
@@ -880,6 +916,8 @@ def terminate_engine_and_backend(
         "ignore", message=".*leaked semaphore.*", category=UserWarning
     )
 
+    from pie_worker import utils as pie_utils
+
     def log(msg: str):
         if on_message:
             on_message(msg)
@@ -983,6 +1021,8 @@ def run_interactive_shell(engine_config: dict, internal_token: str) -> None:
         import readline
     except ImportError:
         pass  # readline not available on all platforms
+
+    from . import path as pie_path
 
     # Load history
     history_path = pie_path.get_shell_history_path()
@@ -1092,6 +1132,9 @@ async def _submit_inferlet_async(
     on_event: Optional[callable] = None,
 ) -> None:
     """Async implementation of submit_inferlet_and_wait."""
+
+    import blake3
+    from pie_client import PieClient, Event
 
     def emit(event_type: str, msg: str):
         if on_event:

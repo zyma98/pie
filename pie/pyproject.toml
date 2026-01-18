@@ -40,6 +40,7 @@ dependencies = [
     "typer>=0.12",
     "websockets>=15.0",
     "ztensor>=0.1.4",
+    "textual>=7.2.0",
 ]
 
 [project.optional-dependencies]
@@ -47,34 +48,34 @@ dependencies = [
 cuda = [
     "torch>=2.7.1",
     "torchao>=0.14.1",  
-    "flashinfer-python>=0.6.0",
-    "flashinfer-cubin>=0.6.0",
+    "flashinfer-python>=0.6.1",
+    "flashinfer-cubin>=0.6.1",
 ]
 
 # for uv only
 cu126 = [
     "torch>=2.7.1",
     "torchao>=0.14.1",  
-    "flashinfer-python>=0.6.0",
-    "flashinfer-cubin>=0.6.0",
+    "flashinfer-python>=0.6.1",
+    "flashinfer-cubin>=0.6.1",
 ]
 
 # for uv only
 cu128 = [
     "torch>=2.7.1",
     "torchao>=0.14.1",  
-    "flashinfer-python>=0.6.0",
-    "flashinfer-cubin>=0.6.0",
-    "flashinfer-jit-cache>=0.6.0",
+    "flashinfer-python>=0.6.1",
+    "flashinfer-cubin>=0.6.1",
+    "flashinfer-jit-cache>=0.6.1",
 ]
 
 # for uv only
 cu130 = [
     "torch>=2.7.1",
     "torchao>=0.14.1",  
-    "flashinfer-python>=0.6.0",
-    "flashinfer-cubin>=0.6.0",
-    "flashinfer-jit-cache>=0.6.0",
+    "flashinfer-python>=0.6.1",
+    "flashinfer-cubin>=0.6.1",
+    "flashinfer-jit-cache>=0.6.1",
 ]
 
 
