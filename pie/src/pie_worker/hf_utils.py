@@ -21,6 +21,7 @@ HF_TO_PIE_ARCH = {
     "gptoss": "gptoss",
     "gpt_oss": "gptoss",  # HuggingFace config may use underscore variant
     "gemma2": "gemma2",
+    "gemma3_text": "gemma3",
 }
 
 
