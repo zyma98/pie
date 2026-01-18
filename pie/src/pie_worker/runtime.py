@@ -197,6 +197,11 @@ class Runtime:
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(config.random_seed)
 
+        # DUMMY MODE: Skip weight loading and use dummy forward pass
+        if config.dummy_mode:
+            self._init_dummy_mode()
+            return
+
         # Load model weights using ModelLoader
         loader = ModelLoader(config, log_queue=log_queue)
 
@@ -336,6 +341,42 @@ class Runtime:
 
             case _:
                 raise ValueError(f"Unsupported architecture type: {self.type}")
+
+    def _init_dummy_mode(self) -> None:
+        """
+        Initialize dummy mode - no GPU weight loading.
+
+        Creates a DummyForwardPass that returns random tokens instead of
+        running actual inference. Useful for testing scheduling logic
+        and benchmarking throughput without GPU overhead.
+        """
+        from .model.dummy import (
+            DummyModelConfig,
+            DummyForwardPass,
+            create_kv_cache,
+            create_adapter_cache,
+        )
+
+        self._log("Initializing in DUMMY MODE - no GPU weights will be loaded", "INFO")
+
+        self.type = "dummy"
+        self.model_config = DummyModelConfig()
+        self.config.max_num_kv_pages = self.model_config.eval_max_num_kv_pages(
+            self.config
+        )
+
+        self.engine = DummyForwardPass(self.model_config, self.config)
+        self.kv_cache_at_layer = create_kv_cache(self.model_config, self.config)
+        self.adapter_at_layer = create_adapter_cache(self.model_config, self.config)
+
+        # Dummy tokenizer info - no snapshot_dir means we'll return minimal info
+        self.snapshot_dir = None
+        self.info = {
+            "architecture": {"type": "dummy"},
+            "vocab_size": self.model_config.vocab_size,
+        }
+
+        self._log("Dummy mode initialization complete", "INFO")
 
     # ========================================================================
     # Metadata Accessors
