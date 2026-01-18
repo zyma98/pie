@@ -1,0 +1,176 @@
+/* ModelCard Component CSS Module */
+
+.modelCard {
+  background: var(--ifm-card-background-color);
+  border: 1px solid var(--ifm-color-emphasis-200);
+  border-radius: var(--ifm-card-border-radius);
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  box-shadow: var(--ifm-global-shadow-sm);
+  transition: transform 180ms ease, box-shadow 180ms ease;
+  height: 100%;
+}
+
+.modelCard:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--ifm-global-shadow-md);
+}
+
+/* Model Name */
+.modelName {
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 1.25rem;
+  font-weight: 600;
+  margin: 0;
+  color: var(--ifm-heading-color);
+  line-height: 1.3;
+  word-break: break-word;
+}
+
+/* Model Description */
+.modelDescription {
+  margin: 0;
+  color: var(--ifm-color-emphasis-700);
+  font-size: 0.95rem;
+  line-height: 1.5;
+  flex-grow: 1;
+}
+
+/* Model Info (Parameters + Badges) */
+.modelInfo {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+/* Parameter Badge */
+.parameterBadge {
+  display: inline-block;
+  padding: 0.25rem 0.6rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  font-family: var(--ifm-font-family-monospace);
+  background: var(--ifm-color-emphasis-200);
+  color: var(--ifm-color-emphasis-900);
+  border-radius: 4px;
+}
+
+/* Generic Badge */
+.badge {
+  display: inline-block;
+  padding: 0.25rem 0.6rem;
+  font-size: 0.8rem;
+  font-weight: 500;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+/* Platform Badge */
+.platformBadge {
+  background: color-mix(in oklab, var(--ifm-color-primary) 15%, transparent);
+  color: var(--ifm-color-primary);
+  border: 1px solid color-mix(in oklab, var(--ifm-color-primary) 30%, transparent);
+}
+
+/* Experimental Badge */
+.experimentalBadge {
+  background: color-mix(in oklab, var(--ifm-color-warning) 15%, transparent);
+  color: var(--ifm-color-warning-dark);
+  border: 1px solid color-mix(in oklab, var(--ifm-color-warning) 30%, transparent);
+}
+
+/* Vision Badge */
+.visionBadge {
+  background: color-mix(in oklab, var(--ifm-color-success) 15%, transparent);
+  color: var(--ifm-color-success-dark);
+  border: 1px solid color-mix(in oklab, var(--ifm-color-success) 30%, transparent);
+}
+
+/* CLI Section */
+.cliSection {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: var(--ifm-code-background);
+  padding: 0.75rem;
+  border-radius: 6px;
+  border: 1px solid var(--ifm-color-emphasis-300);
+}
+
+.cliCommand {
+  flex: 1;
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.9rem;
+  color: var(--ifm-code-color);
+  overflow-x: auto;
+  white-space: nowrap;
+  margin: 0;
+}
+
+.copyButton {
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-size: 1.2rem;
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  transition: background 0.2s ease;
+  line-height: 1;
+}
+
+.copyButton:hover {
+  background: var(--ifm-color-emphasis-200);
+}
+
+.copyButton:active {
+  transform: scale(0.95);
+}
+
+/* Hugging Face Link */
+.hfLink {
+  font-size: 0.9rem;
+  color: var(--ifm-color-primary);
+  text-decoration: none;
+  transition: opacity 0.2s ease;
+  margin-top: auto;
+}
+
+.hfLink:hover {
+  opacity: 0.8;
+  text-decoration: underline;
+}
+
+/* Reduced Motion */
+@media (prefers-reduced-motion: reduce) {
+  .modelCard {
+    transition: none;
+  }
+
+  .modelCard:hover {
+    transform: none;
+  }
+
+  .copyButton:active {
+    transform: none;
+  }
+}
+
+/* Responsive */
+@media (max-width: 600px) {
+  .modelCard {
+    padding: 1.25rem;
+  }
+
+  .modelName {
+    font-size: 1.1rem;
+  }
+
+  .cliCommand {
+    font-size: 0.85rem;
+  }
+}
