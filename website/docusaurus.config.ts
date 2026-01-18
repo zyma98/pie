@@ -80,11 +80,6 @@ const config: Config = {
           label: 'Docs',
         },
         {
-          to: '/models',
-          label: 'Models',
-          position: 'left',
-        },
-        {
           to: 'roadmap',
           label: 'Roadmap',
           position: 'left',
