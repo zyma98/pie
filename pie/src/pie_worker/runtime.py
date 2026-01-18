@@ -445,6 +445,7 @@ class Runtime:
                 "split_regex": "",
                 "special_tokens": {},
                 "escape_non_printable": False,
+                "sentencepiece_space": False,
             }
 
         # Load tokenizer info from HuggingFace
@@ -459,6 +460,7 @@ class Runtime:
             "split_regex": tokenizer_info.get("split_regex", ""),
             "special_tokens": tokenizer_info.get("special_tokens", {}),
             "escape_non_printable": tokenizer_info.get("escape_non_printable", False),
+            "sentencepiece_space": tokenizer_info.get("sentencepiece_space", False),
         }
 
     # ========================================================================
@@ -492,6 +494,7 @@ class Runtime:
             tokenizer_special_tokens=tokenizer["special_tokens"],
             tokenizer_split_regex=tokenizer["split_regex"],
             tokenizer_escape_non_printable=tokenizer["escape_non_printable"],
+            tokenizer_sentencepiece_space=tokenizer["sentencepiece_space"],
         )
 
     def query(self, req: message.QueryRequest) -> message.QueryResponse:
@@ -913,6 +916,7 @@ class Runtime:
             "tokenizer_special_tokens": resp.tokenizer_special_tokens,
             "tokenizer_split_regex": resp.tokenizer_split_regex,
             "tokenizer_escape_non_printable": resp.tokenizer_escape_non_printable,
+            "tokenizer_sentencepiece_space": resp.tokenizer_sentencepiece_space,
         }
 
     def query_rpc(self, **kwargs) -> dict:
