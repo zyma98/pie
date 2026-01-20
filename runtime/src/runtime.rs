@@ -1061,7 +1061,7 @@ impl Runtime {
 
                     // Silently skip if already defined
                     let _ =
-                        inst.func_new_async(export_name, move |_store, _func, _args, _results| {
+                        inst.func_new_async(export_name, move |_store, _args, _results| {
                             let func_name = func_name.clone();
                             Box::new(async move {
                                 // This stub should never be called during validation.
@@ -1510,7 +1510,7 @@ impl Runtime {
                                 let provider_resource = store.data_mut().dynamic_resource_map.remove(&rep);
 
                                 if let Some(resource_any) = provider_resource {
-                                    resource_any.resource_drop_async(&mut store).await?;
+                                    resource_any.resource_drop_async::<InstanceState>(&mut store).await?;
                                 }
 
                                 Ok(())
@@ -1566,7 +1566,7 @@ impl Runtime {
     ) -> Result<(), wasmtime::Error> {
         let func_name_for_log: Arc<str> = func_name.into();
 
-        inst.func_new_async(func_name, move |mut store, _func, args, results| {
+        inst.func_new_async(func_name, move |mut store, args, results| {
             let func_name_for_log = func_name_for_log.clone();
 
             Box::new(async move {
@@ -1609,7 +1609,7 @@ impl Runtime {
         let _has_results = func_type.results().len() > 0;
         let func_name_for_log: Arc<str> = func_name.into();
 
-        inst.func_new_async(func_name, move |mut store, _func, args, results| {
+        inst.func_new_async(func_name, move |mut store, args, results| {
             let func_name_for_log = func_name_for_log.clone();
             let num_results = results.len();
 
@@ -1670,7 +1670,7 @@ impl Runtime {
         let _has_results = func_type.results().len() > 0;
         let func_name_for_log: Arc<str> = func_name.into();
 
-        inst.func_new_async(func_name, move |mut store, _func, args, results| {
+        inst.func_new_async(func_name, move |mut store, args, results| {
             let func_name_for_log = func_name_for_log.clone();
             let num_results = results.len();
 
