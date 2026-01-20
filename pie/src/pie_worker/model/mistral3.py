@@ -24,144 +24,100 @@ from . import common
 
 
 # =============================================================================
-# MISTRAL3 WEIGHT SCHEMA
+# NATIVE FP8 SUPPORT
 # =============================================================================
 
-# FP8 weight dequantization transform function
-import random
+# FP8 configuration
+FP8_DTYPE = torch.float8_e4m3fn
+FP8_FINFO = torch.finfo(FP8_DTYPE)
 
 
-def _dequantize_fp8_weight(tensors: list[torch.Tensor], kwargs: dict) -> torch.Tensor:
+def fp8_linear(input: torch.Tensor, 
+               weight_fp8: torch.Tensor, 
+               weight_scale: torch.Tensor,
+               activation_scale: torch.Tensor | None = None,
+               bias: torch.Tensor | None = None) -> torch.Tensor:
     """
-    Dequantize FP8 weight to bf16 on GPU.
+    Native FP8 linear using torch._scaled_mm.
     
-    Includes a RETRY mechanism with MEMORY JIGGLING to handle non-deterministic 
-    GPU memory corruption.
-    """
-    weight_fp8, scale_inv = tensors[0], tensors[1]
-    device = kwargs.get("device", "cuda")
+    Performs: output = input @ weight.T
+    With FP8 quantization for both input and weight.
     
-    # Dequantize on CPU
-    dequantized_cpu = weight_fp8.to(torch.bfloat16) * scale_inv
-    
-    # Keep track of dummy tensors to hold memory offsets
-    spacers = []
-    
-    try:
-        # Retry loop to handle transfer corruption
-        for attempt in range(50):
-            # Transfer to GPU
-            gpu_tensor = dequantized_cpu.to(device)
-            
-            # Validation: Check for corruption (large values OR NaNs)
-            # Note: NaNs comparison is always False, so max() < 1000 handles it?
-            # Wait, torch.amax(nan) -> nan. nan < 1000 is False.
-            # So the inequality check implicitly catches NaNs.
-            if gpu_tensor.abs().max() < 1000.0:
-                return gpu_tensor
-            
-            # Corruption detected!
-            del gpu_tensor
-            torch.cuda.empty_cache()
-            
-            # Jiggle the allocator: allocate a RANDOM dummy tensor to shift offset
-            # Random size between 1MB and 50MB to break periodic bad strides
-            spacer_size = random.randint(1024 * 1024, 50 * 1024 * 1024)
-            spacers.append(torch.empty(spacer_size, dtype=torch.bfloat16, device=device))
-            
-        raise RuntimeError(f"Failed to load FP8 weight cleanly after 50 attempts. Persistent corruption.")
+    Args:
+        input: BF16 input tensor (*, in_features)
+        weight_fp8: FP8 weight tensor (out_features, in_features), stored row-major
+        weight_scale: Inverse scale for weight (scalar)
+        activation_scale: Optional scale for input quantization. If None, compute dynamically.
+        bias: Optional bias
         
-    finally:
-        # Clean up spacers
-        del spacers
-        torch.cuda.empty_cache()
-
-
-
-def _dequantize_fp8_fused_qkv(tensors: list[torch.Tensor], kwargs: dict) -> torch.Tensor:
+    Returns:
+        BF16 output tensor (*, out_features)
     """
-    Fuse and dequantize FP8 QKV weights to bf16 on GPU.
-    Includes corruption check and retry with memory jiggling.
-    """
-    q_w, q_s, k_w, k_s, v_w, v_s = tensors
+    # Handle batched input - flatten to 2D
+    orig_shape = input.shape
+    input_2d = input.view(-1, orig_shape[-1])
+    
+    # Quantize input to FP8
+    if activation_scale is not None:
+        # Use provided activation scale (inverse scale)
+        inv_act_scale = activation_scale.reciprocal()
+        input_scaled = (input_2d * inv_act_scale).clamp(FP8_FINFO.min, FP8_FINFO.max)
+        input_fp8 = input_scaled.to(FP8_DTYPE)
+        act_scale_for_mm = activation_scale.to(torch.float32)
+    else:
+        # Dynamic quantization
+        input_max = input_2d.abs().max().clamp(min=1e-12)
+        scale = FP8_FINFO.max / input_max
+        input_fp8 = (input_2d * scale).clamp(FP8_FINFO.min, FP8_FINFO.max).to(FP8_DTYPE)
+        act_scale_for_mm = scale.reciprocal().to(torch.float32)
+    
+    # FP8 matmul: input @ weight.T
+    # cuBLAS needs: row-major A @ column-major B
+    # weight_fp8 is (out, in) row-major, so weight_fp8.t() is (in, out) col-major
+    output = torch._scaled_mm(
+        input_fp8,              # (batch, in_features) row-major
+        weight_fp8.t(),         # (in_features, out_features) column-major view
+        scale_a=act_scale_for_mm,
+        scale_b=weight_scale.to(torch.float32),
+        out_dtype=torch.bfloat16
+    )
+    
+    if bias is not None:
+        output = output + bias
+    
+    # Restore original shape
+    output = output.view(*orig_shape[:-1], -1)
+    
+    return output
+
+
+
+
+def _fuse_fp8_qkv(tensors: list[torch.Tensor], kwargs: dict) -> torch.Tensor:
+    """Fuse Q, K, V FP8 weights into single tensor."""
+    q_w, k_w, v_w = tensors[0], tensors[1], tensors[2]
     device = kwargs.get("device", "cuda")
-    
-    # Dequantize each component on CPU
-    q_cpu = q_w.to(torch.bfloat16) * q_s
-    k_cpu = k_w.to(torch.bfloat16) * k_s
-    v_cpu = v_w.to(torch.bfloat16) * v_s
-    
-    spacers = []
-    
-    try:
-        # Retry loop
-        for attempt in range(50):
-            q_gpu = q_cpu.to(device)
-            k_gpu = k_cpu.to(device)
-            v_gpu = v_cpu.to(device)
-            
-            # Concatenate ON GPU
-            fused = torch.cat([q_gpu, k_gpu, v_gpu], dim=0)
-            
-            # Check corruption
-            if fused.abs().max() < 1000.0:
-                return fused
-                
-            del q_gpu, k_gpu, v_gpu, fused
-            torch.cuda.empty_cache()
-            
-            # Jiggle allocator
-            spacer_size = random.randint(1024 * 1024, 50 * 1024 * 1024)
-            spacers.append(torch.empty(spacer_size, dtype=torch.bfloat16, device=device))
-            
-        raise RuntimeError(f"Failed to load FP8 QKV cleanly after 50 attempts.")
-        
-    finally:
-        del spacers
-        torch.cuda.empty_cache()
+    return torch.cat([q_w.to(device), k_w.to(device), v_w.to(device)], dim=0).contiguous()
 
 
-
-def _dequantize_fp8_fused_gate_up(tensors: list[torch.Tensor], kwargs: dict) -> torch.Tensor:
-    """
-    Fuse and dequantize FP8 gate+up weights to bf16 on GPU.
-    Includes corruption check and retry with memory jiggling.
-    """
-    gate_w, gate_s, up_w, up_s = tensors
+def _fuse_fp8_gate_up(tensors: list[torch.Tensor], kwargs: dict) -> torch.Tensor:
+    """Fuse gate and up FP8 weights into single tensor."""
+    gate_w, up_w = tensors[0], tensors[1]
     device = kwargs.get("device", "cuda")
-    
-    # Dequantize each component on CPU
-    gate_cpu = gate_w.to(torch.bfloat16) * gate_s
-    up_cpu = up_w.to(torch.bfloat16) * up_s
-    
-    spacers = []
-    
-    try:
-        # Retry loop
-        for attempt in range(50):
-            gate_gpu = gate_cpu.to(device)
-            up_gpu = up_cpu.to(device)
-            
-            # Concatenate ON GPU
-            fused = torch.cat([gate_gpu, up_gpu], dim=0)
-            
-            # Check corruption
-            if fused.abs().max() < 1000.0:
-                return fused.contiguous()
-            
-            del gate_gpu, up_gpu, fused
-            torch.cuda.empty_cache()
-            
-            # Jiggle allocator
-            spacer_size = random.randint(1024 * 1024, 50 * 1024 * 1024)
-            spacers.append(torch.empty(spacer_size, dtype=torch.bfloat16, device=device))
+    return torch.cat([gate_w.to(device), up_w.to(device)], dim=0).contiguous()
 
-        raise RuntimeError(f"Failed to load FP8 GateUp cleanly after 50 attempts.")
-        
-    finally:
-        del spacers
-        torch.cuda.empty_cache()
 
+def _max_scale(tensors: list[torch.Tensor], kwargs: dict) -> torch.Tensor:
+    """Return the maximum scale (most conservative for quantization)."""
+    device = kwargs.get("device", "cuda")
+    scales = torch.stack([t.to(device) for t in tensors])
+    return scales.max()
+
+
+def _to_device(tensors: list[torch.Tensor], kwargs: dict) -> torch.Tensor:
+    """Simple pass-through to device."""
+    device = kwargs.get("device", "cuda")
+    return tensors[0].to(device)
 
 
 # Global permutation cache (shared across all weight loading)
@@ -172,61 +128,103 @@ def create_schema(config: "ModelConfig") -> Schema:
     """
     Create weight schema for Ministral 3B with native FP8 support.
     
-    The model weights are shipped in FP8 format with scale factors.
-    We load them and preprocess for FlashInfer's low-latency GEMM.
-    
-    IMPORTANT: Loading order matters for GPU memory stability!
-    FP8 weights must be processed BEFORE non-FP8 tensors.
-    The Schema.load() iterates definitions in order, expanding all layers
-    for each definition before moving to the next. Large tensor GPU allocations
-    (like embeddings) or even many small allocations (like norms) can interfere
-    with subsequent FP8 tensor GPU transfers causing corruption.
+    Loads FP8 weights and their scales as SEPARATE tensor keys.
+    This allows the loader to handle each tensor individually.
     """
     prefix = "language_model."
     
     schema = (
         Schema("mistral3")
-        # === FP8 Weights FIRST - dequantized to bf16 ===
-        # Fused QKV projection
+        # === FP8 Weights (stored separately from scales) ===
+        # Fused QKV weight (FP8)
         .define(
             "layers.*.proj_qkv",
             Source.gather([
                 f"{prefix}model.layers.*.self_attn.q_proj.weight",
-                f"{prefix}model.layers.*.self_attn.q_proj.weight_scale_inv",
                 f"{prefix}model.layers.*.self_attn.k_proj.weight",
-                f"{prefix}model.layers.*.self_attn.k_proj.weight_scale_inv",
                 f"{prefix}model.layers.*.self_attn.v_proj.weight",
-                f"{prefix}model.layers.*.self_attn.v_proj.weight_scale_inv",
-            ]).transform(_dequantize_fp8_fused_qkv),
+            ]).transform(_fuse_fp8_qkv),
         )
-        # Output projection
+        # Fused QKV weight scale
+        .define(
+            "layers.*.proj_qkv_scale",
+            Source.gather([
+                f"{prefix}model.layers.*.self_attn.q_proj.weight_scale_inv",
+                f"{prefix}model.layers.*.self_attn.k_proj.weight_scale_inv",
+                f"{prefix}model.layers.*.self_attn.v_proj.weight_scale_inv",
+            ]).transform(_max_scale),
+        )
+        # QKV activation scale
+        .define(
+            "layers.*.act_scale_qkv",
+            Source.gather([
+                f"{prefix}model.layers.*.self_attn.q_proj.activation_scale",
+                f"{prefix}model.layers.*.self_attn.k_proj.activation_scale",
+                f"{prefix}model.layers.*.self_attn.v_proj.activation_scale",
+            ]).transform(_max_scale),
+        )
+        # Output projection weight (FP8)
         .define(
             "layers.*.proj_o",
             Source.gather([
                 f"{prefix}model.layers.*.self_attn.o_proj.weight",
-                f"{prefix}model.layers.*.self_attn.o_proj.weight_scale_inv",
-            ]).transform(_dequantize_fp8_weight),
+            ]).transform(_to_device),
         )
-        # Fused gate+up projection
+        .define(
+            "layers.*.proj_o_scale",
+            Source.gather([
+                f"{prefix}model.layers.*.self_attn.o_proj.weight_scale_inv",
+            ]).transform(_to_device),
+        )
+        .define(
+            "layers.*.act_scale_o",
+            Source.gather([
+                f"{prefix}model.layers.*.self_attn.o_proj.activation_scale",
+            ]).transform(_to_device),
+        )
+        # Fused gate+up weight (FP8)
         .define(
             "layers.*.proj_gate_up",
             Source.gather([
                 f"{prefix}model.layers.*.mlp.gate_proj.weight",
-                f"{prefix}model.layers.*.mlp.gate_proj.weight_scale_inv",
                 f"{prefix}model.layers.*.mlp.up_proj.weight",
-                f"{prefix}model.layers.*.mlp.up_proj.weight_scale_inv",
-            ]).transform(_dequantize_fp8_fused_gate_up),
+            ]).transform(_fuse_fp8_gate_up),
         )
-        # Down projection
+        .define(
+            "layers.*.proj_gate_up_scale",
+            Source.gather([
+                f"{prefix}model.layers.*.mlp.gate_proj.weight_scale_inv",
+                f"{prefix}model.layers.*.mlp.up_proj.weight_scale_inv",
+            ]).transform(_max_scale),
+        )
+        .define(
+            "layers.*.act_scale_gate_up",
+            Source.gather([
+                f"{prefix}model.layers.*.mlp.gate_proj.activation_scale",
+                f"{prefix}model.layers.*.mlp.up_proj.activation_scale",
+            ]).transform(_max_scale),
+        )
+        # Down projection weight (FP8)
         .define(
             "layers.*.proj_down",
             Source.gather([
                 f"{prefix}model.layers.*.mlp.down_proj.weight",
-                f"{prefix}model.layers.*.mlp.down_proj.weight_scale_inv",
-            ]).transform(_dequantize_fp8_weight),
+            ]).transform(_to_device),
         )
-        # === Non-FP8 tensors AFTER FP8 ===
-        # Per-layer norms (loaded AFTER FP8 weights)
+        .define(
+            "layers.*.proj_down_scale",
+            Source.gather([
+                f"{prefix}model.layers.*.mlp.down_proj.weight_scale_inv",
+            ]).transform(_to_device),
+        )
+        .define(
+            "layers.*.act_scale_down",
+            Source.gather([
+                f"{prefix}model.layers.*.mlp.down_proj.activation_scale",
+            ]).transform(_to_device),
+        )
+        # === Non-FP8 tensors ===
+        # Per-layer norms
         .define(
             "layers.*.norm_attn",
             Source(f"{prefix}model.layers.*.input_layernorm.weight"),
@@ -255,6 +253,9 @@ def create_schema(config: "ModelConfig") -> Schema:
         )
 
     return schema
+
+
+
 
 
 @dataclass
@@ -733,7 +734,7 @@ class ForwardPass:
         return local_logits
 
     def mlp(self, hidden_states: torch.Tensor, layer_idx: int) -> torch.Tensor:
-        """Executes the MLP block for a single layer."""
+        """Executes the MLP block for a single layer using native FP8."""
         local_mlp_size = self.model_config.dim_mlp // self.tp_size
         residual = hidden_states
 
@@ -745,11 +746,11 @@ class ForwardPass:
             eps=self.model_config.rms_norm_eps,
         )
 
-        # 2. Gate+Up Projection (Column Parallel)
-        gate_up = fun.linear(
-            normed_input,
-            self.weights.get(f"layers.{layer_idx}.proj_gate_up"),
-        )
+        # 2. Gate+Up Projection (Column Parallel) - FP8
+        gate_up_weight = self.weights.get(f"layers.{layer_idx}.proj_gate_up")
+        gate_up_scale = self.weights.get(f"layers.{layer_idx}.proj_gate_up_scale")
+        gate_up_act_scale = self.weights.get(f"layers.{layer_idx}.act_scale_gate_up")
+        gate_up = fp8_linear(normed_input, gate_up_weight, gate_up_scale, gate_up_act_scale)
 
         # Split gate and up
         gate, up = torch.split(gate_up, [local_mlp_size, local_mlp_size], dim=-1)
@@ -757,11 +758,11 @@ class ForwardPass:
         # 3. SiLU activation * gate (SwiGLU)
         hidden = fun.silu(gate) * up
 
-        # 4. Down Projection (Row Parallel)
-        down = fun.linear(
-            hidden,
-            self.weights.get(f"layers.{layer_idx}.proj_down"),
-        )
+        # 4. Down Projection (Row Parallel) - FP8
+        down_weight = self.weights.get(f"layers.{layer_idx}.proj_down")
+        down_scale = self.weights.get(f"layers.{layer_idx}.proj_down_scale")
+        down_act_scale = self.weights.get(f"layers.{layer_idx}.act_scale_down")
+        down = fp8_linear(hidden, down_weight, down_scale, down_act_scale)
         del hidden, gate, up, gate_up
 
         if self.tp_size > 1:
@@ -784,7 +785,7 @@ class ForwardPass:
         adapter_subpass: Optional[AdapterSubpass],
         wrapper: Any,
     ) -> torch.Tensor:
-        """Executes the attention block for a single layer."""
+        """Executes the attention block for a single layer using native FP8."""
         local_num_query_heads = self.model_config.num_q_heads // self.tp_size
         local_num_key_value_heads = self.model_config.num_kv_heads // self.tp_size
         local_q_size = local_num_query_heads * self.model_config.dim_head
@@ -801,11 +802,11 @@ class ForwardPass:
             eps=self.model_config.rms_norm_eps,
         )
 
-        # 2. QKV Projection (Column Parallel)
-        qkv_proj = fun.linear(
-            normed_input,
-            self.weights.get(f"layers.{layer_idx}.proj_qkv"),
-        )
+        # 2. QKV Projection (Column Parallel) - FP8
+        qkv_weight = self.weights.get(f"layers.{layer_idx}.proj_qkv")
+        qkv_scale = self.weights.get(f"layers.{layer_idx}.proj_qkv_scale")
+        qkv_act_scale = self.weights.get(f"layers.{layer_idx}.act_scale_qkv")
+        qkv_proj = fp8_linear(normed_input, qkv_weight, qkv_scale, qkv_act_scale)
 
         q, k, v = torch.split(
             qkv_proj,
@@ -863,11 +864,11 @@ class ForwardPass:
 
         attn_output = attn_output.reshape(n, -1)
 
-        # 8. Output Projection
-        attn_proj = fun.linear(
-            attn_output,
-            self.weights.get(f"layers.{layer_idx}.proj_o"),
-        )
+        # 8. Output Projection - FP8
+        o_weight = self.weights.get(f"layers.{layer_idx}.proj_o")
+        o_scale = self.weights.get(f"layers.{layer_idx}.proj_o_scale")
+        o_act_scale = self.weights.get(f"layers.{layer_idx}.act_scale_o")
+        attn_proj = fp8_linear(attn_output, o_weight, o_scale, o_act_scale)
         del attn_output
 
         if self.tp_size > 1:
