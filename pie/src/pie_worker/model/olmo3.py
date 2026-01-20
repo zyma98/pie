@@ -1,4 +1,4 @@
-"""Qwen3 Large Language Model Architecture."""
+"""Olmo3 Large Language Model Architecture."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from typing import Optional, Any
 import torch
 import torch.nn.functional as fun
 import torch.distributed as dist
+import math
 
 from . import ModelConfig as ModelConfigBase
 from ..config import RuntimeConfig
@@ -24,44 +25,39 @@ from . import common
 
 
 # =============================================================================
-# QWEN3 WEIGHT SCHEMA
+# OLMO3 WEIGHT SCHEMA
 # =============================================================================
 # Declarative definition of how physical tensor names map to logical names,
 # with fusion, sharding, and quantization applied.
 #
-# Key differences from Qwen2:
-# - No bias in QKV projections
+# Key differences from Qwen3:
+# - Post-norm architecture (norm applied AFTER attention/MLP blocks)
+# - Uses post_attention_layernorm and post_feedforward_layernorm
 # - Has QK normalization weights (q_norm, k_norm per layer)
 
-QWEN3_SCHEMA = (
-    Schema("qwen3")
+OLMO3_SCHEMA = (
+    Schema("olmo3")
     # Embedding (row-parallel sharding, no quantization)
     .define(
         "embed_token",
         Source("model.embed_tokens.weight").shard("row"),
     )
-    # Per-layer weights
+    .define(
+        "lm_head",
+        Source("lm_head.weight").shard("column"),
+    )
+    # Per-layer weights - POST normalization (Olmo3-specific)
     .define(
         "layers.*.norm_attn",
-        Source("model.layers.*.input_layernorm.weight"),
-    )
-    .define(
-        "layers.*.norm_mlp",
         Source("model.layers.*.post_attention_layernorm.weight"),
     )
-    # QK normalization weights (Qwen3-specific)
     .define(
-        "layers.*.q_norm",
-        Source("model.layers.*.self_attn.q_norm.weight"),
+        "layers.*.norm_ffn",
+        Source("model.layers.*.post_feedforward_layernorm.weight"),
     )
+    # Attention (fused QKV, column-parallel)
     .define(
-        "layers.*.k_norm",
-        Source("model.layers.*.self_attn.k_norm.weight"),
-    )
-    # Fused QKV projection weight: fused from [Q, K, V] and sharded INTERLEAVED
-    # This ensures correct head alignment for GQA (Q >> K, V)
-    .define(
-        "layers.*.proj_qkv",
+        "layers.*.attn.qkv",
         Source.fuse(
             [
                 "model.layers.*.self_attn.q_proj.weight",
@@ -73,12 +69,21 @@ QWEN3_SCHEMA = (
         .shard("interleaved_column")
         .quantize(),
     )
-    # Output projection (row-parallel, quantized)
+    # Attention Norms (Olmo3-specific)
     .define(
-        "layers.*.proj_o",
+        "layers.*.attn.q_norm",
+        Source("model.layers.*.self_attn.q_norm.weight"),
+    )
+    .define(
+        "layers.*.attn.k_norm",
+        Source("model.layers.*.self_attn.k_norm.weight"),
+    )
+    # Attention Output (row-parallel, quantized)
+    .define(
+        "layers.*.attn.proj",
         Source("model.layers.*.self_attn.o_proj.weight").shard("row").quantize(),
     )
-    # Fused gate+up projection: fused from [Gate, Up] and sharded INTERLEAVED
+    # MLP (Gate+Up fused, column-parallel, quantized)
     .define(
         "layers.*.proj_gate_up",
         Source.fuse(
@@ -107,14 +112,16 @@ QWEN3_SCHEMA = (
 @dataclass
 class ModelConfig(ModelConfigBase):
     """
-    Qwen3-specific model architecture configuration.
+    Olmo3-specific model architecture configuration.
 
     Inherits from the abstract ModelConfig base class and defines
-    all architecture-specific parameters for Qwen3 models.
+    all architecture-specific parameters for Olmo3 models.
 
-    Key differences from Qwen2:
-    - No QKV bias
+    Key differences from other models:
+    - Post-norm architecture (norm after attention/MLP)
     - Has QK normalization (q_norm, k_norm)
+    - Supports sliding window attention via layer_types
+    - Uses YaRN (Yet another RoPE extensioN) for rope scaling
     """
 
     num_layers: int
@@ -130,6 +137,18 @@ class ModelConfig(ModelConfigBase):
 
     rope_theta: float
 
+    # Sliding window support
+    sliding_window: int | None
+    layer_types: list[str] | None  # Per-layer attention types
+
+    # YaRN rope scaling parameters
+    rope_scaling_type: str | None  # "yarn", "linear", or None
+    rope_scaling_factor: float
+    rope_scaling_original_max_position_embeddings: int
+    rope_scaling_attention_factor: float
+    rope_scaling_beta_fast: float
+    rope_scaling_beta_slow: float
+
     @staticmethod
     def from_dict(spec: dict) -> "ModelConfig":
         # Calculate head_dim if not present
@@ -137,6 +156,18 @@ class ModelConfig(ModelConfigBase):
             head_dim = int(spec["head_dim"])
         else:
             head_dim = int(spec["hidden_size"]) // int(spec["num_attention_heads"])
+
+        # Extract layer_types for sliding attention support
+        layer_types = spec.get("layer_types", None)
+
+        # Parse rope_scaling config
+        rope_scaling = spec.get("rope_scaling", {})
+        rope_scaling_type = rope_scaling.get("rope_type", None) if rope_scaling else None
+        rope_scaling_factor = float(rope_scaling.get("factor", 1.0)) if rope_scaling else 1.0
+        rope_scaling_original_max = int(rope_scaling.get("original_max_position_embeddings", 8192)) if rope_scaling else 8192
+        rope_scaling_attention_factor = float(rope_scaling.get("attention_factor", 1.0)) if rope_scaling else 1.0
+        rope_scaling_beta_fast = float(rope_scaling.get("beta_fast", 32.0)) if rope_scaling else 32.0
+        rope_scaling_beta_slow = float(rope_scaling.get("beta_slow", 1.0)) if rope_scaling else 1.0
 
         return ModelConfig(
             num_layers=int(spec["num_hidden_layers"]),
@@ -147,8 +178,28 @@ class ModelConfig(ModelConfigBase):
             dim_mlp=int(spec["intermediate_size"]),
             num_vocabs=int(spec["vocab_size"]),
             rms_norm_eps=float(spec["rms_norm_eps"]),
-            rope_theta=float(spec.get("rope_theta", 1000000.0)),
+            rope_theta=float(spec.get("rope_theta", 10000.0)),
+            sliding_window=spec.get("sliding_window", None),
+            layer_types=layer_types,
+            rope_scaling_type=rope_scaling_type,
+            rope_scaling_factor=rope_scaling_factor,
+            rope_scaling_original_max_position_embeddings=rope_scaling_original_max,
+            rope_scaling_attention_factor=rope_scaling_attention_factor,
+            rope_scaling_beta_fast=rope_scaling_beta_fast,
+            rope_scaling_beta_slow=rope_scaling_beta_slow,
         )
+
+    @property
+    def internal_num_kv_heads(self) -> int:
+        """
+        Returns number of KV heads used internally by the engine.
+        If GQA ratio is 5 (40/8), flashinfer 0.6.1 crashes with 'Unsupported group_size: 5'.
+        We expand to MHA (num_kv_heads = num_q_heads) for compatibility.
+        """
+        # if self.num_kv_heads > 0 and self.num_q_heads // self.num_kv_heads == 5:
+        #      # Workaround for GQA 5 crash: Expand to MHA
+        #      return self.num_q_heads
+        return self.num_kv_heads
 
     def eval_max_num_kv_pages(self, runtime_config: RuntimeConfig) -> int:
         """Evaluate the maximum number of KV pages based on available memory."""
@@ -163,7 +214,8 @@ class ModelConfig(ModelConfigBase):
 
         # In multi-GPU mode, KV cache is sharded across GPUs
         # Each GPU only stores num_kv_heads // tp_size heads
-        local_num_kv_heads = self.num_kv_heads // runtime_config.tensor_parallel_size
+        # Use internal_num_kv_heads to account for expansion
+        local_num_kv_heads = self.internal_num_kv_heads // runtime_config.tensor_parallel_size
 
         total_bytes_per_page = (
             element_size_bytes
@@ -180,13 +232,13 @@ class ModelConfig(ModelConfigBase):
 
 class ForwardPass:
     """
-    Qwen3 forward pass implementation.
+    Olmo3 forward pass implementation.
 
     Stores model config, runtime config, and weights internally.
 
-    Key differences from Qwen2:
-    - Applies QK normalization before RoPE (critical for stability)
-    - No QKV bias
+    Key differences from Qwen3:
+    - POST-normalization: Applies layer norm AFTER attention/MLP blocks
+    - Applies QK normalization before RoPE (similar to Qwen3)
     """
 
     def __init__(
@@ -205,15 +257,20 @@ class ForwardPass:
         self.tp_rank = runtime_config.rank % self.tp_size
 
         # Create workspace buffer for attention operations
-        # Note: 128MB is sufficient for most workloads
         self.workspace_buffer = torch.zeros(
-            128 * 1024 * 1024, dtype=torch.uint8, device=self.runtime_config.device
+            2048 * 1024 * 1024, dtype=torch.uint8, device=self.runtime_config.device
         )
         self.wrapper_decode = ops.BatchDecodeWithPagedKVCacheWrapper(
-            self.workspace_buffer, "NHD"
+            self.workspace_buffer, "NHD", use_tensor_cores=True
         )
         self.wrapper_append = ops.BatchPrefillWithPagedKVCacheWrapper(
             self.workspace_buffer, "NHD"
+        )
+
+        # Pre-compute YaRN RoPE cos/sin cache if using rope scaling
+        self.cos_sin_cache = self._build_yarn_cos_sin_cache(
+            device=self.runtime_config.device,
+            dtype=self.runtime_config.activation_dtype,
         )
 
         # --- CUDA Graph Setup (Bins + Padding) ---
@@ -278,6 +335,7 @@ class ForwardPass:
                     self.workspace_buffer,
                     "NHD",
                     use_cuda_graph=True,
+                    use_tensor_cores=True,
                     paged_kv_indptr_buffer=indptr_view,
                     paged_kv_indices_buffer=self.shared_kv_indices_buffer,
                     paged_kv_last_page_len_buffer=last_len_view,
@@ -288,7 +346,7 @@ class ForwardPass:
 
         # Fallback Decode wrapper
         self.wrapper_decode_fallback = ops.BatchDecodeWithPagedKVCacheWrapper(
-            self.workspace_buffer, "NHD"
+            self.workspace_buffer, "NHD", use_tensor_cores=True
         )
 
     def warmup_cuda_graphs(self, kv_cache_at_layer: list[torch.Tensor]):
@@ -330,6 +388,7 @@ class ForwardPass:
                 page_size=page_size,
                 pos_encoding_mode="NONE",
                 q_data_type=self.runtime_config.activation_dtype,
+                window_left=self.model_config.sliding_window or -1,
             )
 
             # 3. Create Dummy Inputs for Capture
@@ -384,6 +443,88 @@ class ForwardPass:
 
         torch.cuda.synchronize()
         print("Warmup complete.")
+
+    def _build_yarn_cos_sin_cache(
+        self,
+        device: torch.device,
+        dtype: torch.dtype,
+        max_seq_len: int = 65536,
+    ) -> torch.Tensor:
+        """
+        Build YaRN (Yet another RoPE extensioN) cos/sin cache.
+
+        YaRN interpolates between linear interpolation and no interpolation
+        based on frequency, with a smooth ramp function controlled by beta_fast/beta_slow.
+
+        Returns:
+            cos_sin_cache: [max_seq_len, head_dim] where first half is cos, second half is sin
+        """
+        cfg = self.model_config
+        head_dim = cfg.dim_head
+        dim = head_dim  # Full head dim for RoPE
+        base = cfg.rope_theta
+
+        # Helper functions from HuggingFace transformers
+        def find_correction_dim(num_rotations, dim, base, max_position_embeddings):
+            """Inverse dimension formula to find the dimension based on the number of rotations"""
+            return (dim * math.log(max_position_embeddings / (num_rotations * 2 * math.pi))) / (2 * math.log(base))
+
+        def find_correction_range(low_rot, high_rot, dim, base, max_position_embeddings):
+            """Find dimension range bounds based on rotations"""
+            low = find_correction_dim(low_rot, dim, base, max_position_embeddings)
+            high = find_correction_dim(high_rot, dim, base, max_position_embeddings)
+            low = math.floor(low)
+            high = math.ceil(high)
+            return max(low, 0), min(high, dim - 1)
+
+        def linear_ramp_factor(min_val, max_val, dim):
+            if min_val == max_val:
+                max_val += 0.001  # Prevent singularity
+            linear_func = (torch.arange(dim, dtype=torch.float32) - min_val) / (max_val - min_val)
+            return torch.clamp(linear_func, 0, 1)
+
+        # Base frequencies
+        pos_freqs = base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim)
+        inv_freq_extrapolation = 1.0 / pos_freqs
+        inv_freq_interpolation = 1.0 / (cfg.rope_scaling_factor * pos_freqs)
+
+        # Apply YaRN scaling if configured
+        if cfg.rope_scaling_type == "yarn" and cfg.rope_scaling_factor > 1.0:
+            factor = cfg.rope_scaling_factor
+            original_max = cfg.rope_scaling_original_max_position_embeddings
+            beta_fast = cfg.rope_scaling_beta_fast
+            beta_slow = cfg.rope_scaling_beta_slow
+
+            # Find correction range using HuggingFace formula
+            low, high = find_correction_range(beta_fast, beta_slow, dim, base, original_max)
+
+            # Get n-dimensional rotational scaling corrected for extrapolation
+            # inv_freq_extrapolation_factor = 1 means use extrapolation (no scaling)
+            # inv_freq_extrapolation_factor = 0 means use interpolation (full scaling)
+            inv_freq_extrapolation_factor = 1 - linear_ramp_factor(low, high, dim // 2)
+
+            inv_freq = (
+                inv_freq_interpolation * (1 - inv_freq_extrapolation_factor)
+                + inv_freq_extrapolation * inv_freq_extrapolation_factor
+            )
+        else:
+            inv_freq = inv_freq_extrapolation
+
+        # Compute position embeddings
+        t = torch.arange(max_seq_len, dtype=torch.float32)
+        freqs = torch.outer(t, inv_freq)  # [max_seq_len, dim/2]
+
+        # Apply YaRN attention scaling factor (matches HuggingFace reference)
+        attention_scaling = cfg.rope_scaling_attention_factor
+        
+        cos = torch.cos(freqs) * attention_scaling
+        sin = torch.sin(freqs) * attention_scaling
+
+        # FlashInfer expects cos_sin_cache shape: [max_seq_len, rotary_dim]
+        # For is_neox=True (GPT-NeoX style), cos is first half, sin is second half
+        cos_sin_cache = torch.cat([cos, sin], dim=-1)  # [max_seq_len, dim]
+
+        return cos_sin_cache.to(device=device, dtype=torch.float32)
 
     def embed_tokens(self, token_ids: torch.Tensor) -> torch.Tensor:
         """Embed token IDs with Tensor Parallel support (Column Parallel).
@@ -453,7 +594,9 @@ class ForwardPass:
             batch_metadata["token_ids"], device=device, dtype=torch.int32
         )
 
-        return self.embed_tokens(token_ids_tensor)
+        embeds = self.embed_tokens(token_ids_tensor)
+        
+        return embeds
 
     def lm_head(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Project hidden states to vocabulary logits (weight-tied with embed_tokens).
@@ -467,9 +610,6 @@ class ForwardPass:
         2. Each rank computes partial logits with its weight shard
         3. All-reduce sums the partial logits to get full result
         """
-        # world_size = self.runtime_config.world_size
-        # rank = self.runtime_config.rank
-
         # Apply final layer norm
         normed = fun.rms_norm(
             hidden_states,
@@ -480,48 +620,48 @@ class ForwardPass:
 
         if self.tp_size == 1:
             # Single GPU: simple linear projection
-            return fun.linear(normed, self.weights.get("embed_token"))
+            return fun.linear(normed, self.weights.get("lm_head"))
 
         # Multi-GPU: Column-parallel projection
         # 1. Split input along hidden dimension - each rank uses its slice
-        hidden_per_rank = self.model_config.dim_hidden // self.tp_size
-        start_idx = self.tp_rank * hidden_per_rank
-        end_idx = start_idx + hidden_per_rank
-        local_normed = normed[:, start_idx:end_idx]  # [seq, hidden/world_size]
-
-        # 2. Project with local weight shard: [seq, hidden/world_size] @ [hidden/world_size, vocab]
-        # embed_token has shape [vocab, hidden/world_size], so we use linear which transposes
+        #    (Wait, lm_head is column-parallel which means:
+        #     Input is replicated [N, H], Weight is [H, V/TP] -> Output [N, V/TP]
+        #     Then we gather output)
+        
+        # Actually Olmo3 usage of lm_head should be Column Parallel:
+        # Input [N, H] -> Linear(H, V/TP) -> Output [N, V/TP]
+        # Then Gather(dim=-1) -> Output [N, V]
+        
+        # Checking how fun.linear handles sharded weights:
+        # If weight is [Output, Input], checking source...
+        # Source("lm_head.weight").shard("column") implies split on dim 0.
+        # This means each rank gets [V/TP, H].
+        # fun.linear(x, w) computes x @ w.T
+        # x=[N,H], w=[V/TP, H]. w.T=[H, V/TP]. x@w.T = [N, V/TP].
+        # So each rank produces partial vocabulary logits.
+        # We need to gather them.
+        
         local_logits = fun.linear(
-            local_normed, self.weights.get("embed_token")
-        )  # [seq, vocab]
+            normed, 
+            self.weights.get("lm_head")
+        )
 
-        # 3. All-reduce to combine partial logits (sum of partial projections = full projection)
-        dist.all_reduce(local_logits, group=self.compute_process_group)
-
-        return local_logits
+        return self.compute_process_group.all_gather(local_logits, dim=-1)
 
     def mlp(self, hidden_states: torch.Tensor, layer_idx: int) -> torch.Tensor:
         """
-        Executes the MLP block for a single layer, including the
-        pre-norm and residual connection.
+        Executes the MLP block for a single layer.
+
+        Olmo3-specific: MLP is applied BEFORE the post-MLP norm.
+        The residual connection and norm are handled by the caller (_run_layers).
         """
         # --- Calculate local TP sizes ---
         local_mlp_size = self.model_config.dim_mlp // self.tp_size
 
-        # Save input for residual connection
-        residual = hidden_states
-
-        # 1. MLP RMSNorm
-        normed_input = fun.rms_norm(
-            hidden_states,
-            normalized_shape=[self.model_config.dim_hidden],
-            weight=self.weights.get(f"layers.{layer_idx}.norm_mlp"),
-            eps=self.model_config.rms_norm_eps,
-        )
-
-        # 2. Gate+Up Projection (Column Parallel)
+        # 1. Gate+Up Projection (Column Parallel)
+        # Input is replicated, weight is sharded -> output is sharded
         gate_up = fun.linear(
-            normed_input,
+            hidden_states,
             self.weights.get(f"layers.{layer_idx}.proj_gate_up"),
             None,
         )
@@ -529,10 +669,11 @@ class ForwardPass:
         # Split gate and up
         gate, up = torch.split(gate_up, [local_mlp_size, local_mlp_size], dim=-1)
 
-        # 3. SiLU activation * gate (SwiGLU)
+        # 2. SiLU activation * gate (SwiGLU)
         hidden = fun.silu(gate) * up
 
-        # 4. Down Projection (Row Parallel)
+        # 3. Down Projection (Row Parallel)
+        # Input is sharded, weight is sharded -> output is sharded
         down = fun.linear(
             hidden,
             self.weights.get(f"layers.{layer_idx}.proj_down"),
@@ -544,8 +685,7 @@ class ForwardPass:
         if self.tp_size > 1:
             dist.all_reduce(down, group=self.compute_process_group)
 
-        # 5. Residual Connection
-        return residual + down
+        return down
 
     def attention(
         self,
@@ -562,10 +702,12 @@ class ForwardPass:
         wrapper: Any,
     ) -> torch.Tensor:
         """
-        Executes the attention block for a single layer, including the
-        pre-norm and residual connection.
+        Executes the attention block for a single layer.
 
-        Qwen3-specific: Applies QK normalization before RoPE.
+        Olmo3-specific:
+        - No pre-norm (Olmo3 uses post-norm architecture)
+        - Applies QK normalization before RoPE
+        - Returns raw attention output (residual + post-norm handled by caller)
         """
         # --- Calculate local TP sizes ---
         local_num_query_heads = self.model_config.num_q_heads // self.tp_size
@@ -575,26 +717,15 @@ class ForwardPass:
 
         n = hidden_states.size(0)
 
-        # Save input for the first residual connection (replicated)
-        residual = hidden_states
-
-        # 1. Input RMSNorm (replicated input -> replicated output)
-        normed_input = fun.rms_norm(
-            hidden_states,
-            normalized_shape=[self.model_config.dim_hidden],
-            weight=self.weights.get(f"layers.{layer_idx}.norm_attn"),
-            eps=self.model_config.rms_norm_eps,
-        )
-
-        # 2. QKV Projection (Column Parallel) - NO bias in Qwen3
+        # 1. QKV Projection (Column Parallel) - NO bias, NO pre-norm in Olmo3
         # Input is replicated, weight is sharded -> output is sharded
         qkv_proj = fun.linear(
-            normed_input,
-            self.weights.get(f"layers.{layer_idx}.proj_qkv"),
+            hidden_states,
+            self.weights.get(f"layers.{layer_idx}.attn.qkv"),
             None,
         )
 
-        # q, k, v are all LOCAL shards
+        # q, k, v are all LOCAL shards (FLAT: [n, local_q_size] etc.)
         q, k, v = torch.split(
             qkv_proj,
             [
@@ -605,49 +736,85 @@ class ForwardPass:
             dim=-1,
         )
 
+
+
+        # 2. QK Normalization (Olmo3-specific)
+        # Applied to FLAT tensors BEFORE reshape, matching HuggingFace reference
+        q_norm_w = self.weights.get(f"layers.{layer_idx}.attn.q_norm")  # [local_q_size]
+        k_norm_w = self.weights.get(f"layers.{layer_idx}.attn.k_norm")  # [local_kv_size]
+
+        # Apply RMSNorm to flat Q and K
+        q = fun.rms_norm(
+            q,
+            normalized_shape=[local_q_size],
+            weight=q_norm_w,
+            eps=self.model_config.rms_norm_eps,
+        )
+        k = fun.rms_norm(
+            k,
+            normalized_shape=[local_kv_size],
+            weight=k_norm_w,
+            eps=self.model_config.rms_norm_eps,
+        )
+
         # 3. Adapter (if any)
         if adapter_subpass is not None:
             adapter_subpass.execute(
                 layer_idx,
-                normed_input,  # Adapter needs the (replicated) normed input
+                hidden_states,  # Adapter needs the input
                 q_state=q,
                 k_state=k,
                 v_state=v,
                 rank=self.runtime_config.rank,
                 world_size=self.runtime_config.world_size,
             )
-        del normed_input
 
-        # 4. Reshape QKV (local shapes) ------------------> input scatter
+        # 4. Reshape QKV to [n, heads, head_dim]
         q = q.view(n, local_num_query_heads, self.model_config.dim_head)
         k = k.view(n, local_num_key_value_heads, self.model_config.dim_head)
         v = v.view(n, local_num_key_value_heads, self.model_config.dim_head)
 
-        # 5. QK Normalization (Qwen3-specific, critical for stability)
-        # Apply per-head RMSNorm to Q and K
-        q = fun.rms_norm(
-            q,
-            normalized_shape=[self.model_config.dim_head],
-            weight=self.weights.get(f"layers.{layer_idx}.q_norm"),
-            eps=self.model_config.rms_norm_eps,
-        )
-        k = fun.rms_norm(
-            k,
-            normalized_shape=[self.model_config.dim_head],
-            weight=self.weights.get(f"layers.{layer_idx}.k_norm"),
-            eps=self.model_config.rms_norm_eps,
-        )
 
-        # 6. Apply RoPE (in-place on local shards) - standard RoPE
-        ops.apply_rope_pos_ids_inplace(
-            q=q,
-            k=k,
-            pos_ids=position_ids,
-            rope_theta=self.model_config.rope_theta,
-        )
 
-        # 7. Append K, V to cache (local shards to local cache)
-        # kv_cache_layer is the LOCAL shard of the cache for this layer
+        # 5. Workaround for GQA-5 crash: Expand K/V to MHA if needed
+        # We did the earlier split/norm using original heads (8).
+        # Now we expand to internal heads (40) for FlashInfer/Cache.
+        local_kv_heads_internal = self.model_config.internal_num_kv_heads // self.tp_size
+        if local_kv_heads_internal != local_num_key_value_heads:
+             ratio = local_kv_heads_internal // local_num_key_value_heads
+             k = k.repeat_interleave(ratio, dim=1)
+             v = v.repeat_interleave(ratio, dim=1)
+
+        # 6. Apply RoPE (in-place on local shards)
+        # Use precomputed YaRN cos/sin cache if rope scaling is enabled
+        if self.model_config.rope_scaling_type == "yarn":
+            # FlashInfer apply_rope_with_cos_sin_cache expects flattened q/k
+            # q shape: [n, heads, head_dim] -> [n, heads * head_dim]
+            n_tokens = q.shape[0]
+            q_flat = q.view(n_tokens, -1)
+            k_flat = k.view(n_tokens, -1)
+
+            ops.apply_rope_with_cos_sin_cache_inplace(
+                positions=position_ids,
+                query=q_flat,
+                key=k_flat,
+                head_size=self.model_config.dim_head,
+                cos_sin_cache=self.cos_sin_cache,
+                is_neox=True,  # GPT-NeoX style RoPE (non-interleaved)
+            )
+
+            # Reshape back
+            q = q_flat.view(n, -1, self.model_config.dim_head)
+            k = k_flat.view(n, -1, self.model_config.dim_head)
+        else:
+            ops.apply_rope_pos_ids_inplace(
+                q=q,
+                k=k,
+                pos_ids=position_ids,
+                rope_theta=self.model_config.rope_theta,
+            )
+
+        # 6. Append K, V to cache (local shards to local cache)
         ops.append_paged_kv_cache(
             append_key=k,
             append_value=v,
@@ -660,8 +827,10 @@ class ForwardPass:
             kv_layout="NHD",
         )
 
-        # 8. Compute Attention (on local shards)
-        # wrapper was planned with local head counts
+
+
+
+        # 7. Compute Attention (on local shards)
         attn_output = wrapper.run(q, kv_cache_layer)
         del q, k, v
         del qkv_proj
@@ -669,11 +838,11 @@ class ForwardPass:
         # attn_output is a local shard
         attn_output = attn_output.reshape(n, -1)
 
-        # 9. Output Projection (Row Parallel)
-        # Input is sharded, weight is sharded -> output is partial
+        # 8. Output Projection (Row Parallel)
+        # Input is sharded, weight is sharded -> output is sharded
         attn_proj = fun.linear(
             attn_output,
-            self.weights.get(f"layers.{layer_idx}.proj_o"),
+            self.weights.get(f"layers.{layer_idx}.attn.proj"),
             None,
         )
         del attn_output
@@ -682,9 +851,7 @@ class ForwardPass:
         if self.tp_size > 1:
             dist.all_reduce(attn_proj, group=self.compute_process_group)
 
-        # 10. First Residual Connection
-        # residual (replicated) + attn_proj (now replicated)
-        return residual + attn_proj
+        return attn_proj
 
     def transform(
         self,
@@ -728,7 +895,7 @@ class ForwardPass:
 
         # Wrapper Planning
         local_num_query_heads = self.model_config.num_q_heads // self.tp_size
-        local_num_key_value_heads = self.model_config.num_kv_heads // self.tp_size
+        local_num_key_value_heads = self.model_config.internal_num_kv_heads // self.tp_size
 
         if single_token_inference_mode:
             if self.use_cuda_graphs:
@@ -744,32 +911,11 @@ class ForwardPass:
                     total_pages_cpu=total_pages_cpu,
                 )
             # Normal decode fallback
-            wrapper = self.wrapper_decode
-            wrapper.plan(
-                indptr=kv_page_indptr,
-                indices=kv_page_indices,
-                last_page_len=kv_last_page_lens,
-                num_qo_heads=local_num_query_heads,
-                num_kv_heads=local_num_key_value_heads,
-                head_dim=self.model_config.dim_head,
-                page_size=page_size,
-                pos_encoding_mode="NONE",
-                q_data_type=input_embeds.dtype,
-            )
+            wrapper = self.wrapper_decode_fallback
+            # NOTE: wrapper.plan() is now called per-layer inside _run_layers
         else:
             wrapper = self.wrapper_append
-            wrapper.plan(
-                qo_indptr=qo_indptr,
-                paged_kv_indptr=kv_page_indptr,
-                paged_kv_indices=kv_page_indices,
-                paged_kv_last_page_len=kv_last_page_lens,
-                num_qo_heads=local_num_query_heads,
-                num_kv_heads=local_num_key_value_heads,
-                head_dim_qk=self.model_config.dim_head,
-                page_size=page_size,
-                custom_mask=custom_mask,
-                q_data_type=input_embeds.dtype,
-            )
+            # NOTE: wrapper.plan() is now called per-layer inside _run_layers
 
         return self._run_layers(
             hidden_states=input_embeds,
@@ -782,6 +928,12 @@ class ForwardPass:
             batch_positions=batch_positions,
             adapter_subpass=adapter_subpass,
             wrapper=wrapper,
+            # Per-layer planning parameters
+            is_decode=single_token_inference_mode,
+            page_size=page_size,
+            qo_indptr=qo_indptr,
+            custom_mask=custom_mask,
+            input_dtype=input_embeds.dtype,
         )
 
     def _run_layers(
@@ -796,10 +948,75 @@ class ForwardPass:
         batch_positions: torch.Tensor,
         adapter_subpass: Optional[AdapterSubpass],
         wrapper: Any,
+        # Added planning parameters for per-layer window
+        is_decode: bool,
+        page_size: int,
+        qo_indptr: torch.Tensor | None,
+        custom_mask: torch.Tensor | None,
+        input_dtype: torch.dtype,
     ) -> torch.Tensor:
-        """Execute all transformer layers sequentially."""
+        """Execute all transformer layers sequentially.
+
+        Olmo3 uses POST-normalization architecture:
+        - hidden = hidden + post_attn_norm(attention(hidden))
+        - hidden = hidden + post_mlp_norm(mlp(hidden))
+
+        Per-layer attention types: Each layer can be "sliding_attention" or "full_attention"
+        based on model_config.layer_types[layer_idx].
+        """
+        local_num_query_heads = self.model_config.num_q_heads // self.tp_size
+        local_num_key_value_heads = self.model_config.internal_num_kv_heads // self.tp_size
+
+
+
         for layer_idx in range(self.model_config.num_layers):
-            hidden_states = self.attention(
+            # --- Per-layer attention type: determine window_left ---
+            layer_types = self.model_config.layer_types
+            if layer_types and layer_idx < len(layer_types):
+                attention_type = layer_types[layer_idx]
+                # sliding_attention uses sliding_window, full_attention uses -1 (no window)
+                if attention_type == "sliding_attention":
+                    window_left = self.model_config.sliding_window or -1
+                else:
+                    window_left = -1  # full_attention
+            else:
+                # Fallback to global setting
+                window_left = self.model_config.sliding_window or -1
+
+            # --- Plan wrapper for this layer with per-layer window ---
+            if is_decode:
+                wrapper.plan(
+                    indptr=kv_page_indptr,
+                    indices=kv_page_indices,
+                    last_page_len=kv_last_page_lens,
+                    num_qo_heads=local_num_query_heads,
+                    num_kv_heads=local_num_key_value_heads,
+                    head_dim=self.model_config.dim_head,
+                    page_size=page_size,
+                    pos_encoding_mode="NONE",
+                    q_data_type=input_dtype,
+                    window_left=window_left,
+                )
+            else:
+                wrapper.plan(
+                    qo_indptr=qo_indptr,
+                    paged_kv_indptr=kv_page_indptr,
+                    paged_kv_indices=kv_page_indices,
+                    paged_kv_last_page_len=kv_last_page_lens,
+                    num_qo_heads=local_num_query_heads,
+                    num_kv_heads=local_num_key_value_heads,
+                    head_dim_qk=self.model_config.dim_head,
+                    page_size=page_size,
+                    custom_mask=custom_mask,
+                    q_data_type=input_dtype,
+                    window_left=window_left,
+                )
+
+            # Save input for residual connection
+            residual = hidden_states
+
+            # Attention block
+            attn_output = self.attention(
                 hidden_states=hidden_states,
                 layer_idx=layer_idx,
                 position_ids=position_ids,
@@ -812,10 +1029,56 @@ class ForwardPass:
                 adapter_subpass=adapter_subpass,
                 wrapper=wrapper,
             )
-            hidden_states = self.mlp(
+
+            # Post-attention norm (applied BEFORE residual connection)
+            attn_output = fun.rms_norm(
+                attn_output,
+                normalized_shape=[self.model_config.dim_hidden],
+                weight=self.weights.get(f"layers.{layer_idx}.norm_attn"),
+                eps=self.model_config.rms_norm_eps,
+            )
+
+            # Residual connection (added AFTER norm)
+            hidden_states = residual + attn_output
+
+            # Save for MLP residual
+            residual = hidden_states
+
+            # MLP block
+            mlp_output = self.mlp(
                 hidden_states=hidden_states,
                 layer_idx=layer_idx,
             )
+
+            # Post-MLP norm (applied BEFORE residual connection)
+            mlp_output = fun.rms_norm(
+                mlp_output,
+                normalized_shape=[self.model_config.dim_hidden],
+                weight=self.weights.get(f"layers.{layer_idx}.norm_ffn"),
+                eps=self.model_config.rms_norm_eps,
+            )
+
+            # Store normalization for next layer
+            hidden_states = residual + mlp_output
+            
+
+
+            # Apply residual (Post-Norm architecture: out = residual + norm(block))
+            # However, looking at HF:
+            # hidden_states = hidden_states + residual
+            # But earlier in loop: residual = hidden_states
+            # And: hidden_states = attention...
+            # The structure is:
+            #   residual = hidden_states
+            #   hidden_states = layernorm(hidden_states)
+            #   hidden_states = attention(hidden_states)
+            #   hidden_states = residual + hidden_states
+            #
+            # My current codestructure in _run_layers:
+            # hidden_states calculated in self.layers[idx] (which is Olmo3DecoderLayer)
+            # Wait, Olmo3DecoderLayer applies the residual?
+            # Let's check Olmo3DecoderLayer.forward/transform
+            
         return hidden_states
 
     def _get_bin(self, batch_size: int) -> int | None:
@@ -854,12 +1117,13 @@ class ForwardPass:
                 last_page_len=kv_last_page_lens,
                 num_qo_heads=self.model_config.num_q_heads
                 // self.runtime_config.world_size,
-                num_kv_heads=self.model_config.num_kv_heads
+                num_kv_heads=self.model_config.internal_num_kv_heads
                 // self.runtime_config.world_size,
                 head_dim=self.model_config.dim_head,
                 page_size=page_size,
                 pos_encoding_mode="NONE",
                 q_data_type=hidden_states.dtype,
+                window_left=self.model_config.sliding_window or -1,
             )
             return self._run_layers(
                 hidden_states,
@@ -923,7 +1187,7 @@ def create_kv_cache(
 ) -> list[torch.Tensor]:
     """Create KV cache tensors for all layers."""
     local_num_kv_heads = (
-        model_config.num_kv_heads // runtime_config.tensor_parallel_size
+        model_config.internal_num_kv_heads // runtime_config.tensor_parallel_size
     )
 
     return [

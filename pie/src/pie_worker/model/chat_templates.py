@@ -342,3 +342,60 @@ Gemma3Template = ChatTemplate(
     template=_GEMMA_2_TEMPLATE_CONTENT,  # Same template as Gemma 2
     stop_tokens=["<end_of_turn>", "<eos>"],
 )
+
+# Mistral 3 (Ministral) chat template
+# Uses standard [INST] format with system messages supported
+_MISTRAL_3_TEMPLATE_CONTENT = """
+{%- set system_message = "" -%}
+{%- for m in messages -%}
+{%- if m.role == "system" -%}
+{%- set system_message = m.content -%}
+{%- endif -%}
+{%- endfor -%}
+<s>
+{%- for m in messages -%}
+{%- if m.role == "user" -%}
+[INST] {% if loop.first and system_message %}{{ system_message }}
+
+{% endif %}{{ m.content }} [/INST]
+{%- elif m.role == "assistant" -%}
+{{ m.content }}</s>
+{%- endif -%}
+{%- endfor -%}
+{%- if add_generation_prompt and (messages | length == 0 or (messages | last).role != "assistant") -%}
+{%- endif -%}
+"""
+
+Mistral3Template = ChatTemplate(
+    template_type="minijinja",
+    template=_MISTRAL_3_TEMPLATE_CONTENT,
+    stop_tokens=["</s>"],
+)
+
+
+# Olmo3 chat template
+# FIXED: Uses ChatML format matching HuggingFace reference
+_OLMO3_TEMPLATE_CONTENT = """
+{% for m in messages %}
+{% if m.role == "system" %}<|im_start|>system
+{{ m.content }}<|im_end|>
+{% elif m.role == "user" %}<|im_start|>user
+{{ m.content }}<|im_end|>
+{% elif m.role == "assistant" %}<|im_start|>assistant
+{% if m.reasoning_content %}<think>
+{{ m.reasoning_content | trim }}
+</think>
+{% endif -%}
+{{ m.content }}<|im_end|>
+{% endif %}
+{% endfor %}
+{% if add_generation_prompt %}<|im_start|>assistant
+{% endif %}
+"""
+
+Olmo3Template = ChatTemplate(
+    template_type="minijinja",
+    template=_OLMO3_TEMPLATE_CONTENT,
+    stop_tokens=["<|im_end|>"],
+)
+

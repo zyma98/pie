@@ -18,11 +18,14 @@ HF_TO_PIE_ARCH = {
     "llama": "llama3",
     "qwen2": "qwen2",
     "qwen3": "qwen3",
+    "olmo3": "olmo3",
     "gptoss": "gptoss",
     "gpt_oss": "gptoss",  # HuggingFace config may use underscore variant
     "gemma2": "gemma2",
     "gemma3_text": "gemma3",
+    "mistral3": "mistral3",  # Ministral models (e.g., Ministral-3-3B-Instruct-2512)
 }
+
 
 
 def get_hf_cache_dir() -> Path:
@@ -146,8 +149,9 @@ def load_hf_tokenizer(snapshot_dir: Path) -> dict:
         # at a LOW token ID (< 256), which represents byte 0x00 in these tokenizers.
         # If "Ā" exists but has a HIGH token ID (like 239503 in Gemma 2), it's just
         # a linguistic character, not a byte-level mapping token.
+        # Mistral Tekken starts byte mapping at 1000.
         A_macron_id = vocab.get("\u0100")  # U+0100 = Ā
-        if A_macron_id is not None and A_macron_id < 256:
+        if A_macron_id is not None and (A_macron_id < 256 or A_macron_id == 1000):
             result["escape_non_printable"] = True
 
         # Auto-detect SentencePiece tokenizers
