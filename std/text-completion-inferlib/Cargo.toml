@@ -7,11 +7,11 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-inferlib-chat-bindings = { path = "../../inferlib/chat-bindings" }
-inferlib-environment-bindings = { path = "../../inferlib/environment-bindings" }
-inferlib-context-bindings = { path = "../../inferlib/context-bindings" }
-inferlib-run-bindings = { path = "../../inferlib/run-bindings" }
-inferlib-macros = { path = "../../inferlib-macros" }
+inferlib-chat-bindings = { path = "../../sdk/rust/inferlib/chat-bindings" }
+inferlib-environment-bindings = { path = "../../sdk/rust/inferlib/environment-bindings" }
+inferlib-context-bindings = { path = "../../sdk/rust/inferlib/context-bindings" }
+inferlib-run-bindings = { path = "../../sdk/rust/inferlib/run-bindings" }
+inferlib-macros = { path = "../../sdk/rust/inferlib-macros" }
 futures = "0.3.31"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
