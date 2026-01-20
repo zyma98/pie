@@ -586,84 +586,92 @@ def _ipc_worker_process(
         ipc_server_names: IPC server names for each group
         ready_queue: Queue to signal when ready
     """
-    from pie import _pie
-    from pie_worker.runtime import Runtime
-    from pie_worker.config import RuntimeConfig
-    import torch.distributed as dist
-
-    rank = local_rank  # With nprocs=world_size, local_rank IS the actual rank
-
-    # Determine my group and TP rank within it
-    my_group_id = 0
-    tp_rank = 0
-    for i, group in enumerate(group_topology):
-        if rank in group:
-            my_group_id = i
-            tp_rank = group.index(rank)  # My position within the TP group
-            break
-
-    tp_degree = len(group_topology[my_group_id])  # Number of GPUs in my TP group
-
-    # Initialize distributed
-    _init_distributed(rank, world_size, master_port, devices[rank])
-
-    # Setup process groups (collective ops - all ranks must participate)
-    # Capture the mappings to pass to Runtime
-    pg_map = _setup_process_groups(rank, group_topology)
-    compute_pg_map = _setup_compute_process_groups(rank, group_topology)
-
-    # Create runtime config
-    # For TP>1: each worker needs ALL devices in its TP group so devices[tp_rank] works
-    # Get the device list for this TP group (e.g., ["cuda:0", "cuda:1"] for group 0)
-    my_group_ranks = group_topology[my_group_id]
-    group_devices = [devices[r] for r in my_group_ranks]
-
-    filtered_config = {
-        k: v for k, v in config_dict.items() if k not in ("device", "devices")
-    }
-    config = RuntimeConfig.from_args(
-        **filtered_config,
-        devices=group_devices,  # All devices in this TP group
-        rank=tp_rank,  # Position within TP group
-        world_size=tp_degree,  # Size of TP group
-        tensor_parallel_size=tp_degree,  # Ensure sharding is enabled!
-    )
-
-    # Create runtime (loads model on this GPU)
-    # Pass process groups for TP communication
-    runtime = Runtime(
-        config,
-        group_id=my_group_id,
-        process_groups=pg_map,
-        compute_process_groups=compute_pg_map,
-        group_topology=group_topology,
-    )
-
-    # Sync all workers before connecting to server
-    dist.barrier()
-
-    # Check if I'm a group leader (first rank in my TP group)
-    is_group_leader = tp_rank == 0
-
+    import traceback
+    import sys
+    
     try:
-        if is_group_leader:
-            # Group leader: connect to IPC and handle requests
-            server_name = ipc_server_names[my_group_id]
-            ipc_queue = _pie.FfiIpcQueue.connect(server_name, my_group_id)
+        from pie import _pie
+        from pie_worker.runtime import Runtime
+        from pie_worker.config import RuntimeConfig
+        import torch.distributed as dist
 
-            # Signal that we're connected and ready
-            ready_queue.put(rank)
+        rank = local_rank  # With nprocs=world_size, local_rank IS the actual rank
 
-            # Run IPC worker loop (handles requests from Rust server)
-            _run_ipc_worker_loop(ipc_queue, runtime)
-        else:
-            # Non-leader: signal ready, then run worker loop waiting for commands from leader
-            ready_queue.put(rank)
-            runtime.worker_loop()
-    finally:
-        # Cleanup - ensure process group is destroyed even on termination
-        if dist.is_initialized():
-            dist.destroy_process_group()
+        # Determine my group and TP rank within it
+        my_group_id = 0
+        tp_rank = 0
+        for i, group in enumerate(group_topology):
+            if rank in group:
+                my_group_id = i
+                tp_rank = group.index(rank)  # My position within the TP group
+                break
+
+        tp_degree = len(group_topology[my_group_id])  # Number of GPUs in my TP group
+
+        # Initialize distributed
+        _init_distributed(rank, world_size, master_port, devices[rank])
+
+        # Setup process groups (collective ops - all ranks must participate)
+        # Capture the mappings to pass to Runtime
+        pg_map = _setup_process_groups(rank, group_topology)
+        compute_pg_map = _setup_compute_process_groups(rank, group_topology)
+
+        # Create runtime config
+        # For TP>1: each worker needs ALL devices in its TP group so devices[tp_rank] works
+        # Get the device list for this TP group (e.g., ["cuda:0", "cuda:1"] for group 0)
+        my_group_ranks = group_topology[my_group_id]
+        group_devices = [devices[r] for r in my_group_ranks]
+
+        filtered_config = {
+            k: v for k, v in config_dict.items() if k not in ("device", "devices")
+        }
+        config = RuntimeConfig.from_args(
+            **filtered_config,
+            devices=group_devices,  # All devices in this TP group
+            rank=tp_rank,  # Position within TP group
+            world_size=tp_degree,  # Size of TP group
+            tensor_parallel_size=tp_degree,  # Ensure sharding is enabled!
+        )
+
+        # Create runtime (loads model on this GPU)
+        # Pass process groups for TP communication
+        runtime = Runtime(
+            config,
+            group_id=my_group_id,
+            process_groups=pg_map,
+            compute_process_groups=compute_pg_map,
+            group_topology=group_topology,
+        )
+
+        # Sync all workers before connecting to server
+        dist.barrier()
+
+        # Check if I'm a group leader (first rank in my TP group)
+        is_group_leader = tp_rank == 0
+
+        try:
+            if is_group_leader:
+                # Group leader: connect to IPC and handle requests
+                server_name = ipc_server_names[my_group_id]
+                ipc_queue = _pie.FfiIpcQueue.connect(server_name, my_group_id)
+
+                # Signal that we're connected and ready
+                ready_queue.put(rank)
+
+                # Run IPC worker loop (handles requests from Rust server)
+                _run_ipc_worker_loop(ipc_queue, runtime)
+            else:
+                # Non-leader: signal ready, then run worker loop waiting for commands from leader
+                ready_queue.put(rank)
+                runtime.worker_loop()
+        finally:
+            # Cleanup - ensure process group is destroyed even on termination
+            if dist.is_initialized():
+                dist.destroy_process_group()
+    except Exception as e:
+        print(f"[WORKER ERROR] Worker {local_rank} crashed with exception:", file=sys.stderr)
+        traceback.print_exc()
+        raise
 
 
 def _run_ipc_worker_loop(ipc_queue, runtime):
