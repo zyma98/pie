@@ -1,0 +1,5 @@
+package inferlib:dummy-bindings;
+
+world dummy-bindings {
+    import inferlib:dummy/greeting;
+}

@@ -11,7 +11,7 @@ name = "inferlib_context"
 wit-bindgen = { workspace = true }
 
 # Import bindings from other inferlib modules instead of regenerating
-inferlib-model-bindings = { path = "../model-bindings" }
+inferlib-dummy-bindings = { path = "../dummy-bindings" }
 inferlib-queue-bindings = { path = "../queue-bindings" }
 inferlib-chat-bindings = { path = "../chat-bindings" }
 inferlib-brle-bindings = { path = "../brle-bindings" }

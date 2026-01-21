@@ -6,5 +6,5 @@ edition = "2024"
 [dependencies]
 wit-bindgen = { workspace = true }
 
-# Import model bindings instead of regenerating
-inferlib-model-bindings = { path = "../model-bindings" }
+# Import dummy bindings instead of regenerating
+inferlib-dummy-bindings = { path = "../dummy-bindings" }

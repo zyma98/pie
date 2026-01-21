@@ -1,0 +1,19 @@
+// WARNING: This file is the source of truth for the dummy interface.
+// It is accessed from multiple locations:
+//   - inferlib/dummy/wit/dummy.wit (this file, source)
+//   - Other locations via symlinks
+// Any changes made here will be reflected in all locations that symlink to this file.
+
+package inferlib:dummy;
+
+/// A minimal dummy interface for debugging
+interface greeting {
+    /// A Dummy resource that returns a greeting
+    resource dummy {
+        /// Creates a new Dummy instance
+        constructor();
+
+        /// Returns "hello world"
+        hello: func() -> string;
+    }
+}

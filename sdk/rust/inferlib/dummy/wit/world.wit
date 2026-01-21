@@ -1,0 +1,5 @@
+package inferlib:dummy;
+
+world dummy-provider {
+    export greeting;
+}

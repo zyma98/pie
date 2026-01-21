@@ -8,7 +8,7 @@ package inferlib:context;
 
 /// Interface for inference context management
 interface inference {
-    use inferlib:model/models.{model};
+    use inferlib:dummy/greeting.{dummy};
 
     /// Sampler configuration for token generation
     variant sampler-config {
@@ -36,8 +36,8 @@ interface inference {
 
     /// An inference context resource that maintains conversation state and KV cache
     resource context {
-        /// Create a new context for the specified model
-        constructor(model: borrow<model>);
+        /// Create a new context for the specified dummy
+        constructor(dummy: dummy);
 
         /// Fill the context with raw text (tokenizes and adds to pending)
         fill: func(text: string);

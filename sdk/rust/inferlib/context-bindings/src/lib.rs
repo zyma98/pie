@@ -6,13 +6,13 @@
 //! ## Usage
 //!
 //! ```rust,no_run
-//! use inferlib_context_bindings::{Context, Model, SamplerConfig, StopConfig};
+//! use inferlib_context_bindings::{Context, Dummy, SamplerConfig, StopConfig};
 //!
-//! // Get a model
-//! let model = Model::get_auto();
+//! // Create a dummy
+//! let dummy = Dummy::new();
 //!
-//! // Create a context for the model
-//! let ctx = Context::new(&model);
+//! // Create a context for the dummy
+//! let ctx = Context::new(&dummy);
 //!
 //! // Fill with messages
 //! ctx.fill_system("You are a helpful assistant.");
@@ -26,13 +26,13 @@
 //! let response = ctx.generate(SamplerConfig::TopP((0.6, 0.95)), &stop_config);
 //! ```
 
-// Generate WIT bindings, using model-bindings crate for model interface
+// Generate WIT bindings, using dummy-bindings crate for dummy interface
 wit_bindgen::generate!({
     path: "wit",
     world: "importer",
     with: {
-        // Use model-bindings crate instead of regenerating
-        "inferlib:model/models": inferlib_model_bindings::model::models,
+        // Use dummy-bindings crate instead of regenerating
+        "inferlib:dummy/greeting": inferlib_dummy_bindings::greeting,
         "inferlib:context/inference": generate,
     },
 });
@@ -40,15 +40,15 @@ wit_bindgen::generate!({
 // Re-export the main types for convenience
 pub use self::inferlib::context::inference::{Context, SamplerConfig, StopConfig};
 
-// Re-export Model and Tokenizer from model-bindings crate
-pub use inferlib_model_bindings::{Model, Tokenizer};
+// Re-export Dummy from dummy-bindings crate
+pub use inferlib_dummy_bindings::Dummy;
 
 // Re-export the module structure for advanced usage
 pub mod context {
     pub use super::inferlib::context::*;
 }
 
-// Re-export model module from model-bindings for compatibility
-pub mod model {
-    pub use inferlib_model_bindings::model::*;
+// Re-export dummy module from dummy-bindings for compatibility
+pub mod dummy {
+    pub use inferlib_dummy_bindings::greeting::*;
 }
