@@ -123,6 +123,9 @@ pub struct InstanceState {
 
     // Dynamic linking state: maps host rep -> provider's ResourceAny
     pub dynamic_resource_map: HashMap<u32, wasmtime::component::ResourceAny>,
+    // Reverse map: provider ResourceAny -> host rep (for identity preservation)
+    // ResourceAny doesn't implement Hash, so we use a Vec for linear scan
+    provider_resource_map: Vec<(wasmtime::component::ResourceAny, u32)>,
     // Counter for generating unique dynamic resource reps
     next_dynamic_rep: u32,
 }
@@ -178,6 +181,7 @@ impl InstanceState {
             http_ctx: WasiHttpCtx::new(),
             resources: HashMap::new(),
             dynamic_resource_map: HashMap::new(),
+            provider_resource_map: Vec::new(),
             next_dynamic_rep: 1,
         };
 
@@ -189,6 +193,44 @@ impl InstanceState {
         let rep = self.next_dynamic_rep;
         self.next_dynamic_rep += 1;
         rep
+    }
+
+    /// Look up host rep for an existing provider resource (for identity preservation)
+    pub fn rep_for_provider_resource(
+        &self,
+        resource: wasmtime::component::ResourceAny,
+    ) -> Option<u32> {
+        self.provider_resource_map
+            .iter()
+            .find(|(r, _)| *r == resource)
+            .map(|(_, rep)| *rep)
+    }
+
+    /// Insert a bidirectional mapping between host rep and provider resource
+    pub fn insert_dynamic_resource_mapping(
+        &mut self,
+        rep: u32,
+        resource: wasmtime::component::ResourceAny,
+    ) {
+        self.dynamic_resource_map.insert(rep, resource);
+        // Only add to reverse map if not already present
+        if self.rep_for_provider_resource(resource).is_none() {
+            self.provider_resource_map.push((resource, rep));
+        }
+    }
+
+    /// Remove a resource mapping by host rep (returns the provider resource if found)
+    pub fn remove_dynamic_resource_mapping(
+        &mut self,
+        rep: u32,
+    ) -> Option<wasmtime::component::ResourceAny> {
+        let resource = self.dynamic_resource_map.remove(&rep);
+        if let Some(resource) = resource {
+            self.provider_resource_map.retain(|(r, _)| *r != resource);
+            Some(resource)
+        } else {
+            None
+        }
     }
 
     pub fn id(&self) -> InstanceId {
