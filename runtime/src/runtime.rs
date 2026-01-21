@@ -1496,7 +1496,7 @@ impl Runtime {
                     let iface = Arc::<str>::from(interface_name);
                     let res = resource_name_arc;
 
-                    let _ = inst.resource_async(
+                    let registration_result = inst.resource_async(
                         export_name,
                         ResourceType::host::<DynamicResource>(),
                         move |mut store, rep| {
@@ -1521,6 +1521,10 @@ impl Runtime {
                             })
                         },
                     );
+                    eprintln!(
+                        "[DEBUG] Resource registration for '{}' in interface '{}': {:?}",
+                        export_name, interface_name, registration_result.is_ok()
+                    );
                 }
                 ComponentItem::ComponentFunc(func_type) => {
                     functions.push((export_name.to_string(), func_type));
@@ -1543,10 +1547,19 @@ impl Runtime {
             }
         }
 
+        eprintln!(
+            "[DEBUG] Interface '{}': owned_resource_names = {:?}, all resources = {:?}",
+            interface_name, owned_resource_names, resources
+        );
+
         // Convert owned resource names to concrete ResourceType handles for runtime comparisons
         let mut owned_resource_types: Vec<ResourceType> = Vec::new();
         for resource_name in &owned_resource_names {
             if let Some(resource_type) = resource_type_by_name.get(resource_name) {
+                eprintln!(
+                    "[DEBUG] Interface '{}': Adding owned resource '{}' with ResourceType",
+                    interface_name, resource_name
+                );
                 owned_resource_types.push(*resource_type);
             }
         }
@@ -1570,6 +1583,11 @@ impl Runtime {
             let param_types: Arc<Vec<Type>> =
                 Arc::new(func_type.params().map(|(_, ty)| ty).collect());
             let result_types: Arc<Vec<Type>> = Arc::new(func_type.results().collect());
+
+            eprintln!(
+                "[DEBUG] Registering function '{}' in interface '{}' with {} params, {} results",
+                export_name, interface_name, param_types.len(), result_types.len()
+            );
 
             // Categorize the function
             let func_category = categorize_function(&export_name, &resources);
@@ -1634,6 +1652,7 @@ impl Runtime {
 
                 forward_call(
                     &mut store,
+                    &func_name_for_log,
                     &provider_func,
                     args,
                     results,
@@ -1671,6 +1690,7 @@ impl Runtime {
 
                 forward_call(
                     &mut store,
+                    &func_name_for_log,
                     &provider_func,
                     args,
                     results,
@@ -1708,6 +1728,7 @@ impl Runtime {
 
                 forward_call(
                     &mut store,
+                    &func_name_for_log,
                     &provider_func,
                     args,
                     results,
@@ -1833,23 +1854,40 @@ fn transform_incoming_val(
     match ty {
         Type::Own(resource_type) | Type::Borrow(resource_type) => match val {
             Val::Resource(resource_any) => {
+                let is_owned = owned_resource_types.contains(resource_type);
+                eprintln!(
+                    "[DEBUG] transform_incoming_val: resource_type={:?}, is_owned={}, owned_count={}",
+                    resource_type, is_owned, owned_resource_types.len()
+                );
                 // If the provider owns this resource type, unwrap the host
                 // handle into the provider's ResourceAny. Otherwise keep the
                 // host handle so cross-provider usage works.
-                if owned_resource_types.contains(resource_type) {
+                if is_owned {
+                    eprintln!("[DEBUG] transform_incoming_val: Unwrapping host resource to provider ResourceAny");
                     let host_resource: Resource<DynamicResource> =
                         Resource::try_from_resource_any(resource_any, &mut *store)?;
                     let rep = host_resource.rep();
+                    let map_keys: Vec<u32> = store.data().dynamic_resource_map.keys().copied().collect();
+                    eprintln!(
+                        "[DEBUG] transform_incoming_val: host rep={}, dynamic_resource_map keys={:?}",
+                        rep, map_keys
+                    );
                     let provider_resource = store
                         .data()
                         .dynamic_resource_map
                         .get(&rep)
                         .copied()
                         .ok_or_else(|| {
-                            wasmtime::Error::msg(format!("unknown resource rep={}", rep))
+                            wasmtime::Error::msg(format!(
+                                "unknown resource rep={} (map has {} entries: {:?})",
+                                rep,
+                                map_keys.len(),
+                                map_keys
+                            ))
                         })?;
                     Ok(Val::Resource(provider_resource))
                 } else {
+                    eprintln!("[DEBUG] transform_incoming_val: Keeping host resource as-is (imported resource)");
                     // Imported resources should stay as host resources.
                     Ok(Val::Resource(resource_any))
                 }
@@ -1999,16 +2037,23 @@ fn transform_outgoing_val(
     match ty {
         Type::Own(resource_type) | Type::Borrow(resource_type) => match val {
             Val::Resource(provider_resource) => {
+                let is_owned = owned_resource_types.contains(resource_type);
+                eprintln!(
+                    "[DEBUG] transform_outgoing_val: resource_type={:?}, is_owned={}, owned_count={}",
+                    resource_type, is_owned, owned_resource_types.len()
+                );
                 // Provider-owned resources are wrapped into host handles.
                 // Imported resources are passed through unchanged.
-                if owned_resource_types.contains(resource_type) {
+                if is_owned {
                     // Reuse existing host rep if provider returns an already-known resource.
                     // This preserves identity and avoids double-dropping.
                     let rep =
                         if let Some(existing) = store.data().rep_for_provider_resource(provider_resource) {
+                            eprintln!("[DEBUG] transform_outgoing_val: reusing existing host rep={}", existing);
                             existing
                         } else {
                             let rep = store.data_mut().alloc_dynamic_rep();
+                            eprintln!("[DEBUG] transform_outgoing_val: allocated new host rep={}", rep);
                             store
                                 .data_mut()
                                 .insert_dynamic_resource_mapping(rep, provider_resource);
@@ -2020,8 +2065,17 @@ fn transform_outgoing_val(
                     };
                     let host_resource_any =
                         ResourceAny::try_from_resource(host_resource, &mut *store)?;
+                    eprintln!(
+                        "[DEBUG] transform_outgoing_val: created host ResourceAny = {:?}",
+                        host_resource_any
+                    );
+                    eprintln!(
+                        "[DEBUG] transform_outgoing_val: expected result type = {:?}",
+                        resource_type
+                    );
                     Ok(Val::Resource(host_resource_any))
                 } else {
+                    eprintln!("[DEBUG] transform_outgoing_val: keeping provider resource as-is (imported)");
                     // Returning an imported resource: keep as-is.
                     Ok(Val::Resource(provider_resource))
                 }
@@ -2163,6 +2217,7 @@ fn transform_outgoing_val(
 /// Centralized call forwarding: transform args, call provider, transform results.
 async fn forward_call(
     store: &mut wasmtime::StoreContextMut<'_, InstanceState>,
+    func_name: &str,
     provider_func: &Func,
     args: &[Val],
     results: &mut [Val],
@@ -2170,6 +2225,16 @@ async fn forward_call(
     result_types: &[Type],
     owned_resource_types: &[ResourceType],
 ) -> Result<(), wasmtime::Error> {
+    eprintln!(
+        "[DEBUG] forward_call '{}': args.len()={}, param_types.len()={}, result_types.len()={}, owned_resource_types.len()={}",
+        func_name, args.len(), param_types.len(), result_types.len(), owned_resource_types.len()
+    );
+    for (i, ty) in param_types.iter().enumerate() {
+        eprintln!("[DEBUG] forward_call '{}': param_types[{}] = {:?}", func_name, i, ty);
+    }
+    for (i, ty) in result_types.iter().enumerate() {
+        eprintln!("[DEBUG] forward_call '{}': result_types[{}] = {:?}", func_name, i, ty);
+    }
     if results.len() != result_types.len() {
         return Err(wasmtime::Error::msg(format!(
             "result slot mismatch: got {}, expected {}",
@@ -2178,7 +2243,9 @@ async fn forward_call(
         )));
     }
 
+    eprintln!("[DEBUG] forward_call '{}': transforming args...", func_name);
     let provider_args = transform_args_for_provider(store, args, param_types, owned_resource_types)?;
+    eprintln!("[DEBUG] forward_call '{}': args transformed, calling provider...", func_name);
     let mut provider_results = vec![Val::Bool(false); result_types.len()];
 
     provider_func
@@ -2186,11 +2253,21 @@ async fn forward_call(
         .await?;
     provider_func.post_return_async(&mut *store).await?;
 
+    eprintln!(
+        "[DEBUG] forward_call '{}': provider returned, transforming {} results...",
+        func_name,
+        provider_results.len()
+    );
+    for (i, val) in provider_results.iter().enumerate() {
+        eprintln!("[DEBUG] forward_call '{}': provider_results[{}] = {:?}", func_name, i, val);
+    }
     let transformed =
         transform_results_from_provider(store, provider_results, result_types, owned_resource_types)?;
     for (index, value) in transformed.into_iter().enumerate() {
+        eprintln!("[DEBUG] forward_call '{}': setting results[{}] = {:?}", func_name, index, value);
         results[index] = value;
     }
 
+    eprintln!("[DEBUG] forward_call '{}': completed successfully", func_name);
     Ok(())
 }

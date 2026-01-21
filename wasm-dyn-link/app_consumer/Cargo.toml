@@ -1,0 +1,13 @@
+[package]
+name = "app_consumer"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.36"
+inferlib-run-bindings = { path = "../../sdk/rust/inferlib/run-bindings" }
+inferlib-macros = { path = "../../sdk/rust/inferlib-macros" }
+inferlib-environment-bindings = { path = "../../sdk/rust/inferlib/environment-bindings" }

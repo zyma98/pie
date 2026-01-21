@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = [
+    "host",
+    "provider_logging",
+    "provider_calculator",
+    "app_consumer",
+]

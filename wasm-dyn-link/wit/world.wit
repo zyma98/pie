@@ -1,0 +1,96 @@
+package demo:logging@0.1.0;
+
+interface logging {
+    enum level {
+        debug,
+        info,
+        warn,
+        error,
+    }
+
+    /// Standalone function: get the default log level
+    get-default-level: func() -> level;
+
+    /// Standalone function: convert a level to its string representation
+    level-to-string: func(lvl: level) -> string;
+
+    /// Factory function: create a logger (returns a resource directly)
+    create-logger: func(max-level: level) -> logger;
+
+    /// Factory function: create a logger optionally
+    maybe-create-logger: func(max-level: level, enabled: bool) -> option<logger>;
+
+    /// Echo a logger resource back to the caller (identity test)
+    echo-logger: func(logger: logger) -> logger;
+
+    resource logger {
+        constructor(max-level: level);
+
+        /// Static factory: try to create a logger
+        try-new: static func(max-level: level, enabled: bool) -> result<logger, string>;
+
+        /// Static factory: create a logger optionally
+        maybe-new: static func(max-level: level, enabled: bool) -> option<logger>;
+
+        /// Static function: get the total count of loggers created
+        get-logger-count: static func() -> u32;
+
+        get-max-level: func() -> level;
+        set-max-level: func(level: level);
+        log: func(level: level, msg: string);
+    }
+}
+
+interface calculator {
+    use logging.{logger};
+    /// Standalone function: get the value of pi
+    pi: func() -> f64;
+
+    /// Standalone function: quick add without creating a calculator instance
+    quick-add: func(a: f64, b: f64) -> f64;
+
+    /// Standalone function: use an external logger from the logging interface
+    log-with-logger: func(logger: logger, msg: string);
+
+    /// A calculator resource that logs its operations
+    resource calc {
+        /// Create a new calculator
+        constructor();
+
+        /// Static function: get the calculator version
+        version: static func() -> string;
+
+        /// Static function: get total number of calculations performed across all instances
+        total-operations: static func() -> u64;
+
+        /// Add two numbers
+        add: func(a: f64, b: f64) -> f64;
+
+        /// Subtract b from a
+        subtract: func(a: f64, b: f64) -> f64;
+
+        /// Multiply two numbers
+        multiply: func(a: f64, b: f64) -> f64;
+
+        /// Divide a by b (returns 0 if b is 0)
+        divide: func(a: f64, b: f64) -> f64;
+    }
+}
+
+/// World for the logging provider (exports logging)
+world logging-provider {
+    export logging;
+}
+
+/// World for the calculator provider (imports logging, exports calculator)
+world calculator-provider {
+    import logging;
+    export calculator;
+}
+
+/// World for the app (imports calculator, imports logging for standalone functions, exports run)
+world app {
+    import logging;
+    import calculator;
+    export run: func();
+}
