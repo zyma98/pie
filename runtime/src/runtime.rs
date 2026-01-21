@@ -13,8 +13,9 @@ use std::sync::{Arc, OnceLock};
 use thiserror::Error;
 use tokio::sync::oneshot;
 use uuid::Uuid;
+use std::collections::HashSet;
+use wasmtime::component::types::{ComponentItem, Type};
 use wasmtime::component::{Func, Resource, ResourceAny, ResourceType, Val};
-use wasmtime::component::types::ComponentItem;
 use wasmtime::{Config, Engine, Store, component::Component, component::Linker};
 use wasmtime_wasi_http::WasiHttpView;
 use wasmtime_wasi_http::bindings::exports::wasi::http::incoming_handler::{
@@ -1479,15 +1480,17 @@ impl Runtime {
             Err(_) => return Ok(()), // Interface already fully defined, skip
         };
 
-        // Collect resources first
+        // Collect resources and functions in a single pass
         let mut resources: Vec<Arc<str>> = Vec::new();
+        let mut resource_type_by_name: HashMap<String, ResourceType> = HashMap::new();
         let mut functions = Vec::new();
 
         for (export_name, export_item) in instance_type.exports(engine) {
             match export_item {
-                ComponentItem::Resource(_) => {
+                ComponentItem::Resource(resource_type) => {
                     let resource_name_arc: Arc<str> = export_name.into();
                     resources.push(resource_name_arc.clone());
+                    resource_type_by_name.insert(resource_name_arc.to_string(), resource_type);
 
                     // Register a stub resource with a destructor that forwards to the library
                     let iface = Arc::<str>::from(interface_name);
@@ -1506,8 +1509,9 @@ impl Runtime {
                                     iface, res, rep
                                 );
 
-                                // Look up the provider resource from the resource map
-                                let provider_resource = store.data_mut().dynamic_resource_map.remove(&rep);
+                                // Look up and remove the provider resource from the resource map
+                                let provider_resource =
+                                    store.data_mut().remove_dynamic_resource_mapping(rep);
 
                                 if let Some(resource_any) = provider_resource {
                                     resource_any.resource_drop_async::<InstanceState>(&mut store).await?;
@@ -1525,6 +1529,29 @@ impl Runtime {
             }
         }
 
+        // Identify resources that this interface *defines* (owned) by scanning function patterns.
+        // Imported resources will not appear in constructor/method/static patterns.
+        let mut owned_resource_names: HashSet<String> = HashSet::new();
+        for (export_name, _func_type) in functions.iter() {
+            match categorize_function(export_name, &resources) {
+                FuncCategory::Constructor { resource }
+                | FuncCategory::Method { resource }
+                | FuncCategory::StaticMethod { _resource: resource } => {
+                    owned_resource_names.insert(resource.to_string());
+                }
+                FuncCategory::FreeFunction => {}
+            }
+        }
+
+        // Convert owned resource names to concrete ResourceType handles for runtime comparisons
+        let mut owned_resource_types: Vec<ResourceType> = Vec::new();
+        for resource_name in &owned_resource_names {
+            if let Some(resource_type) = resource_type_by_name.get(resource_name) {
+                owned_resource_types.push(*resource_type);
+            }
+        }
+        let owned_resource_types = Arc::new(owned_resource_types);
+
         // Process functions
         for (export_name, func_type) in functions {
             // Look up the function export index
@@ -1539,18 +1566,44 @@ impl Runtime {
                 None => continue, // Not a function, skip
             };
 
+            // Collect param and result types
+            let param_types: Arc<Vec<Type>> =
+                Arc::new(func_type.params().map(|(_, ty)| ty).collect());
+            let result_types: Arc<Vec<Type>> = Arc::new(func_type.results().collect());
+
             // Categorize the function
             let func_category = categorize_function(&export_name, &resources);
 
             match func_category {
                 FuncCategory::Constructor { resource: _ } => {
-                    Self::register_constructor_forwarding(&mut inst, &export_name, provider_func)?;
+                    Self::register_constructor_forwarding(
+                        &mut inst,
+                        &export_name,
+                        provider_func,
+                        param_types,
+                        result_types,
+                        owned_resource_types.clone(),
+                    )?;
                 }
                 FuncCategory::Method { resource: _ } => {
-                    Self::register_method_forwarding(&mut inst, &export_name, &func_type, provider_func)?;
+                    Self::register_method_forwarding(
+                        &mut inst,
+                        &export_name,
+                        provider_func,
+                        param_types,
+                        result_types,
+                        owned_resource_types.clone(),
+                    )?;
                 }
                 FuncCategory::StaticMethod { .. } | FuncCategory::FreeFunction => {
-                    Self::register_static_function_forwarding(&mut inst, &export_name, &func_type, provider_func)?;
+                    Self::register_static_function_forwarding(
+                        &mut inst,
+                        &export_name,
+                        provider_func,
+                        param_types,
+                        result_types,
+                        owned_resource_types.clone(),
+                    )?;
                 }
             }
         }
@@ -1558,139 +1611,111 @@ impl Runtime {
         Ok(())
     }
 
-    /// Register a constructor function that forwards to the library
+    /// Register a constructor function that forwards to the library.
+    /// This now uses forward_call to handle Result<Self, T> and Option<Self> return types.
     fn register_constructor_forwarding(
         inst: &mut wasmtime::component::LinkerInstance<'_, InstanceState>,
         func_name: &str,
         provider_func: Func,
+        param_types: Arc<Vec<Type>>,
+        result_types: Arc<Vec<Type>>,
+        owned_resource_types: Arc<Vec<ResourceType>>,
     ) -> Result<(), wasmtime::Error> {
         let func_name_for_log: Arc<str> = func_name.into();
 
         inst.func_new_async(func_name, move |mut store, args, results| {
             let func_name_for_log = func_name_for_log.clone();
+            let param_types = Arc::clone(&param_types);
+            let result_types = Arc::clone(&result_types);
+            let owned_resource_types = Arc::clone(&owned_resource_types);
 
             Box::new(async move {
                 tracing::debug!("Constructor {} called with {} args", func_name_for_log, args.len());
 
-                // Call provider's constructor
-                let mut ctor_results = vec![Val::Bool(false)];
-                provider_func.call_async(&mut store, args, &mut ctor_results).await?;
-                provider_func.post_return_async(&mut store).await?;
-
-                // Get the ResourceAny from the result
-                let provider_resource = match &ctor_results[0] {
-                    Val::Resource(r) => r.clone(),
-                    _ => return Err(wasmtime::Error::msg("constructor did not return resource")),
-                };
-
-                // Allocate a host rep and store the mapping
-                let rep = store.data_mut().alloc_dynamic_rep();
-                store.data_mut().dynamic_resource_map.insert(rep, provider_resource);
-
-                // Create host resource and convert to ResourceAny for the return value
-                let host_resource = Resource::<DynamicResource>::new_own(rep);
-                let host_resource_any = ResourceAny::try_from_resource(host_resource, &mut store)?;
-                results[0] = Val::Resource(host_resource_any);
-
-                Ok(())
+                forward_call(
+                    &mut store,
+                    &provider_func,
+                    args,
+                    results,
+                    &param_types,
+                    &result_types,
+                    &owned_resource_types,
+                )
+                .await
             })
         })?;
 
         Ok(())
     }
 
-    /// Register a method function that forwards to the library
+    /// Register a method function that forwards to the library.
+    /// This uses forward_call to properly transform all resource arguments and return values.
     fn register_method_forwarding(
         inst: &mut wasmtime::component::LinkerInstance<'_, InstanceState>,
         func_name: &str,
-        func_type: &wasmtime::component::types::ComponentFunc,
         provider_func: Func,
+        param_types: Arc<Vec<Type>>,
+        result_types: Arc<Vec<Type>>,
+        owned_resource_types: Arc<Vec<ResourceType>>,
     ) -> Result<(), wasmtime::Error> {
-        let _has_results = func_type.results().len() > 0;
         let func_name_for_log: Arc<str> = func_name.into();
 
         inst.func_new_async(func_name, move |mut store, args, results| {
             let func_name_for_log = func_name_for_log.clone();
-            let num_results = results.len();
+            let param_types = Arc::clone(&param_types);
+            let result_types = Arc::clone(&result_types);
+            let owned_resource_types = Arc::clone(&owned_resource_types);
 
             Box::new(async move {
                 tracing::debug!("Method {} called with {} args", func_name_for_log, args.len());
 
-                // First arg is the resource handle
-                let host_resource_any = match &args[0] {
-                    Val::Resource(r) => r.clone(),
-                    _ => return Err(wasmtime::Error::msg("expected resource as first argument")),
-                };
-
-                // Convert to typed Resource to get the rep
-                let host_resource: Resource<DynamicResource> =
-                    Resource::try_from_resource_any(host_resource_any, &mut store)?;
-                let rep = host_resource.rep();
-
-                // Get the provider resource
-                let provider_resource = store
-                    .data()
-                    .dynamic_resource_map
-                    .get(&rep)
-                    .cloned()
-                    .ok_or_else(|| wasmtime::Error::msg(format!("unknown resource rep={}", rep)))?;
-
-                // Build args for provider call: first element is the provider resource, rest are from args[1..]
-                let provider_args: Vec<Val> = std::iter::once(Val::Resource(provider_resource))
-                    .chain(args[1..].iter().cloned())
-                    .collect();
-
-                // Call provider's method
-                if num_results > 0 {
-                    let mut method_results = vec![Val::Bool(false); num_results];
-                    provider_func.call_async(&mut store, &provider_args, &mut method_results).await?;
-                    provider_func.post_return_async(&mut store).await?;
-                    for (i, r) in method_results.into_iter().enumerate() {
-                        results[i] = r;
-                    }
-                } else {
-                    provider_func.call_async(&mut store, &provider_args, &mut []).await?;
-                    provider_func.post_return_async(&mut store).await?;
-                }
-
-                Ok(())
+                forward_call(
+                    &mut store,
+                    &provider_func,
+                    args,
+                    results,
+                    &param_types,
+                    &result_types,
+                    &owned_resource_types,
+                )
+                .await
             })
         })?;
 
         Ok(())
     }
 
-    /// Register a static function that forwards to the library
+    /// Register a static function that forwards to the library.
+    /// This uses forward_call to properly transform all resource arguments and return values.
     fn register_static_function_forwarding(
         inst: &mut wasmtime::component::LinkerInstance<'_, InstanceState>,
         func_name: &str,
-        func_type: &wasmtime::component::types::ComponentFunc,
         provider_func: Func,
+        param_types: Arc<Vec<Type>>,
+        result_types: Arc<Vec<Type>>,
+        owned_resource_types: Arc<Vec<ResourceType>>,
     ) -> Result<(), wasmtime::Error> {
-        let _has_results = func_type.results().len() > 0;
         let func_name_for_log: Arc<str> = func_name.into();
 
         inst.func_new_async(func_name, move |mut store, args, results| {
             let func_name_for_log = func_name_for_log.clone();
-            let num_results = results.len();
+            let param_types = Arc::clone(&param_types);
+            let result_types = Arc::clone(&result_types);
+            let owned_resource_types = Arc::clone(&owned_resource_types);
 
             Box::new(async move {
                 tracing::debug!("Static function {} called with {} args", func_name_for_log, args.len());
 
-                // Call provider's function directly
-                if num_results > 0 {
-                    let mut func_results = vec![Val::Bool(false); num_results];
-                    provider_func.call_async(&mut store, args, &mut func_results).await?;
-                    provider_func.post_return_async(&mut store).await?;
-                    for (i, r) in func_results.into_iter().enumerate() {
-                        results[i] = r;
-                    }
-                } else {
-                    provider_func.call_async(&mut store, args, &mut []).await?;
-                    provider_func.post_return_async(&mut store).await?;
-                }
-
-                Ok(())
+                forward_call(
+                    &mut store,
+                    &provider_func,
+                    args,
+                    results,
+                    &param_types,
+                    &result_types,
+                    &owned_resource_types,
+                )
+                .await
             })
         })?;
 
@@ -1750,4 +1775,422 @@ fn categorize_function(func_name: &str, resources: &[Arc<str>]) -> FuncCategory 
 
     // Otherwise it's a free function
     FuncCategory::FreeFunction
+}
+
+/// Transform arguments from consumer view to provider view.
+/// Only resources owned by the provider interface are unwrapped.
+fn transform_args_for_provider(
+    store: &mut wasmtime::StoreContextMut<'_, InstanceState>,
+    args: &[Val],
+    param_types: &[Type],
+    owned_resource_types: &[ResourceType],
+) -> Result<Vec<Val>, wasmtime::Error> {
+    if args.len() != param_types.len() {
+        return Err(wasmtime::Error::msg(format!(
+            "argument count mismatch: got {}, expected {}",
+            args.len(),
+            param_types.len()
+        )));
+    }
+
+    args.iter()
+        .zip(param_types.iter())
+        .map(|(val, ty)| transform_incoming_val(store, val.clone(), ty, owned_resource_types))
+        .collect()
+}
+
+/// Transform results from provider view to consumer view.
+/// Only provider-owned resources are wrapped into host handles.
+fn transform_results_from_provider(
+    store: &mut wasmtime::StoreContextMut<'_, InstanceState>,
+    results: Vec<Val>,
+    result_types: &[Type],
+    owned_resource_types: &[ResourceType],
+) -> Result<Vec<Val>, wasmtime::Error> {
+    if results.len() != result_types.len() {
+        return Err(wasmtime::Error::msg(format!(
+            "result count mismatch: got {}, expected {}",
+            results.len(),
+            result_types.len()
+        )));
+    }
+
+    results
+        .into_iter()
+        .zip(result_types.iter())
+        .map(|(val, ty)| transform_outgoing_val(store, val, ty, owned_resource_types))
+        .collect()
+}
+
+/// Transform a single value from consumer view to provider view (incoming).
+/// Recursively handles container types (option, result, list, record, tuple, variant).
+fn transform_incoming_val(
+    store: &mut wasmtime::StoreContextMut<'_, InstanceState>,
+    val: Val,
+    ty: &Type,
+    owned_resource_types: &[ResourceType],
+) -> Result<Val, wasmtime::Error> {
+    match ty {
+        Type::Own(resource_type) | Type::Borrow(resource_type) => match val {
+            Val::Resource(resource_any) => {
+                // If the provider owns this resource type, unwrap the host
+                // handle into the provider's ResourceAny. Otherwise keep the
+                // host handle so cross-provider usage works.
+                if owned_resource_types.contains(resource_type) {
+                    let host_resource: Resource<DynamicResource> =
+                        Resource::try_from_resource_any(resource_any, &mut *store)?;
+                    let rep = host_resource.rep();
+                    let provider_resource = store
+                        .data()
+                        .dynamic_resource_map
+                        .get(&rep)
+                        .copied()
+                        .ok_or_else(|| {
+                            wasmtime::Error::msg(format!("unknown resource rep={}", rep))
+                        })?;
+                    Ok(Val::Resource(provider_resource))
+                } else {
+                    // Imported resources should stay as host resources.
+                    Ok(Val::Resource(resource_any))
+                }
+            }
+            other => Err(wasmtime::Error::msg(format!(
+                "expected resource for {:?}, got {:?}",
+                ty, other
+            ))),
+        },
+        Type::List(list_type) => match val {
+            Val::List(values) => {
+                let element_type = list_type.ty();
+                let transformed = values
+                    .into_iter()
+                    .map(|v| transform_incoming_val(store, v, &element_type, owned_resource_types))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Val::List(transformed))
+            }
+            other => Err(wasmtime::Error::msg(format!("expected list, got {:?}", other))),
+        },
+        Type::Record(record_type) => match val {
+            Val::Record(fields) => {
+                let field_types: Vec<_> = record_type.fields().collect();
+                if field_types.len() != fields.len() {
+                    return Err(wasmtime::Error::msg(format!(
+                        "record field count mismatch: got {}, expected {}",
+                        fields.len(),
+                        field_types.len()
+                    )));
+                }
+                let mut transformed = Vec::with_capacity(fields.len());
+                for ((name, value), field) in fields.into_iter().zip(field_types.into_iter()) {
+                    if name != field.name {
+                        return Err(wasmtime::Error::msg(format!(
+                            "record field name mismatch: got {}, expected {}",
+                            name, field.name
+                        )));
+                    }
+                    let value =
+                        transform_incoming_val(store, value, &field.ty, owned_resource_types)?;
+                    transformed.push((name, value));
+                }
+                Ok(Val::Record(transformed))
+            }
+            other => Err(wasmtime::Error::msg(format!("expected record, got {:?}", other))),
+        },
+        Type::Tuple(tuple_type) => match val {
+            Val::Tuple(values) => {
+                let types: Vec<_> = tuple_type.types().collect();
+                if types.len() != values.len() {
+                    return Err(wasmtime::Error::msg(format!(
+                        "tuple size mismatch: got {}, expected {}",
+                        values.len(),
+                        types.len()
+                    )));
+                }
+                let transformed = values
+                    .into_iter()
+                    .zip(types.iter())
+                    .map(|(v, t)| transform_incoming_val(store, v, t, owned_resource_types))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Val::Tuple(transformed))
+            }
+            other => Err(wasmtime::Error::msg(format!("expected tuple, got {:?}", other))),
+        },
+        Type::Variant(variant_type) => match val {
+            Val::Variant(case_name, payload) => {
+                let mut case_type = None;
+                for case in variant_type.cases() {
+                    if case.name == case_name {
+                        case_type = case.ty;
+                        break;
+                    }
+                }
+                match (case_type, payload) {
+                    (None, None) => Ok(Val::Variant(case_name, None)),
+                    (Some(ty), Some(value)) => {
+                        let inner =
+                            transform_incoming_val(store, *value, &ty, owned_resource_types)?;
+                        Ok(Val::Variant(case_name, Some(Box::new(inner))))
+                    }
+                    (None, Some(_)) => Err(wasmtime::Error::msg(format!(
+                        "variant {} has no payload but value provided",
+                        case_name
+                    ))),
+                    (Some(_), None) => Err(wasmtime::Error::msg(format!(
+                        "variant {} expects payload but none provided",
+                        case_name
+                    ))),
+                }
+            }
+            other => Err(wasmtime::Error::msg(format!("expected variant, got {:?}", other))),
+        },
+        Type::Option(option_type) => match val {
+            Val::Option(Some(value)) => {
+                let inner =
+                    transform_incoming_val(store, *value, &option_type.ty(), owned_resource_types)?;
+                Ok(Val::Option(Some(Box::new(inner))))
+            }
+            Val::Option(None) => Ok(Val::Option(None)),
+            other => Err(wasmtime::Error::msg(format!("expected option, got {:?}", other))),
+        },
+        Type::Result(result_type) => match val {
+            Val::Result(Ok(value)) => match (result_type.ok(), value) {
+                (Some(ty), Some(inner)) => {
+                    let inner =
+                        transform_incoming_val(store, *inner, &ty, owned_resource_types)?;
+                    Ok(Val::Result(Ok(Some(Box::new(inner)))))
+                }
+                (None, None) => Ok(Val::Result(Ok(None))),
+                (None, Some(_)) => Err(wasmtime::Error::msg(
+                    "result ok has no payload but value provided",
+                )),
+                (Some(_), None) => Err(wasmtime::Error::msg(
+                    "result ok expects payload but none provided",
+                )),
+            },
+            Val::Result(Err(value)) => match (result_type.err(), value) {
+                (Some(ty), Some(inner)) => {
+                    let inner =
+                        transform_incoming_val(store, *inner, &ty, owned_resource_types)?;
+                    Ok(Val::Result(Err(Some(Box::new(inner)))))
+                }
+                (None, None) => Ok(Val::Result(Err(None))),
+                (None, Some(_)) => Err(wasmtime::Error::msg(
+                    "result err has no payload but value provided",
+                )),
+                (Some(_), None) => Err(wasmtime::Error::msg(
+                    "result err expects payload but none provided",
+                )),
+            },
+            other => Err(wasmtime::Error::msg(format!("expected result, got {:?}", other))),
+        },
+        // Primitive types pass through unchanged
+        _ => Ok(val),
+    }
+}
+
+/// Transform a single value from provider view to consumer view (outgoing).
+/// Recursively handles container types (option, result, list, record, tuple, variant).
+fn transform_outgoing_val(
+    store: &mut wasmtime::StoreContextMut<'_, InstanceState>,
+    val: Val,
+    ty: &Type,
+    owned_resource_types: &[ResourceType],
+) -> Result<Val, wasmtime::Error> {
+    match ty {
+        Type::Own(resource_type) | Type::Borrow(resource_type) => match val {
+            Val::Resource(provider_resource) => {
+                // Provider-owned resources are wrapped into host handles.
+                // Imported resources are passed through unchanged.
+                if owned_resource_types.contains(resource_type) {
+                    // Reuse existing host rep if provider returns an already-known resource.
+                    // This preserves identity and avoids double-dropping.
+                    let rep =
+                        if let Some(existing) = store.data().rep_for_provider_resource(provider_resource) {
+                            existing
+                        } else {
+                            let rep = store.data_mut().alloc_dynamic_rep();
+                            store
+                                .data_mut()
+                                .insert_dynamic_resource_mapping(rep, provider_resource);
+                            rep
+                        };
+                    let host_resource = match ty {
+                        Type::Borrow(_) => Resource::<DynamicResource>::new_borrow(rep),
+                        _ => Resource::<DynamicResource>::new_own(rep),
+                    };
+                    let host_resource_any =
+                        ResourceAny::try_from_resource(host_resource, &mut *store)?;
+                    Ok(Val::Resource(host_resource_any))
+                } else {
+                    // Returning an imported resource: keep as-is.
+                    Ok(Val::Resource(provider_resource))
+                }
+            }
+            other => Err(wasmtime::Error::msg(format!(
+                "expected resource for {:?}, got {:?}",
+                ty, other
+            ))),
+        },
+        Type::List(list_type) => match val {
+            Val::List(values) => {
+                let element_type = list_type.ty();
+                let transformed = values
+                    .into_iter()
+                    .map(|v| transform_outgoing_val(store, v, &element_type, owned_resource_types))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Val::List(transformed))
+            }
+            other => Err(wasmtime::Error::msg(format!("expected list, got {:?}", other))),
+        },
+        Type::Record(record_type) => match val {
+            Val::Record(fields) => {
+                let field_types: Vec<_> = record_type.fields().collect();
+                if field_types.len() != fields.len() {
+                    return Err(wasmtime::Error::msg(format!(
+                        "record field count mismatch: got {}, expected {}",
+                        fields.len(),
+                        field_types.len()
+                    )));
+                }
+                let mut transformed = Vec::with_capacity(fields.len());
+                for ((name, value), field) in fields.into_iter().zip(field_types.into_iter()) {
+                    if name != field.name {
+                        return Err(wasmtime::Error::msg(format!(
+                            "record field name mismatch: got {}, expected {}",
+                            name, field.name
+                        )));
+                    }
+                    let value =
+                        transform_outgoing_val(store, value, &field.ty, owned_resource_types)?;
+                    transformed.push((name, value));
+                }
+                Ok(Val::Record(transformed))
+            }
+            other => Err(wasmtime::Error::msg(format!("expected record, got {:?}", other))),
+        },
+        Type::Tuple(tuple_type) => match val {
+            Val::Tuple(values) => {
+                let types: Vec<_> = tuple_type.types().collect();
+                if types.len() != values.len() {
+                    return Err(wasmtime::Error::msg(format!(
+                        "tuple size mismatch: got {}, expected {}",
+                        values.len(),
+                        types.len()
+                    )));
+                }
+                let transformed = values
+                    .into_iter()
+                    .zip(types.iter())
+                    .map(|(v, t)| transform_outgoing_val(store, v, t, owned_resource_types))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Val::Tuple(transformed))
+            }
+            other => Err(wasmtime::Error::msg(format!("expected tuple, got {:?}", other))),
+        },
+        Type::Variant(variant_type) => match val {
+            Val::Variant(case_name, payload) => {
+                let mut case_type = None;
+                for case in variant_type.cases() {
+                    if case.name == case_name {
+                        case_type = case.ty;
+                        break;
+                    }
+                }
+                match (case_type, payload) {
+                    (None, None) => Ok(Val::Variant(case_name, None)),
+                    (Some(ty), Some(value)) => {
+                        let inner =
+                            transform_outgoing_val(store, *value, &ty, owned_resource_types)?;
+                        Ok(Val::Variant(case_name, Some(Box::new(inner))))
+                    }
+                    (None, Some(_)) => Err(wasmtime::Error::msg(format!(
+                        "variant {} has no payload but value provided",
+                        case_name
+                    ))),
+                    (Some(_), None) => Err(wasmtime::Error::msg(format!(
+                        "variant {} expects payload but none provided",
+                        case_name
+                    ))),
+                }
+            }
+            other => Err(wasmtime::Error::msg(format!("expected variant, got {:?}", other))),
+        },
+        Type::Option(option_type) => match val {
+            Val::Option(Some(value)) => {
+                let inner =
+                    transform_outgoing_val(store, *value, &option_type.ty(), owned_resource_types)?;
+                Ok(Val::Option(Some(Box::new(inner))))
+            }
+            Val::Option(None) => Ok(Val::Option(None)),
+            other => Err(wasmtime::Error::msg(format!("expected option, got {:?}", other))),
+        },
+        Type::Result(result_type) => match val {
+            Val::Result(Ok(value)) => match (result_type.ok(), value) {
+                (Some(ty), Some(inner)) => {
+                    let inner =
+                        transform_outgoing_val(store, *inner, &ty, owned_resource_types)?;
+                    Ok(Val::Result(Ok(Some(Box::new(inner)))))
+                }
+                (None, None) => Ok(Val::Result(Ok(None))),
+                (None, Some(_)) => Err(wasmtime::Error::msg(
+                    "result ok has no payload but value provided",
+                )),
+                (Some(_), None) => Err(wasmtime::Error::msg(
+                    "result ok expects payload but none provided",
+                )),
+            },
+            Val::Result(Err(value)) => match (result_type.err(), value) {
+                (Some(ty), Some(inner)) => {
+                    let inner =
+                        transform_outgoing_val(store, *inner, &ty, owned_resource_types)?;
+                    Ok(Val::Result(Err(Some(Box::new(inner)))))
+                }
+                (None, None) => Ok(Val::Result(Err(None))),
+                (None, Some(_)) => Err(wasmtime::Error::msg(
+                    "result err has no payload but value provided",
+                )),
+                (Some(_), None) => Err(wasmtime::Error::msg(
+                    "result err expects payload but none provided",
+                )),
+            },
+            other => Err(wasmtime::Error::msg(format!("expected result, got {:?}", other))),
+        },
+        // Primitive types pass through unchanged
+        _ => Ok(val),
+    }
+}
+
+/// Centralized call forwarding: transform args, call provider, transform results.
+async fn forward_call(
+    store: &mut wasmtime::StoreContextMut<'_, InstanceState>,
+    provider_func: &Func,
+    args: &[Val],
+    results: &mut [Val],
+    param_types: &[Type],
+    result_types: &[Type],
+    owned_resource_types: &[ResourceType],
+) -> Result<(), wasmtime::Error> {
+    if results.len() != result_types.len() {
+        return Err(wasmtime::Error::msg(format!(
+            "result slot mismatch: got {}, expected {}",
+            results.len(),
+            result_types.len()
+        )));
+    }
+
+    let provider_args = transform_args_for_provider(store, args, param_types, owned_resource_types)?;
+    let mut provider_results = vec![Val::Bool(false); result_types.len()];
+
+    provider_func
+        .call_async(&mut *store, &provider_args, &mut provider_results)
+        .await?;
+    provider_func.post_return_async(&mut *store).await?;
+
+    let transformed =
+        transform_results_from_provider(store, provider_results, result_types, owned_resource_types)?;
+    for (index, value) in transformed.into_iter().enumerate() {
+        results[index] = value;
+    }
+
+    Ok(())
 }
