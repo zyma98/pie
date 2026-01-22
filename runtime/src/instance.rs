@@ -121,11 +121,11 @@ pub struct InstanceState {
     // virtual resources
     resources: HashMap<(usize, ResourceTypeId), ResourceIdMapper>,
 
-    // Dynamic linking state: maps host rep -> provider's ResourceAny
+    // Dynamic linking state: maps host rep -> guest's ResourceAny
     pub dynamic_resource_map: HashMap<u32, wasmtime::component::ResourceAny>,
-    // Reverse map: provider ResourceAny -> host rep (for identity preservation)
+    // Reverse map: guest ResourceAny -> host rep (for identity preservation)
     // ResourceAny doesn't implement Hash, so we use a Vec for linear scan
-    provider_resource_map: Vec<(wasmtime::component::ResourceAny, u32)>,
+    guest_resource_map: Vec<(wasmtime::component::ResourceAny, u32)>,
     // Counter for generating unique dynamic resource reps
     next_dynamic_rep: u32,
 }
@@ -181,7 +181,7 @@ impl InstanceState {
             http_ctx: WasiHttpCtx::new(),
             resources: HashMap::new(),
             dynamic_resource_map: HashMap::new(),
-            provider_resource_map: Vec::new(),
+            guest_resource_map: Vec::new(),
             next_dynamic_rep: 1,
         };
 
@@ -195,18 +195,18 @@ impl InstanceState {
         rep
     }
 
-    /// Look up host rep for an existing provider resource (for identity preservation)
-    pub fn rep_for_provider_resource(
+    /// Look up host rep for an existing guest resource (for identity preservation)
+    pub fn rep_for_guest_resource(
         &self,
         resource: wasmtime::component::ResourceAny,
     ) -> Option<u32> {
-        self.provider_resource_map
+        self.guest_resource_map
             .iter()
             .find(|(r, _)| *r == resource)
             .map(|(_, rep)| *rep)
     }
 
-    /// Insert a bidirectional mapping between host rep and provider resource
+    /// Insert a bidirectional mapping between host rep and guest resource
     pub fn insert_dynamic_resource_mapping(
         &mut self,
         rep: u32,
@@ -214,19 +214,19 @@ impl InstanceState {
     ) {
         self.dynamic_resource_map.insert(rep, resource);
         // Only add to reverse map if not already present
-        if self.rep_for_provider_resource(resource).is_none() {
-            self.provider_resource_map.push((resource, rep));
+        if self.rep_for_guest_resource(resource).is_none() {
+            self.guest_resource_map.push((resource, rep));
         }
     }
 
-    /// Remove a resource mapping by host rep (returns the provider resource if found)
+    /// Remove a resource mapping by host rep (returns the guest resource if found)
     pub fn remove_dynamic_resource_mapping(
         &mut self,
         rep: u32,
     ) -> Option<wasmtime::component::ResourceAny> {
         let resource = self.dynamic_resource_map.remove(&rep);
         if let Some(resource) = resource {
-            self.provider_resource_map.retain(|(r, _)| *r != resource);
+            self.guest_resource_map.retain(|(r, _)| *r != resource);
             Some(resource)
         } else {
             None
