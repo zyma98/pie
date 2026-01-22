@@ -628,7 +628,7 @@ impl Runtime {
 
         // Collect all dependencies (recursively) in topological order
         let all_deps =
-            dynamic_linking::collect_recursive_dependencies(&self.loaded_libraries, &dependencies)?;
+            dynamic_linking::collect_recursive_dependencies(&self.loaded_libraries, &dependencies);
 
         // Validate that all recursive dependencies exist
         for dep in &all_deps {
