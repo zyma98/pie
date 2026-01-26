@@ -4,18 +4,165 @@ This module implements the `bakery build` subcommand for building
 JavaScript/TypeScript, Python, and Rust inferlets into WebAssembly components.
 """
 
+import ast
 import json
 import os
+import re
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import tomllib
+import urllib.request
 from pathlib import Path
 from typing import Optional
 
 from rich.panel import Panel
 from .console import console
 import typer
+
+
+# Registry of WASI-compatible wheels for packages with native extensions
+# These wheels are pre-built for the WASI target and can be bundled into WASM
+WASI_WHEELS: dict[str, dict[str, str]] = {
+    "numpy": {
+        "url": "https://github.com/dicej/wasi-wheels/releases/download/v0.0.2/numpy-wasi.tar.gz",
+        "version": "0.0.2",
+    },
+}
+
+
+def get_wasi_cache_dir() -> Path:
+    """Get the cache directory for WASI wheels.
+
+    Returns:
+        Path to ~/.cache/bakery/wasi-wheels
+    """
+    cache_dir = Path.home() / ".cache" / "bakery" / "wasi-wheels"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
+
+
+def download_wasi_wheel(package: str) -> Path:
+    """Download a WASI wheel if not cached, return path to extracted directory.
+
+    Args:
+        package: Name of the package (e.g., "numpy")
+
+    Returns:
+        Path to the extracted package directory
+
+    Raises:
+        ValueError: If no WASI wheel is available for the package
+        RuntimeError: If download or extraction fails
+    """
+    if package not in WASI_WHEELS:
+        raise ValueError(f"No WASI wheel available for '{package}'")
+
+    info = WASI_WHEELS[package]
+    cache_dir = get_wasi_cache_dir()
+    version = info["version"]
+    package_dir = cache_dir / f"{package}-{version}"
+
+    # Check if already cached
+    if package_dir.exists():
+        return package_dir
+
+    # Download the tarball
+    url = info["url"]
+    tarball_path = cache_dir / f"{package}-{version}.tar.gz"
+
+    try:
+        console.print(f"   Downloading WASI wheel for [blue]{package}[/blue]...")
+        urllib.request.urlretrieve(url, tarball_path)
+    except Exception as e:
+        raise RuntimeError(f"Failed to download WASI wheel for '{package}': {e}")
+
+    # Extract the tarball
+    try:
+        with tarfile.open(tarball_path, "r:gz") as tar:
+            tar.extractall(path=package_dir)
+    except Exception as e:
+        # Clean up on failure
+        if package_dir.exists():
+            shutil.rmtree(package_dir)
+        raise RuntimeError(f"Failed to extract WASI wheel for '{package}': {e}")
+    finally:
+        # Clean up the tarball
+        if tarball_path.exists():
+            tarball_path.unlink()
+
+    return package_dir
+
+
+def detect_python_imports(python_files: list[Path]) -> set[str]:
+    """Detect top-level imports from Python files using AST parsing.
+
+    Args:
+        python_files: List of Python file paths to analyze
+
+    Returns:
+        Set of top-level module names that are imported
+    """
+    imports: set[str] = set()
+
+    for py_file in python_files:
+        try:
+            source = py_file.read_text()
+            tree = ast.parse(source)
+
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        # Get top-level module (e.g., "numpy" from "numpy.linalg")
+                        top_module = alias.name.split(".")[0]
+                        imports.add(top_module)
+                elif isinstance(node, ast.ImportFrom):
+                    if node.module:
+                        # Get top-level module
+                        top_module = node.module.split(".")[0]
+                        imports.add(top_module)
+        except SyntaxError:
+            # Skip files with syntax errors
+            continue
+
+    return imports
+
+
+def get_required_wasi_packages(python_files: list[Path]) -> set[str]:
+    """Determine which WASI packages are needed for the given Python files.
+
+    Args:
+        python_files: List of Python file paths to analyze
+
+    Returns:
+        Set of package names that need WASI wheels
+    """
+    imports = detect_python_imports(python_files)
+    # Return intersection of imports and available WASI wheels
+    return imports & set(WASI_WHEELS.keys())
+
+
+def setup_wasi_packages(temp_dir: Path, packages: set[str]) -> None:
+    """Download and copy WASI packages to the temp directory for componentize-py.
+
+    Args:
+        temp_dir: The temporary directory where componentize-py will run
+        packages: Set of package names to set up
+    """
+    for package in packages:
+        source_dir = download_wasi_wheel(package)
+
+        # The extracted tarball contains the package directory directly
+        # We need to copy the package (e.g., "numpy" folder) to temp_dir
+        for item in source_dir.iterdir():
+            dest = temp_dir / item.name
+            if item.is_dir():
+                if dest.exists():
+                    shutil.rmtree(dest)
+                shutil.copytree(item, dest)
+            else:
+                shutil.copy2(item, dest)
 
 
 def command_exists(cmd: str) -> bool:
@@ -306,10 +453,11 @@ def handle_python_build(input_path: Path, output: Path, debug: bool = False) -> 
     2. Find inferlet and WIT paths
     3. Detect input type (file or package)
     4. Create temp directory for intermediate files
-    5. Generate WIT wrapper
-    6. Copy user files to temp directory
-    7. Copy inferlet library to temp directory
-    8. Run componentize-py to compile to WASM
+    5. Detect and set up WASI packages (e.g., numpy)
+    6. Generate WIT wrapper
+    7. Copy user files to temp directory
+    8. Copy inferlet library to temp directory
+    9. Run componentize-py to compile to WASM
     """
     # Check prerequisites
     if not command_exists("componentize-py"):
@@ -333,6 +481,19 @@ def handle_python_build(input_path: Path, output: Path, debug: bool = False) -> 
         f"   Type: [dim]{'Single file' if input_type == 'file' else 'Package'}[/dim]"
     )
 
+    # Collect all Python files to analyze for WASI dependencies
+    if input_type == "file":
+        python_files = [entry_point]
+    else:
+        python_files = list(input_path.resolve().glob("*.py"))
+
+    # Detect WASI packages needed
+    wasi_packages = get_required_wasi_packages(python_files)
+    if wasi_packages:
+        console.print(
+            f"   WASI packages: [blue]{', '.join(sorted(wasi_packages))}[/blue]"
+        )
+
     # Create temp directory for intermediate files
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
@@ -341,11 +502,18 @@ def handle_python_build(input_path: Path, output: Path, debug: bool = False) -> 
         with console.status(
             "[bold green]Building Python inferlet...[/bold green]"
         ) as status:
-            # Step 1: Generate wrapper
+            # Step 1: Set up WASI packages if needed
+            if wasi_packages:
+                status.update(
+                    "[bold green]📦 Setting up WASI packages...[/bold green]"
+                )
+                setup_wasi_packages(temp_path, wasi_packages)
+
+            # Step 2: Generate wrapper
             status.update("[bold green]🔧 Generating WIT wrapper...[/bold green]")
             generate_py_wrapper(entry_point, wrapper_py)
 
-            # Step 2: Copy user files to temp directory
+            # Step 3: Copy user files to temp directory
             status.update("[bold green]📦 Copying user files...[/bold green]")
             if input_type == "file":
                 # Single file - just copy it
@@ -358,14 +526,14 @@ def handle_python_build(input_path: Path, output: Path, debug: bool = False) -> 
                     dest = temp_path / py_file.name
                     shutil.copy2(py_file, dest)
 
-            # Step 3: Copy inferlet library to temp directory so it gets bundled
+            # Step 4: Copy inferlet library to temp directory so it gets bundled
             status.update("[bold green]📦 Bundling inferlet library...[/bold green]")
             inferlet_src = inferlet_path / "src" / "inferlet"
             if inferlet_src.exists():
                 inferlet_dest = temp_path / "inferlet"
                 copy_dir_recursive(inferlet_src, inferlet_dest)
 
-            # Step 4: Run componentize-py
+            # Step 5: Run componentize-py
             status.update(
                 "[bold green]🔧 Compiling to WebAssembly component with componentize-py...[/bold green]"
             )
