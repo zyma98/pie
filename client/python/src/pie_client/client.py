@@ -680,6 +680,36 @@ class PieClient:
 
         return await future
 
+    async def load_library_from_registry(
+        self,
+        library: str,
+        dependencies: list[str] | None = None,
+    ) -> None:
+        """
+        Load a library from the registry.
+
+        The library parameter can be:
+        - Full name with version: "std/my-library@0.1.0"
+        - Without namespace (defaults to "std"): "my-library@0.1.0"
+        - Without version (defaults to "latest"): "std/my-library" or "my-library"
+
+        :param library: The library name (e.g., "std/my-library@0.1.0").
+        :param dependencies: Names of libraries this library depends on.
+        :raises Exception: If loading fails.
+        """
+        if dependencies is None:
+            dependencies = []
+
+        msg = {
+            "type": "load_library_from_registry",
+            "library": library,
+            "dependencies": dependencies,
+        }
+        successful, result = await self._send_msg_and_wait(msg)
+
+        if not successful:
+            raise Exception(f"Failed to load library from registry: {result}")
+
     async def ping(self) -> None:
         """
         Ping the server to check connectivity.

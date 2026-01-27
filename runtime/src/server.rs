@@ -691,6 +691,14 @@ impl Session {
                 ClientMessage::ListLibraries { corr_id } => {
                     self.handle_list_libraries(corr_id).await;
                 }
+                ClientMessage::LoadLibraryFromRegistry {
+                    corr_id,
+                    library,
+                    dependencies,
+                } => {
+                    self.handle_load_library_from_registry(corr_id, library, dependencies)
+                        .await;
+                }
             },
             SessionEvent::InstanceEvent(cmd) => match cmd {
                 InstanceEvent::SendMsgToClient { inst_id, message } => {
@@ -948,6 +956,55 @@ impl Session {
 
         self.send(ServerMessage::LoadedLibraries { corr_id, libraries })
             .await;
+    }
+
+    /// Handles the LoadLibraryFromRegistry command.
+    ///
+    /// This downloads a library from the registry (with local caching) and loads it.
+    async fn handle_load_library_from_registry(
+        &mut self,
+        corr_id: u32,
+        library: String,
+        dependencies: Vec<String>,
+    ) {
+        // Parse the library name into namespace, name, and version
+        // Reuse the same parsing logic as inferlets
+        let (namespace, name, version) = parse_inferlet_name(&library);
+
+        // Attempt to download/cache the library
+        match download_library_from_registry(
+            &self.state.registry_url,
+            &self.state.cache_dir,
+            &namespace,
+            &name,
+            &version,
+        )
+        .await
+        {
+            Ok(library_data) => {
+                // Upload the library to the runtime
+                let (evt_tx, evt_rx) = oneshot::channel();
+                runtime::Command::UploadLibrary {
+                    name: name.clone(),
+                    raw: library_data,
+                    dependencies,
+                    event: evt_tx,
+                }
+                .dispatch();
+
+                match evt_rx.await.unwrap() {
+                    Ok(lib_name) => {
+                        self.send_response(corr_id, true, lib_name).await;
+                    }
+                    Err(e) => {
+                        self.send_response(corr_id, false, e.to_string()).await;
+                    }
+                }
+            }
+            Err(e) => {
+                self.send_response(corr_id, false, e.to_string()).await;
+            }
+        }
     }
 
     async fn handle_upload_program(
@@ -1517,6 +1574,120 @@ fn parse_inferlet_name(inferlet: &str) -> (String, String, String) {
     };
 
     (namespace, name, version)
+}
+
+/// Downloads a library from the registry, with local caching.
+///
+/// Returns the library data on success.
+async fn download_library_from_registry(
+    registry_url: &str,
+    cache_dir: &std::path::Path,
+    namespace: &str,
+    name: &str,
+    version: &str,
+) -> Result<Vec<u8>> {
+    // Build the cache path: {cache_dir}/registry/libraries/{namespace}/{name}/{version}.wasm
+    let cache_path = cache_dir
+        .join("registry")
+        .join("libraries")
+        .join(namespace)
+        .join(name)
+        .join(format!("{}.wasm", version));
+
+    // Check if we have a cached copy
+    if cache_path.exists() {
+        tracing::info!(
+            "Using cached library: {}/{} @ {} from {:?}",
+            namespace,
+            name,
+            version,
+            cache_path
+        );
+        let data = tokio::fs::read(&cache_path)
+            .await
+            .map_err(|e| anyhow!("Failed to read cached library at {:?}: {}", cache_path, e))?;
+        return Ok(data);
+    }
+
+    // Build the download URL
+    // Note: The registry uses the same /inferlets/ endpoint for all WASM components
+    // (both inferlets and libraries are stored in the same namespace)
+    let download_url = format!(
+        "{}/api/v1/inferlets/{}/{}/{}/download",
+        registry_url.trim_end_matches('/'),
+        namespace,
+        name,
+        version
+    );
+
+    tracing::info!(
+        "Downloading library: {}/{} @ {} from {}",
+        namespace,
+        name,
+        version,
+        download_url
+    );
+
+    // Create an HTTP client that follows redirects
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .build()
+        .map_err(|e| anyhow!("Failed to create HTTP client: {}", e))?;
+
+    // Perform the download
+    let response = client
+        .get(&download_url)
+        .send()
+        .await
+        .map_err(|e| anyhow!("Failed to download library from registry: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        bail!(
+            "Registry returned error {} for library {}/{} @ {}: {}",
+            status,
+            namespace,
+            name,
+            version,
+            body
+        );
+    }
+
+    let data = response
+        .bytes()
+        .await
+        .map_err(|e| anyhow!("Failed to read library data: {}", e))?
+        .to_vec();
+
+    if data.is_empty() {
+        bail!(
+            "Registry returned empty data for library {}/{} @ {}",
+            namespace,
+            name,
+            version
+        );
+    }
+
+    // Cache the downloaded library
+    if let Some(parent) = cache_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| anyhow!("Failed to create cache directory {:?}: {}", parent, e))?;
+    }
+    tokio::fs::write(&cache_path, &data)
+        .await
+        .map_err(|e| anyhow!("Failed to cache library at {:?}: {}", cache_path, e))?;
+
+    tracing::info!(
+        "Cached library {}/{} @ {} to {:?}",
+        namespace,
+        name,
+        version,
+        cache_path,
+    );
+
+    Ok(data)
 }
 
 /// Downloads an inferlet from the registry, with local caching.

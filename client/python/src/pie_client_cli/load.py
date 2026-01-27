@@ -13,7 +13,8 @@ from . import engine
 
 
 def handle_load_command(
-    path: Path,
+    library: Optional[str] = None,
+    path: Optional[Path] = None,
     name: Optional[str] = None,
     dependencies: Optional[list[str]] = None,
     config: Optional[Path] = None,
@@ -24,16 +25,26 @@ def handle_load_command(
 ) -> None:
     """Handle the `pie-cli load` command.
 
+    You can specify a library either by registry name or by path (mutually exclusive):
+
+    - By registry: pie-client load std/my-library@0.1.0
+    - By path: pie-client load --path ./my_library.wasm
+
+    Steps:
     1. Creates a client configuration from config file and command-line arguments
     2. Connects to the Pie engine server
-    3. Reads the library WASM file
-    4. Uploads the library with the specified name and dependencies
+    3. If using path, reads the library WASM file and uploads it
+    4. If using registry, downloads and loads the library from the registry
     """
-    if not path.exists():
-        raise FileNotFoundError(f"Library file not found: {path}")
+    # Validate at least one of library or path is provided
+    if library is None and path is None:
+        typer.echo("Error: Specify a library name or --path", err=True)
+        raise typer.Exit(1)
 
-    # Use the file stem as the library name if not specified
-    library_name = name if name else path.stem
+    # Validate mutual exclusivity
+    if library is not None and path is not None:
+        typer.echo("Error: Cannot specify both library name and --path", err=True)
+        raise typer.Exit(1)
 
     dependencies = dependencies or []
 
@@ -48,17 +59,40 @@ def handle_load_command(
     client = engine.connect_and_authenticate(client_config)
 
     try:
-        # Read the library bytes
-        library_bytes = path.read_bytes()
+        if path is not None:
+            # Load from local file path
+            if not path.exists():
+                raise FileNotFoundError(f"Library file not found: {path}")
 
-        typer.echo(f"Loading library '{library_name}' from {path}")
-        if dependencies:
-            typer.echo(f"  Dependencies: {', '.join(dependencies)}")
+            # Use the file stem as the library name if not specified
+            library_name = name if name else path.stem
 
-        # Upload the library
-        engine.upload_library(client, library_name, library_bytes, dependencies)
+            # Read the library bytes
+            library_bytes = path.read_bytes()
 
-        typer.echo(f"✅ Library '{library_name}' loaded successfully.")
+            typer.echo(f"Loading library '{library_name}' from {path}")
+            if dependencies:
+                typer.echo(f"  Dependencies: {', '.join(dependencies)}")
+
+            # Upload the library
+            engine.upload_library(client, library_name, library_bytes, dependencies)
+
+            typer.echo(f"✅ Library '{library_name}' loaded successfully.")
+        else:
+            # Load from registry
+            if name is not None:
+                typer.echo(
+                    "Warning: --name option is ignored when loading from registry",
+                    err=True,
+                )
+
+            typer.echo(f"Loading library from registry: {library}")
+            if dependencies:
+                typer.echo(f"  Dependencies: {', '.join(dependencies)}")
+
+            engine.load_library_from_registry(client, library, dependencies)
+
+            typer.echo(f"✅ Library '{library}' loaded successfully from registry.")
 
     finally:
         engine.close_client(client)
