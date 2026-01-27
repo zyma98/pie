@@ -14,6 +14,7 @@ from . import config as config_cmd
 from . import list as list_cmd
 from . import load as load_cmd
 from . import ping as ping_cmd
+from . import purge as purge_cmd
 from . import submit as submit_cmd
 
 # Main application
@@ -324,6 +325,37 @@ def abort(
     try:
         abort_cmd.handle_abort_command(
             instance_id_prefix=instance_id_prefix,
+            config=expand_path(config),
+            host=host,
+            port=port,
+            username=username,
+            private_key_path=expand_path(private_key_path),
+        )
+    except Exception as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+
+
+# ============================================================================
+# Purge command
+# ============================================================================
+
+
+@app.command()
+def purge(
+    config: ConfigOption = None,
+    host: HostOption = None,
+    port: PortOption = None,
+    username: UsernameOption = None,
+    private_key_path: PrivateKeyPathOption = None,
+) -> None:
+    """Purge all loaded libraries from the Pie engine.
+
+    This operation removes all loaded libraries. It is only allowed when
+    no inferlet instances are running.
+    """
+    try:
+        purge_cmd.handle_purge_command(
             config=expand_path(config),
             host=host,
             port=port,

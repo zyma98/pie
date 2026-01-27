@@ -79,6 +79,10 @@ pub enum RuntimeError {
     #[error("Library imports not satisfiable: {0}")]
     UnsatisfiableImports(String),
 
+    /// Cannot purge libraries while instances are running
+    #[error("Cannot purge libraries: {0} instance(s) are still running")]
+    InstancesRunning(usize),
+
     /// Fallback for unexpected cases
     #[error("Runtime error: {0}")]
     Other(String),
@@ -173,6 +177,11 @@ pub enum Command {
     /// List all loaded libraries
     ListLibraries {
         event: oneshot::Sender<Vec<LibraryInfo>>,
+    },
+
+    /// Purge all loaded libraries (only allowed when no instances are running)
+    PurgeLibraries {
+        event: oneshot::Sender<Result<usize, RuntimeError>>,
     },
 }
 
@@ -497,6 +506,11 @@ impl Service for Runtime {
             Command::ListLibraries { event } => {
                 let libraries = self.list_libraries();
                 event.send(libraries).unwrap();
+            }
+
+            Command::PurgeLibraries { event } => {
+                let res = self.purge_libraries();
+                event.send(res).unwrap();
             }
         }
     }
@@ -1035,6 +1049,27 @@ impl Runtime {
                 })
             })
             .collect()
+    }
+
+    /// Purge all loaded libraries.
+    /// Returns the number of libraries purged on success.
+    /// Fails if there are any running instances.
+    fn purge_libraries(&mut self) -> Result<usize, RuntimeError> {
+        // Check if there are any running instances
+        let running_count = self.running_instances.len() + self.running_server_instances.len();
+
+        if running_count > 0 {
+            return Err(RuntimeError::InstancesRunning(running_count));
+        }
+
+        let count = self.loaded_libraries.len();
+
+        // Clear all loaded libraries
+        self.loaded_libraries.clear();
+        self.library_load_order.clear();
+
+        tracing::info!("Purged {} libraries", count);
+        Ok(count)
     }
 
     async fn handle_server_request(

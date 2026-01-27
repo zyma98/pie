@@ -420,6 +420,16 @@ def load_library_from_registry(
     )
 
 
+def purge_libraries(client: PieClient) -> int:
+    """Purge all loaded libraries (sync wrapper).
+
+    This operation is only allowed when no instances are running.
+
+    Returns the number of libraries that were purged.
+    """
+    return asyncio.get_event_loop().run_until_complete(client.purge_libraries())
+
+
 def list_libraries(client: PieClient) -> list[LibraryInfo]:
     """List loaded libraries (sync wrapper)."""
     return asyncio.get_event_loop().run_until_complete(client.list_libraries())

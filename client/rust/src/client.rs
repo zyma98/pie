@@ -218,7 +218,8 @@ impl Client {
             | ClientMessage::TerminateInstance { corr_id, .. }
             | ClientMessage::Query { corr_id, .. }
             | ClientMessage::Ping { corr_id }
-            | ClientMessage::LoadLibraryFromRegistry { corr_id, .. } => corr_id,
+            | ClientMessage::LoadLibraryFromRegistry { corr_id, .. }
+            | ClientMessage::PurgeLibraries { corr_id } => corr_id,
             _ => anyhow::bail!("Invalid message type for this helper"),
         };
         *corr_id_ref = *corr_id_guard;
@@ -352,7 +353,8 @@ impl Client {
     /// Uploads a program to the server.
     /// This is a convenience method that uploads a program with no dependencies.
     pub async fn upload_program(&self, blob: &[u8]) -> Result<()> {
-        self.upload_program_with_dependencies(blob, Vec::new()).await
+        self.upload_program_with_dependencies(blob, Vec::new())
+            .await
     }
 
     /// Uploads a program to the server with specified library dependencies.
@@ -627,6 +629,23 @@ impl Client {
             Ok(())
         } else {
             anyhow::bail!("Failed to load library from registry: {}", result)
+        }
+    }
+
+    /// Purges all loaded libraries from the server.
+    ///
+    /// This operation is only allowed when no instances are running.
+    ///
+    /// Returns the number of libraries that were purged.
+    pub async fn purge_libraries(&self) -> Result<usize> {
+        let msg = ClientMessage::PurgeLibraries { corr_id: 0 };
+        let (successful, result) = self.send_msg_and_wait(msg).await?;
+        if successful {
+            result
+                .parse()
+                .context("Failed to parse purge count from server response")
+        } else {
+            anyhow::bail!("Failed to purge libraries: {}", result)
         }
     }
 

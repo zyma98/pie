@@ -710,6 +710,23 @@ class PieClient:
         if not successful:
             raise Exception(f"Failed to load library from registry: {result}")
 
+    async def purge_libraries(self) -> int:
+        """
+        Purge all loaded libraries.
+
+        This operation is only allowed when no instances are running.
+
+        :return: The number of libraries that were purged.
+        :raises Exception: If purging fails (e.g., instances are still running).
+        """
+        msg = {"type": "purge_libraries"}
+        successful, result = await self._send_msg_and_wait(msg)
+
+        if not successful:
+            raise Exception(f"Failed to purge libraries: {result}")
+
+        return int(result)
+
     async def ping(self) -> None:
         """
         Ping the server to check connectivity.
