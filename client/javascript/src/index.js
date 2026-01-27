@@ -472,6 +472,32 @@ export class PieClient {
     }
 
     /**
+     * Loads a library from the registry.
+     * 
+     * The library parameter can be:
+     * - Full name with version: "std/my-library@0.1.0"
+     * - Without namespace (defaults to "std"): "my-library@0.1.0"
+     * - Without version (defaults to "latest"): "std/my-library" or "my-library"
+     * 
+     * @param {string} library The library name (e.g., "std/my-library@0.1.0").
+     * @param {string[]} [dependencies=[]] Names of libraries this library depends on.
+     * @returns {Promise<void>}
+     */
+    async loadLibraryFromRegistry(library, dependencies = []) {
+        const msg = {
+            type: "load_library_from_registry",
+            library: library,
+            dependencies: dependencies,
+        };
+        const { successful, result } = await this._sendMsgAndWait(msg);
+        if (successful) {
+            console.log(`[PieClient] Library loaded from registry: ${library}`);
+        } else {
+            throw new Error(`Failed to load library from registry: ${result}`);
+        }
+    }
+
+    /**
      * Sends a signal/message to a running instance (fire-and-forget).
      * @param {string} instanceId The ID of the instance.
      * @param {string} message The message to send.

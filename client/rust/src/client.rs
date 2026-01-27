@@ -217,7 +217,8 @@ impl Client {
             | ClientMessage::InternalAuthenticate { corr_id, .. }
             | ClientMessage::TerminateInstance { corr_id, .. }
             | ClientMessage::Query { corr_id, .. }
-            | ClientMessage::Ping { corr_id } => corr_id,
+            | ClientMessage::Ping { corr_id }
+            | ClientMessage::LoadLibraryFromRegistry { corr_id, .. } => corr_id,
             _ => anyhow::bail!("Invalid message type for this helper"),
         };
         *corr_id_ref = *corr_id_guard;
@@ -599,6 +600,34 @@ impl Client {
 
         let libraries = rx.await?;
         Ok(libraries)
+    }
+
+    /// Loads a library from the registry.
+    ///
+    /// The `library` parameter can be:
+    /// - Full name with version: `std/my-library@0.1.0`
+    /// - Without namespace (defaults to `std`): `my-library@0.1.0`
+    /// - Without version (defaults to `latest`): `std/my-library` or `my-library`
+    ///
+    /// # Arguments
+    /// * `library` - The library name (e.g., "std/my-library@0.1.0")
+    /// * `dependencies` - Names of libraries this library depends on
+    pub async fn load_library_from_registry(
+        &self,
+        library: &str,
+        dependencies: Vec<String>,
+    ) -> Result<()> {
+        let msg = ClientMessage::LoadLibraryFromRegistry {
+            corr_id: 0,
+            library: library.to_string(),
+            dependencies,
+        };
+        let (successful, result) = self.send_msg_and_wait(msg).await?;
+        if successful {
+            Ok(())
+        } else {
+            anyhow::bail!("Failed to load library from registry: {}", result)
+        }
     }
 
     /// Terminates an instance by its ID (fire-and-forget).

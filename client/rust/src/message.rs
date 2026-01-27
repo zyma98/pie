@@ -169,6 +169,13 @@ pub enum ClientMessage {
         chunk_data: Vec<u8>,
     },
 
+    #[serde(rename = "load_library_from_registry")]
+    LoadLibraryFromRegistry {
+        corr_id: u32,
+        library: String,
+        dependencies: Vec<String>,
+    },
+
     #[serde(rename = "list_libraries")]
     ListLibraries { corr_id: u32 },
 }

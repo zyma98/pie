@@ -403,6 +403,23 @@ def upload_library(
     )
 
 
+def load_library_from_registry(
+    client: PieClient,
+    library: str,
+    dependencies: list[str] | None = None,
+) -> None:
+    """Load a library from the registry (sync wrapper).
+
+    The library parameter can be:
+    - Full name with version: "std/my-library@0.1.0"
+    - Without namespace (defaults to "std"): "my-library@0.1.0"
+    - Without version (defaults to "latest"): "std/my-library" or "my-library"
+    """
+    asyncio.get_event_loop().run_until_complete(
+        client.load_library_from_registry(library, dependencies)
+    )
+
+
 def list_libraries(client: PieClient) -> list[LibraryInfo]:
     """List loaded libraries (sync wrapper)."""
     return asyncio.get_event_loop().run_until_complete(client.list_libraries())

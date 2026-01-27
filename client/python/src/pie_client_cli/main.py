@@ -212,13 +212,19 @@ def list_instances(
 
 @app.command()
 def load(
+    library: Annotated[
+        Optional[str],
+        typer.Argument(
+            help="Library name from registry (e.g., 'std/my-library@0.1.0')"
+        ),
+    ] = None,
     path: Annotated[
-        Path,
-        typer.Argument(help="Path to the library .wasm file to load"),
-    ],
+        Optional[Path],
+        typer.Option("--path", "-p", help="Path to a local .wasm library file"),
+    ] = None,
     name: Annotated[
         Optional[str],
-        typer.Option("--name", "-n", help="Name for the library (defaults to file stem)"),
+        typer.Option("--name", "-n", help="Name for the library (defaults to file stem, only for --path)"),
     ] = None,
     dependency: Annotated[
         Optional[list[str]],
@@ -236,16 +242,23 @@ def load(
 ) -> None:
     """Load a library component into the Pie engine.
 
+    You can specify a library either by registry name or by path (mutually exclusive):
+
+    - By registry: pie-client load std/my-library@0.1.0
+    - By path: pie-client load --path ./my_library.wasm
+
     Libraries are WASM components that export interfaces. Other libraries
     and inferlets can import these interfaces. Libraries must be loaded
     in dependency order (dependencies first).
 
     Examples:
-        pie-client load ./logging.wasm
-        pie-client load ./calculator.wasm --name calc --dependency logging
+        pie-client load std/logging@0.1.0
+        pie-client load --path ./logging.wasm
+        pie-client load --path ./calculator.wasm --name calc --dependency logging
     """
     try:
         load_cmd.handle_load_command(
+            library=library,
             path=expand_path(path),
             name=name,
             dependencies=dependency,
