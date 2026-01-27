@@ -178,6 +178,9 @@ pub enum ClientMessage {
 
     #[serde(rename = "list_libraries")]
     ListLibraries { corr_id: u32 },
+
+    #[serde(rename = "purge_libraries")]
+    PurgeLibraries { corr_id: u32 },
 }
 
 /// Messages from server -> client

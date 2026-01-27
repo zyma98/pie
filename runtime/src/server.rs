@@ -699,6 +699,9 @@ impl Session {
                     self.handle_load_library_from_registry(corr_id, library, dependencies)
                         .await;
                 }
+                ClientMessage::PurgeLibraries { corr_id } => {
+                    self.handle_purge_libraries(corr_id).await;
+                }
             },
             SessionEvent::InstanceEvent(cmd) => match cmd {
                 InstanceEvent::SendMsgToClient { inst_id, message } => {
@@ -1000,6 +1003,24 @@ impl Session {
                         self.send_response(corr_id, false, e.to_string()).await;
                     }
                 }
+            }
+            Err(e) => {
+                self.send_response(corr_id, false, e.to_string()).await;
+            }
+        }
+    }
+
+    /// Handles the PurgeLibraries command.
+    ///
+    /// Removes all loaded libraries. Only allowed when no instances are running.
+    async fn handle_purge_libraries(&self, corr_id: u32) {
+        let (evt_tx, evt_rx) = oneshot::channel();
+        runtime::Command::PurgeLibraries { event: evt_tx }.dispatch();
+
+        match evt_rx.await.unwrap() {
+            Ok(count) => {
+                self.send_response(corr_id, true, format!("{}", count))
+                    .await;
             }
             Err(e) => {
                 self.send_response(corr_id, false, e.to_string()).await;

@@ -498,6 +498,27 @@ export class PieClient {
     }
 
     /**
+     * Purges all loaded libraries from the server.
+     * 
+     * This operation is only allowed when no instances are running.
+     * 
+     * @returns {Promise<number>} The number of libraries that were purged.
+     */
+    async purgeLibraries() {
+        const msg = {
+            type: "purge_libraries",
+        };
+        const { successful, result } = await this._sendMsgAndWait(msg);
+        if (successful) {
+            const count = parseInt(result, 10);
+            console.log(`[PieClient] Purged ${count} libraries`);
+            return count;
+        } else {
+            throw new Error(`Failed to purge libraries: ${result}`);
+        }
+    }
+
+    /**
      * Sends a signal/message to a running instance (fire-and-forget).
      * @param {string} instanceId The ID of the instance.
      * @param {string} message The message to send.
