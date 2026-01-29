@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 // use ring::rand::{SecureRandom, SystemRandom};
 use std::fs;
 use std::path::PathBuf;
@@ -78,7 +78,7 @@ pub async fn run_server(
     // Generate a random 64-character string for internal client connection authentication.
     let internal_auth_token = crate::auth::generate_internal_auth_token()?;
 
-    runtime::start_service(&config.cache_dir);
+    runtime::start_service();
     server::start_service(
         &server_url,
         config.enable_auth,
@@ -175,4 +175,3 @@ fn init_tracing(
 
     Ok(())
 }
-
