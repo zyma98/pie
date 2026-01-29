@@ -1365,12 +1365,14 @@ async fn download_inferlet_from_registry(
     // Build the cache paths:
     // - Wasm binary: {cache_dir}/registry/{namespace}/{name}/{version}.wasm
     // - Manifest: {cache_dir}/registry/{namespace}/{name}/{version}.toml
+    // - Hash: {cache_dir}/registry/{namespace}/{name}/{version}.hash
     let cache_base = cache_dir.join("registry").join(namespace).join(name);
     let wasm_cache_path = cache_base.join(format!("{}.wasm", version));
     let manifest_cache_path = cache_base.join(format!("{}.toml", version));
+    let hash_cache_path = cache_base.join(format!("{}.hash", version));
 
-    // Check if we have both cached files
-    if wasm_cache_path.exists() && manifest_cache_path.exists() {
+    // Check if we have all cached files
+    if wasm_cache_path.exists() && manifest_cache_path.exists() && hash_cache_path.exists() {
         tracing::info!(
             "Using cached inferlet: {}/{} @ {} from {:?}",
             namespace,
@@ -1394,7 +1396,9 @@ async fn download_inferlet_from_registry(
                     e
                 )
             })?;
-        let hash = blake3::hash(&wasm_data).to_hex().to_string();
+        let hash = tokio::fs::read_to_string(&hash_cache_path)
+            .await
+            .map_err(|e| anyhow!("Failed to read cached hash at {:?}: {}", hash_cache_path, e))?;
         return Ok((hash, wasm_data, manifest_data));
     }
 
@@ -1511,6 +1515,10 @@ async fn download_inferlet_from_registry(
                 e
             )
         })?;
+
+    tokio::fs::write(&hash_cache_path, &hash)
+        .await
+        .map_err(|e| anyhow!("Failed to cache hash at {:?}: {}", hash_cache_path, e))?;
 
     tracing::info!(
         "Cached inferlet {}/{} @ {} to {:?} (hash: {})",

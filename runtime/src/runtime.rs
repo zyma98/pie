@@ -263,7 +263,7 @@ impl Service for Runtime {
 
                     self.programs_in_memory.insert(hash.to_string(), component);
 
-                    // Write to disk: {cache_dir}/{namespace}/{name}/{version}.wasm
+                    // Write to disk: {cache_dir}/{namespace}/{name}/{version}.{wasm,toml,hash}
                     let dir_path = std::path::Path::new(&self.cache_dir)
                         .join(&namespace)
                         .join(&name);
@@ -273,9 +273,11 @@ impl Service for Runtime {
 
                     let wasm_file_path = dir_path.join(format!("{}.wasm", version));
                     let manifest_file_path = dir_path.join(format!("{}.toml", version));
+                    let hash_file_path = dir_path.join(format!("{}.hash", version));
 
                     std::fs::write(&wasm_file_path, &raw).unwrap();
                     std::fs::write(&manifest_file_path, &manifest).unwrap();
+                    std::fs::write(&hash_file_path, &hash).unwrap();
 
                     self.programs_in_disk.insert(hash.clone(), wasm_file_path);
                     event.send(Ok(hash)).unwrap();
@@ -465,6 +467,7 @@ impl Runtime {
     fn load_existing_programs(&self) -> Result<(), RuntimeError> {
         // Load all .wasm files from the cache directory
         // Structure: {cache_dir}/{namespace}/{name}/{version}.wasm
+        // Hash is read from: {cache_dir}/{namespace}/{name}/{version}.hash
         let cache_dir = std::path::Path::new(&self.cache_dir);
         if !cache_dir.exists() {
             return Ok(());
@@ -488,8 +491,15 @@ impl Runtime {
                 for file_entry in std::fs::read_dir(&name_path)? {
                     let file_path = file_entry?.path();
                     if file_path.extension().is_some_and(|ext| ext == "wasm") {
-                        let data = std::fs::read(&file_path)?;
-                        let hash = blake3::hash(&data).to_hex().to_string();
+                        // Read hash from .hash file instead of recomputing
+                        let hash_file_path = file_path.with_extension("hash");
+                        let hash = if hash_file_path.exists() {
+                            std::fs::read_to_string(&hash_file_path)?
+                        } else {
+                            // Fallback: compute hash if .hash file doesn't exist
+                            let data = std::fs::read(&file_path)?;
+                            blake3::hash(&data).to_hex().to_string()
+                        };
                         self.programs_in_disk.insert(hash, file_path);
                     }
                 }
