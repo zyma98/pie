@@ -571,12 +571,15 @@ impl Session {
                 }
                 ClientMessage::LaunchInstance {
                     corr_id,
-                    program_hash,
+                    inferlet,
                     arguments,
                     detached,
                 } => {
-                    self.handle_launch_instance(corr_id, program_hash, arguments, detached)
-                        .await
+                    let (namespace, name, version) = parse_inferlet_name(&inferlet);
+                    self.handle_launch_instance(
+                        corr_id, namespace, name, version, arguments, detached,
+                    )
+                    .await
                 }
                 ClientMessage::LaunchInstanceFromRegistry {
                     corr_id,
@@ -598,11 +601,14 @@ impl Session {
                 ClientMessage::LaunchServerInstance {
                     corr_id,
                     port,
-                    program_hash,
+                    inferlet,
                     arguments,
                 } => {
-                    self.handle_launch_server_instance(corr_id, port, program_hash, arguments)
-                        .await
+                    let (namespace, name, version) = parse_inferlet_name(&inferlet);
+                    self.handle_launch_server_instance(
+                        corr_id, port, namespace, name, version, arguments,
+                    )
+                    .await
                 }
                 ClientMessage::SignalInstance {
                     instance_id,
@@ -741,9 +747,20 @@ impl Session {
     async fn handle_query(&mut self, corr_id: u32, subject: String, record: String) {
         match subject.as_str() {
             message::QUERY_PROGRAM_EXISTS => {
+                // Parse the record as "namespace/name@version" or "namespace/name@version#hash"
+                let (inferlet_part, hash) = if let Some(idx) = record.find('#') {
+                    let (inferlet, hash_part) = record.split_at(idx);
+                    (inferlet.to_string(), Some(hash_part[1..].to_string()))
+                } else {
+                    (record.clone(), None)
+                };
+                let (namespace, name, version) = parse_inferlet_name(&inferlet_part);
                 let (evt_tx, evt_rx) = oneshot::channel();
                 runtime::Command::ProgramExists {
-                    hash: record,
+                    namespace,
+                    name,
+                    version,
+                    hash,
                     event: evt_tx,
                 }
                 .dispatch();
@@ -894,7 +911,9 @@ impl Session {
     async fn handle_launch_instance(
         &mut self,
         corr_id: u32,
-        program_hash: String,
+        namespace: String,
+        name: String,
+        version: String,
         arguments: Vec<String>,
         detached: bool,
     ) {
@@ -902,7 +921,9 @@ impl Session {
 
         runtime::Command::LaunchInstance {
             username: self.username.clone(),
-            program_hash,
+            namespace,
+            name,
+            version,
             arguments,
             detached,
             event: evt_tx,
@@ -969,7 +990,7 @@ impl Session {
                 // Upload the program to the runtime (registers it for execution)
                 let (evt_tx, evt_rx) = oneshot::channel();
                 runtime::Command::UploadProgram {
-                    hash: program_hash.clone(),
+                    hash: program_hash,
                     raw: program_data,
                     manifest,
                     event: evt_tx,
@@ -987,8 +1008,15 @@ impl Session {
                 }
 
                 // Now launch the instance using the same flow as handle_launch_instance
-                self.handle_launch_instance(corr_id, program_hash, arguments, detached)
-                    .await;
+                self.handle_launch_instance(
+                    corr_id,
+                    namespace.clone(),
+                    name.clone(),
+                    version.clone(),
+                    arguments,
+                    detached,
+                )
+                .await;
             }
             Err(e) => {
                 self.send_launch_result(corr_id, false, e.to_string()).await;
@@ -1086,13 +1114,17 @@ impl Session {
         &mut self,
         corr_id: u32,
         port: u32,
-        program_hash: String,
+        namespace: String,
+        name: String,
+        version: String,
         arguments: Vec<String>,
     ) {
         let (evt_tx, evt_rx) = oneshot::channel();
         runtime::Command::LaunchServerInstance {
             username: self.username.clone(),
-            program_hash,
+            namespace,
+            name,
+            version,
             port,
             arguments,
             event: evt_tx,

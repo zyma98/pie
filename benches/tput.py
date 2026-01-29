@@ -2,6 +2,7 @@ import asyncio
 import argparse
 import time
 import sys
+import tomllib
 from pathlib import Path
 from blake3 import blake3
 from pie_client import PieClient, Event
@@ -38,15 +39,20 @@ async def run_benchmark(args):
     print(f"Using Manifest: {manifest_path}")
     program_bytes = wasm_path.read_bytes()
     manifest_content = manifest_path.read_text()
+    manifest = tomllib.loads(manifest_content)
+    namespace, name = manifest["package"]["name"].split("/", 1)
+    version = manifest["package"]["version"]
     program_hash = blake3(program_bytes).hexdigest()
+    inferlet_name = f"{namespace}/{name}@{version}"
+    print(f"Inferlet: {inferlet_name} ({program_hash})")
 
     # 2. Connect to server
     print(f"Connecting to {args.server}...")
     async with PieClient(args.server) as client:
         await client.authenticate("benchmark-user")
 
-        # 3. Upload program
-        if not await client.program_exists(program_hash):
+        # 3. Upload program (check both name and hash match)
+        if not await client.program_exists(inferlet_name, program_hash):
             print("Uploading program...")
             await client.upload_program(program_bytes, manifest_content)
         else:
@@ -92,8 +98,9 @@ async def run_benchmark(args):
 
                 # Launch instance
                 try:
+                    inferlet_name = f"{namespace}/{name}@{version}"
                     instance = await client.launch_instance(
-                        program_hash, arguments=inferlet_args
+                        inferlet_name, arguments=inferlet_args
                     )
                     while True:
                         event, msg = await instance.recv()

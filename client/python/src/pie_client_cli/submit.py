@@ -6,6 +6,7 @@ to an existing running Pie engine instance.
 
 import subprocess
 import tempfile
+import tomllib
 from pathlib import Path
 from typing import Optional
 
@@ -13,6 +14,42 @@ import blake3
 import typer
 
 from . import engine
+
+
+def parse_manifest(manifest_content: str) -> tuple[str, str, str]:
+    """Parse the manifest to extract namespace, name, and version.
+
+    Args:
+        manifest_content: The TOML manifest content as a string.
+
+    Returns:
+        A tuple of (namespace, name, version).
+
+    Raises:
+        ValueError: If the manifest is missing required fields or has invalid format.
+    """
+    manifest = tomllib.loads(manifest_content)
+
+    package = manifest.get("package")
+    if package is None:
+        raise ValueError("Manifest missing [package] section")
+
+    full_name = package.get("name")
+    if full_name is None:
+        raise ValueError("Manifest missing package.name field")
+
+    version = package.get("version")
+    if version is None:
+        raise ValueError("Manifest missing package.version field")
+
+    # Parse "namespace/name" format
+    parts = full_name.split("/", 1)
+    if len(parts) != 2:
+        raise ValueError(
+            f"Invalid package.name format '{full_name}': expected 'namespace/name'"
+        )
+
+    return parts[0], parts[1], version
 
 
 def compose_components(program_bytes: bytes, library_paths: list[Path]) -> bytes:
@@ -159,27 +196,32 @@ def handle_submit_command(
             inferlet_blob = path.read_bytes()
             manifest_content = manifest.read_text()
 
+            # Parse the manifest to extract namespace, name, and version
+            namespace, name, version = parse_manifest(manifest_content)
+            typer.echo(f"Inferlet: {namespace}/{name}@{version}")
+
             # If libraries are specified, compose them with the main inferlet
             if link:
                 final_blob = compose_components(inferlet_blob, link)
             else:
                 final_blob = inferlet_blob
 
-            # Calculate the hash of the final composed blob
+            # Calculate the hash of the final blob
             program_hash = blake3.blake3(final_blob).hexdigest()
-            typer.echo(f"Final inferlet hash: {program_hash}")
+            inferlet_name = f"{namespace}/{name}@{version}"
 
-            # Upload the composed inferlet to the server
-            if not engine.program_exists(client, program_hash):
+            # Upload the composed inferlet to the server (check both name and hash match)
+            if not engine.program_exists(client, inferlet_name, program_hash):
                 engine.upload_program(client, final_blob, manifest_content)
                 typer.echo("✅ Inferlet upload successful.")
             else:
                 typer.echo("Inferlet already exists on server.")
 
             # Launch the instance
+            inferlet_name = f"{namespace}/{name}@{version}"
             instance = engine.launch_instance(
                 client,
-                program_hash,
+                inferlet_name,
                 arguments,
                 detached,
             )

@@ -385,9 +385,23 @@ class PieClient:
         msg = {"type": "query", "subject": subject, "record": record}
         return await self._send_msg_and_wait(msg)
 
-    async def program_exists(self, program_hash: str) -> bool:
-        """Check if a program with the given hash exists on the server."""
-        successful, result = await self.query("program_exists", program_hash)
+    async def program_exists(self, inferlet: str, hash: str | None = None) -> bool:
+        """Check if a program exists on the server.
+
+        The inferlet parameter can be:
+        - Full name with version: "std/text-completion@0.1.0"
+        - Without namespace (defaults to "std"): "text-completion@0.1.0"
+        - Without version (defaults to "latest"): "std/text-completion" or "text-completion"
+
+        Args:
+            inferlet: The inferlet name (e.g., "std/text-completion@0.1.0").
+            hash: Optional hash to verify. If provided, also checks that the stored hash matches.
+        """
+        if hash:
+            query = f"{inferlet}#{hash}"
+        else:
+            query = inferlet
+        successful, result = await self.query("program_exists", query)
         if successful:
             return result == "true"
         raise Exception(f"Query for program_exists failed: {result}")
@@ -458,16 +472,27 @@ class PieClient:
 
     async def launch_instance(
         self,
-        program_hash: str,
+        inferlet: str,
         arguments: list[str] | None = None,
         detached: bool = False,
     ) -> Instance:
-        """Launch an instance of a program."""
+        """Launch an instance of a program.
+
+        The inferlet parameter can be:
+        - Full name with version: "std/text-completion@0.1.0"
+        - Without namespace (defaults to "std"): "text-completion@0.1.0"
+        - Without version (defaults to "latest"): "std/text-completion" or "text-completion"
+
+        :param inferlet: The inferlet name (e.g., "std/text-completion@0.1.0").
+        :param arguments: Command-line arguments to pass to the inferlet.
+        :param detached: If True, the instance runs in detached mode.
+        :return: An Instance object for the launched inferlet.
+        """
         corr_id = self._get_next_corr_id()
         msg = {
             "type": "launch_instance",
             "corr_id": corr_id,
-            "program_hash": program_hash,
+            "inferlet": inferlet,
             "arguments": arguments or [],
             "detached": detached,
         }
