@@ -409,14 +409,14 @@ impl Client {
     /// - Without version (defaults to `latest`): `std/text-completion` or `text-completion`
     pub async fn launch_instance(
         &self,
-        inferlet: &str,
+        inferlet: String,
         arguments: Vec<String>,
         detached: bool,
     ) -> Result<Instance> {
         let corr_id_guard = self.inner.corr_id_pool.acquire().await?;
         let msg = ClientMessage::LaunchInstance {
             corr_id: *corr_id_guard,
-            inferlet: inferlet.to_string(),
+            inferlet,
             arguments,
             detached,
         };
