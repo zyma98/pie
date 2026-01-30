@@ -1021,9 +1021,6 @@ impl Session {
             // Inform the runtime to load the pre-compiled component
             let (evt_tx, evt_rx) = oneshot::channel();
             runtime::Command::LoadProgram {
-                namespace,
-                name,
-                version,
                 hash: final_hash.clone(),
                 component,
                 event: evt_tx,
@@ -1052,28 +1049,17 @@ impl Session {
             .get(&program_key)
             .map(|e| e.value().clone())
         {
-            let (namespace, name, version) = program_key;
-
             // Program found in uploaded programs - ensure it's loaded and launch it
-            if let Err(e) = ensure_program_loaded_from_path(
-                &self.state.wasm_engine,
-                &wasm_path,
-                hash.clone(),
-                namespace.clone(),
-                name.clone(),
-                version.clone(),
-            )
-            .await
+            if let Err(e) =
+                ensure_program_loaded_from_path(&self.state.wasm_engine, &wasm_path, &hash).await
             {
                 self.send_launch_result(corr_id, false, e).await;
                 return;
             }
 
             // Launch the instance
-            self.launch_instance_from_loaded_program(
-                corr_id, namespace, name, version, hash, arguments, detached,
-            )
-            .await;
+            self.launch_instance_from_loaded_program(corr_id, hash, arguments, detached)
+                .await;
         // Program not found in uploaded programs - fall back to registry
         } else {
             self.handle_launch_instance_from_registry(corr_id, inferlet, arguments, detached)
@@ -1103,25 +1089,16 @@ impl Session {
             .map(|e| e.value().clone())
         {
             // Program is cached on disk - ensure it's loaded
-            if let Err(e) = ensure_program_loaded_from_path(
-                &self.state.wasm_engine,
-                &wasm_path,
-                hash.clone(),
-                namespace.clone(),
-                name.clone(),
-                version.clone(),
-            )
-            .await
+            if let Err(e) =
+                ensure_program_loaded_from_path(&self.state.wasm_engine, &wasm_path, &hash).await
             {
                 self.send_launch_result(corr_id, false, e).await;
                 return;
             }
 
             // Launch the instance
-            self.launch_instance_from_loaded_program(
-                corr_id, namespace, name, version, hash, arguments, detached,
-            )
-            .await;
+            self.launch_instance_from_loaded_program(corr_id, hash, arguments, detached)
+                .await;
         } else {
             // Program not cached - download from registry
             match download_inferlet_from_registry(
@@ -1162,9 +1139,6 @@ impl Session {
                     // Register the pre-compiled component with the runtime
                     let (evt_tx, evt_rx) = oneshot::channel();
                     runtime::Command::LoadProgram {
-                        namespace: namespace.clone(),
-                        name: name.clone(),
-                        version: version.clone(),
                         hash: program_hash.clone(),
                         component,
                         event: evt_tx,
@@ -1176,9 +1150,6 @@ impl Session {
                     // Launch the instance
                     self.launch_instance_from_loaded_program(
                         corr_id,
-                        namespace,
-                        name,
-                        version,
                         program_hash,
                         arguments,
                         detached,
@@ -1197,9 +1168,6 @@ impl Session {
     async fn launch_instance_from_loaded_program(
         &mut self,
         corr_id: u32,
-        namespace: String,
-        name: String,
-        version: String,
         hash: String,
         arguments: Vec<String>,
         detached: bool,
@@ -1207,9 +1175,6 @@ impl Session {
         let (evt_tx, evt_rx) = oneshot::channel();
         runtime::Command::LaunchInstance {
             username: self.username.clone(),
-            namespace,
-            name,
-            version,
             hash,
             arguments,
             detached,
@@ -1341,8 +1306,7 @@ impl Session {
         inferlet: String,
         arguments: Vec<String>,
     ) {
-        let (namespace, name, version) = parse_inferlet_name(&inferlet);
-        let program_key = (namespace.clone(), name.clone(), version.clone());
+        let program_key = parse_inferlet_name(&inferlet);
 
         // Look up the wasm path and hash from disk maps
         let program_info = self
@@ -1359,15 +1323,8 @@ impl Session {
 
         // Ensure the program is loaded
         if let Some((wasm_path, hash)) = program_info {
-            if let Err(e) = ensure_program_loaded_from_path(
-                &self.state.wasm_engine,
-                &wasm_path,
-                hash.clone(),
-                namespace.clone(),
-                name.clone(),
-                version.clone(),
-            )
-            .await
+            if let Err(e) =
+                ensure_program_loaded_from_path(&self.state.wasm_engine, &wasm_path, &hash).await
             {
                 self.send_response(corr_id, false, e).await;
                 return;
@@ -1376,9 +1333,6 @@ impl Session {
             let (evt_tx, evt_rx) = oneshot::channel();
             runtime::Command::LaunchServerInstance {
                 username: self.username.clone(),
-                namespace,
-                name,
-                version,
                 hash,
                 port,
                 arguments,
@@ -1748,18 +1702,12 @@ async fn compile_wasm_component(engine: &WasmEngine, wasm_bytes: Vec<u8>) -> Res
 async fn ensure_program_loaded_from_path(
     wasm_engine: &WasmEngine,
     wasm_path: &PathBuf,
-    hash: String,
-    namespace: String,
-    name: String,
-    version: String,
+    hash: &str,
 ) -> Result<(), String> {
-    // Check if the program is already loaded in memory (with hash verification)
+    // Check if the program is already loaded in memory
     let (loaded_tx, loaded_rx) = oneshot::channel();
     runtime::Command::ProgramLoaded {
-        namespace: namespace.clone(),
-        name: name.clone(),
-        version: version.clone(),
-        hash: hash.clone(),
+        hash: hash.to_string(),
         event: loaded_tx,
     }
     .dispatch();
@@ -1778,10 +1726,7 @@ async fn ensure_program_loaded_from_path(
 
         let (load_tx, load_rx) = oneshot::channel();
         runtime::Command::LoadProgram {
-            namespace: namespace,
-            name: name,
-            version: version,
-            hash: hash,
+            hash: hash.to_string(),
             component,
             event: load_tx,
         }

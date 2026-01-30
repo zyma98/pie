@@ -68,27 +68,18 @@ pub enum Command {
     },
 
     LoadProgram {
-        namespace: String,
-        name: String,
-        version: String,
         hash: String,
         component: Component,
         event: oneshot::Sender<()>,
     },
 
     ProgramLoaded {
-        namespace: String,
-        name: String,
-        version: String,
         hash: String,
         event: oneshot::Sender<bool>,
     },
 
     LaunchInstance {
         username: String,
-        namespace: String,
-        name: String,
-        version: String,
         hash: String,
         arguments: Vec<String>,
         detached: bool,
@@ -110,9 +101,6 @@ pub enum Command {
 
     LaunchServerInstance {
         username: String,
-        namespace: String,
-        name: String,
-        version: String,
         hash: String,
         port: u32,
         arguments: Vec<String>,
@@ -156,9 +144,8 @@ struct Runtime {
     engine: Engine,
     linker: Arc<Linker<InstanceState>>,
 
-    /// Pre-compiled WASM components, keyed by (namespace, name, version)
-    /// Value is (Component, hash)
-    compiled_programs: DashMap<(String, String, String), (Component, String)>,
+    /// Pre-compiled WASM components, keyed by hash
+    compiled_programs: DashMap<String, Component>,
 
     /// Running instances
     running_instances: DashMap<InstanceId, InstanceHandle>,
@@ -228,9 +215,7 @@ pub enum AttachInstanceResult {
 
 struct InstanceHandle {
     username: String,
-    program_namespace: String,
-    program_name: String,
-    program_version: String,
+    program_hash: String,
     arguments: Vec<String>,
     start_time: std::time::Instant,
     output_delivery_ctrl: OutputDeliveryCtrl,
@@ -244,50 +229,29 @@ impl Service for Runtime {
     async fn handle(&mut self, cmd: Self::Command) {
         match cmd {
             Command::LoadProgram {
-                namespace,
-                name,
-                version,
                 hash,
                 component,
                 event,
             } => {
-                let program_key = (namespace, name, version);
-                // Just store the pre-compiled component (compilation happens on server side)
-                self.compiled_programs
-                    .insert(program_key, (component, hash));
+                // Store the pre-compiled component keyed by hash
+                self.compiled_programs.insert(hash, component);
                 event.send(()).unwrap();
             }
 
-            Command::ProgramLoaded {
-                namespace,
-                name,
-                version,
-                hash,
-                event,
-            } => {
-                let program_key = (namespace, name, version);
-                let is_loaded = match self.compiled_programs.get(&program_key) {
-                    Some(entry) => {
-                        let (_, stored_hash) = entry.value();
-                        stored_hash == &hash
-                    }
-                    None => false,
-                };
+            Command::ProgramLoaded { hash, event } => {
+                let is_loaded = self.compiled_programs.contains_key(&hash);
                 event.send(is_loaded).unwrap();
             }
 
             Command::LaunchInstance {
                 username,
-                namespace,
-                name,
-                version,
                 hash,
                 event,
                 arguments,
                 detached,
             } => {
                 let res = self
-                    .launch_instance(username, namespace, name, version, hash, arguments, detached)
+                    .launch_instance(username, hash, arguments, detached)
                     .await;
                 event
                     .send(res)
@@ -313,16 +277,13 @@ impl Service for Runtime {
 
             Command::LaunchServerInstance {
                 username,
-                namespace,
-                name,
-                version,
                 hash,
                 port,
                 arguments,
                 event,
             } => {
                 let _ = self
-                    .launch_server_instance(username, namespace, name, version, hash, port, arguments)
+                    .launch_server_instance(username, hash, port, arguments)
                     .await;
                 event.send(Ok(())).unwrap();
             }
@@ -365,11 +326,9 @@ impl Service for Runtime {
                             .map(|item| {
                                 let handle = item.value();
                                 format!(
-                                    "Instance ID: {}, Program: {}/{}@{}",
+                                    "Instance ID: {}, Program hash: {}",
                                     item.key(),
-                                    handle.program_namespace,
-                                    handle.program_name,
-                                    handle.program_version
+                                    handle.program_hash
                                 )
                             })
                             .collect();
@@ -377,16 +336,13 @@ impl Service for Runtime {
                         format!("{}", instances.join("\n"))
                     }
                     "list_in_memory_programs" => {
-                        let keys: Vec<String> = self
+                        let hashes: Vec<String> = self
                             .compiled_programs
                             .iter()
-                            .map(|item| {
-                                let (ns, name, ver) = item.key();
-                                format!("{}/{}@{}", ns, name, ver)
-                            })
+                            .map(|item| item.key().clone())
                             .collect();
 
-                        format!("{}", keys.join("\n"))
+                        format!("{}", hashes.join("\n"))
                     }
 
                     _ => {
@@ -448,31 +404,11 @@ impl Runtime {
         }
     }
 
-    fn get_component(
-        &self,
-        namespace: &str,
-        name: &str,
-        version: &str,
-        hash: &str,
-    ) -> Result<Component, RuntimeError> {
-        let key = (namespace.to_string(), name.to_string(), version.to_string());
-
-        // Get the component from memory (the server is responsible for issuing compile commands)
-        match self.compiled_programs.get(&key) {
-            Some(entry) => {
-                let (component, stored_hash) = entry.value();
-                if stored_hash != hash {
-                    return Err(RuntimeError::MissingProgram(format!(
-                        "{}/{} @ {} (hash mismatch: expected {}, got {})",
-                        namespace, name, version, hash, stored_hash
-                    )));
-                }
-                Ok(component.clone())
-            }
-            None => Err(RuntimeError::MissingProgram(format!(
-                "{}/{} @ {}",
-                namespace, name, version
-            ))),
+    fn get_component(&self, hash: &str) -> Result<Component, RuntimeError> {
+        // Get the component from memory by hash
+        match self.compiled_programs.get(hash) {
+            Some(entry) => Ok(entry.value().clone()),
+            None => Err(RuntimeError::MissingProgram(hash.to_string())),
         }
     }
 
@@ -480,14 +416,11 @@ impl Runtime {
     async fn launch_instance(
         &self,
         username: String,
-        namespace: String,
-        name: String,
-        version: String,
         hash: String,
         arguments: Vec<String>,
         detached: bool,
     ) -> Result<InstanceId, RuntimeError> {
-        let component = self.get_component(&namespace, &name, &version, &hash)?;
+        let component = self.get_component(&hash)?;
         let instance_id = Uuid::new_v4();
 
         // Instantiate and run in a task
@@ -523,9 +456,7 @@ impl Runtime {
         // Record in the "running_instances" so we can manage it later
         let instance_handle = InstanceHandle {
             username,
-            program_namespace: namespace,
-            program_name: name,
-            program_version: version,
+            program_hash: hash,
             arguments,
             start_time: std::time::Instant::now(),
             output_delivery_ctrl,
@@ -589,15 +520,12 @@ impl Runtime {
     async fn launch_server_instance(
         &self,
         username: String,
-        namespace: String,
-        name: String,
-        version: String,
         hash: String,
         port: u32,
         arguments: Vec<String>,
     ) -> Result<InstanceId, RuntimeError> {
         let instance_id = Uuid::new_v4();
-        let component = self.get_component(&namespace, &name, &version, &hash)?;
+        let component = self.get_component(&hash)?;
 
         // Instantiate and run in a task
         let engine = self.engine.clone();
@@ -625,9 +553,7 @@ impl Runtime {
         // Record in the "running_instances" so we can manage it later
         let instance_handle = InstanceHandle {
             username,
-            program_namespace: namespace,
-            program_name: name,
-            program_version: version,
+            program_hash: hash,
             arguments,
             start_time: std::time::Instant::now(),
             output_delivery_ctrl,
