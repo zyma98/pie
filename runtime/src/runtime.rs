@@ -13,7 +13,7 @@ use thiserror::Error;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 use wasmtime::component::Resource;
-use wasmtime::{Config, Engine, Store, component::Component, component::Linker};
+use wasmtime::{Engine, Store, component::Component, component::Linker};
 use wasmtime_wasi_http::WasiHttpView;
 use wasmtime_wasi_http::bindings::exports::wasi::http::incoming_handler::{
     IncomingRequest, ResponseOutparam,
@@ -30,8 +30,8 @@ static COMMAND_DISPATCHER: OnceLock<CommandDispatcher<Command>> = OnceLock::new(
 
 /// Starts the runtime service. A daemon task will be spawned to handle the
 /// commands dispatched from other services.
-pub fn start_service() {
-    let runtime = Runtime::new();
+pub fn start_service(engine: Engine) {
+    let runtime = Runtime::new(engine);
     runtime.start(&COMMAND_DISPATCHER);
 }
 
@@ -67,16 +67,16 @@ pub enum Command {
         event: oneshot::Sender<String>,
     },
 
-    CompileProgram {
+    LoadProgram {
         namespace: String,
         name: String,
         version: String,
         hash: String,
-        raw: Vec<u8>,
-        event: oneshot::Sender<Result<(), RuntimeError>>,
+        component: Component,
+        event: oneshot::Sender<()>,
     },
 
-    ProgramCompiled {
+    ProgramLoaded {
         namespace: String,
         name: String,
         version: String,
@@ -241,30 +241,22 @@ impl Service for Runtime {
 
     async fn handle(&mut self, cmd: Self::Command) {
         match cmd {
-            Command::CompileProgram {
+            Command::LoadProgram {
                 namespace,
                 name,
                 version,
                 hash,
-                raw,
+                component,
                 event,
             } => {
                 let program_key = (namespace, name, version);
-
-                if self.compiled_programs.contains_key(&program_key) {
-                    event.send(Ok(())).unwrap();
-                } else if let Ok(component) = Component::from_binary(&self.engine, raw.as_slice()) {
-                    self.compiled_programs
-                        .insert(program_key, (component, hash));
-                    event.send(Ok(())).unwrap();
-                } else {
-                    event
-                        .send(Err(RuntimeError::Other("Failed to compile".into())))
-                        .unwrap();
-                }
+                // Just store the pre-compiled component (compilation happens on server side)
+                self.compiled_programs
+                    .insert(program_key, (component, hash));
+                event.send(()).unwrap();
             }
 
-            Command::ProgramCompiled {
+            Command::ProgramLoaded {
                 namespace,
                 name,
                 version,
@@ -272,14 +264,14 @@ impl Service for Runtime {
                 event,
             } => {
                 let program_key = (namespace, name, version);
-                let is_compiled = match self.compiled_programs.get(&program_key) {
+                let is_loaded = match self.compiled_programs.get(&program_key) {
                     Some(entry) => {
                         let (_, stored_hash) = entry.value();
                         stored_hash == &hash
                     }
                     None => false,
                 };
-                event.send(is_compiled).unwrap();
+                event.send(is_loaded).unwrap();
             }
 
             Command::LaunchInstance {
@@ -429,17 +421,7 @@ impl Service for Runtime {
 }
 
 impl Runtime {
-    fn new() -> Self {
-        // Configure Wasmtime engine
-        let mut config = Config::default();
-        config.async_support(true);
-
-        // TODO: Adjust settings later: https://docs.wasmtime.dev/api/wasmtime/struct.PoolingAllocationConfig.html
-        // let mut pooling_config = PoolingAllocationConfig::default();
-        //config.allocation_strategy(InstanceAllocationStrategy::Pooling(pooling_config));
-
-        let engine = Engine::new(&config).unwrap();
-
+    fn new(engine: Engine) -> Self {
         let mut linker = Linker::<InstanceState>::new(&engine);
 
         // Add to linker

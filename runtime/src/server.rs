@@ -6,7 +6,7 @@ use crate::runtime::{self, AttachInstanceResult, TerminationCause};
 use crate::service::{CommandDispatcher, Service, ServiceCommand};
 use crate::utils::IdPool;
 use anyhow::{Result, anyhow, bail};
-use base64::Engine;
+use base64::Engine as Base64Engine;
 use bytes::Bytes;
 use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
@@ -25,6 +25,8 @@ use tokio::task::JoinHandle;
 use tokio_tungstenite::accept_async;
 use tungstenite::Message as WsMessage;
 use uuid::Uuid;
+use wasmtime::Engine as WasmEngine;
+use wasmtime::component::Component;
 
 type ClientId = u32;
 
@@ -41,6 +43,7 @@ pub fn start_service(
     internal_auth_token: String,
     registry_url: String,
     cache_dir: PathBuf,
+    wasm_engine: WasmEngine,
 ) {
     let server = Server::new(
         ip_port,
@@ -49,6 +52,7 @@ pub fn start_service(
         internal_auth_token,
         registry_url,
         cache_dir,
+        wasm_engine,
     );
     server.start(&COMMAND_DISPATCHER);
 }
@@ -118,6 +122,8 @@ impl InternalEvent {
 }
 
 struct ServerState {
+    /// Wasmtime engine for compiling WASM to native code (shared with runtime)
+    wasm_engine: WasmEngine,
     enable_auth: bool,
     authorized_users: AuthorizedUsers,
     internal_auth_token: String,
@@ -204,6 +210,7 @@ impl Server {
         internal_auth_token: String,
         registry_url: String,
         cache_dir: PathBuf,
+        wasm_engine: WasmEngine,
     ) -> Self {
         let uploaded_programs_in_disk = DashMap::new();
         let registry_programs_in_disk = DashMap::new();
@@ -222,6 +229,7 @@ impl Server {
         }
 
         let state = Arc::new(ServerState {
+            wasm_engine,
             enable_auth,
             authorized_users,
             internal_auth_token,
@@ -1006,27 +1014,30 @@ impl Session {
                 .uploaded_programs_in_disk
                 .insert(program_key, wasm_file_path.clone());
 
-            // Inform the runtime to compile and register the program
+            // Compile WASM to Component in a blocking thread to avoid starving async runtime
+            let component = match compile_wasm_component(&self.state.wasm_engine, raw_bytes).await {
+                Ok(c) => c,
+                Err(e) => {
+                    self.send_response(corr_id, false, e.to_string()).await;
+                    self.inflight_program_upload = None;
+                    return;
+                }
+            };
+
+            // Inform the runtime to load the pre-compiled component
             let (evt_tx, evt_rx) = oneshot::channel();
-            runtime::Command::CompileProgram {
+            runtime::Command::LoadProgram {
                 namespace,
                 name,
                 version,
                 hash: final_hash.clone(),
-                raw: raw_bytes,
+                component,
                 event: evt_tx,
             }
             .dispatch();
 
-            match evt_rx.await.unwrap() {
-                Ok(()) => {
-                    self.send_response(corr_id, true, final_hash).await;
-                }
-                Err(e) => {
-                    self.send_response(corr_id, false, format!("Failed to compile: {}", e))
-                        .await;
-                }
-            }
+            evt_rx.await.unwrap();
+            self.send_response(corr_id, true, final_hash).await;
             self.inflight_program_upload = None;
         }
     }
@@ -1068,44 +1079,50 @@ impl Session {
 
         let (namespace, name, version) = program_key;
 
-        // Check if the program is already compiled in memory (with hash verification)
-        let (compiled_tx, compiled_rx) = oneshot::channel();
-        runtime::Command::ProgramCompiled {
+        // Check if the program is already loaded in memory (with hash verification)
+        let (loaded_tx, loaded_rx) = oneshot::channel();
+        runtime::Command::ProgramLoaded {
             namespace: namespace.clone(),
             name: name.clone(),
             version: version.clone(),
             hash: hash.clone(),
-            event: compiled_tx,
+            event: loaded_tx,
         }
         .dispatch();
 
-        let is_compiled = compiled_rx.await.unwrap();
+        let is_loaded = loaded_rx.await.unwrap();
 
-        // If not compiled, load from disk and compile
-        if !is_compiled {
+        // If not loaded, read from disk, compile, and load
+        if !is_loaded {
             if let Some(wasm_path) = wasm_path {
                 match tokio::fs::read(&wasm_path).await {
                     Ok(raw_bytes) => {
-                        let (upload_tx, upload_rx) = oneshot::channel();
-                        runtime::Command::CompileProgram {
+                        // Compile WASM to Component in a blocking thread
+                        let component = match compile_wasm_component(
+                            &self.state.wasm_engine,
+                            raw_bytes,
+                        )
+                        .await
+                        {
+                            Ok(c) => c,
+                            Err(e) => {
+                                self.send_launch_result(corr_id, false, e.to_string()).await;
+                                return;
+                            }
+                        };
+
+                        let (load_tx, load_rx) = oneshot::channel();
+                        runtime::Command::LoadProgram {
                             namespace: namespace.clone(),
                             name: name.clone(),
                             version: version.clone(),
                             hash,
-                            raw: raw_bytes,
-                            event: upload_tx,
+                            component,
+                            event: load_tx,
                         }
                         .dispatch();
 
-                        if let Err(e) = upload_rx.await.unwrap() {
-                            self.send_launch_result(
-                                corr_id,
-                                false,
-                                format!("Failed to load program from disk: {}", e),
-                            )
-                            .await;
-                            return;
-                        }
+                        load_rx.await.unwrap();
                     }
                     Err(e) => {
                         self.send_launch_result(
@@ -1178,59 +1195,163 @@ impl Session {
     ) {
         // Parse the inferlet name into namespace, name, and version
         let (namespace, name, version) = parse_inferlet_name(&inferlet);
+        let program_key = (namespace.clone(), name.clone(), version.clone());
 
-        // Attempt to download/cache the inferlet
-        match download_inferlet_from_registry(
-            &self.state.registry_url,
-            &self.state.cache_dir,
-            &namespace,
-            &name,
-            &version,
-        )
-        .await
-        {
-            Ok((program_hash, program_data, _manifest)) => {
-                // The wasm file is already saved by `download_inferlet_from_registry` at:
-                // {cache_dir}/registry/{namespace}/{name}/{version}.wasm
-                let wasm_path = self
-                    .state
-                    .cache_dir
-                    .join("registry")
-                    .join(&namespace)
-                    .join(&name)
-                    .join(format!("{}.wasm", version));
+        // Check if the program is already cached on disk
+        let wasm_path = self
+            .state
+            .registry_programs_in_disk
+            .get(&program_key)
+            .map(|e| e.value().clone());
 
-                // Update the server's registry_programs_in_disk map
-                let program_key = (namespace.clone(), name.clone(), version.clone());
-                self.state
-                    .registry_programs_in_disk
-                    .insert(program_key, wasm_path.clone());
+        if let Some(wasm_path) = wasm_path {
+            // Program is cached on disk - check if it's already loaded in memory
+            let hash = {
+                let hash_path = wasm_path.with_extension("hash");
+                tokio::fs::read_to_string(&hash_path)
+                    .await
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default()
+            };
 
-                // Register the program with the runtime (compile and add to maps)
-                let (evt_tx, evt_rx) = oneshot::channel();
-                runtime::Command::CompileProgram {
-                    namespace: namespace.clone(),
-                    name: name.clone(),
-                    version: version.clone(),
-                    hash: program_hash,
-                    raw: program_data,
-                    event: evt_tx,
+            let (loaded_tx, loaded_rx) = oneshot::channel();
+            runtime::Command::ProgramLoaded {
+                namespace: namespace.clone(),
+                name: name.clone(),
+                version: version.clone(),
+                hash: hash.clone(),
+                event: loaded_tx,
+            }
+            .dispatch();
+
+            let is_loaded = loaded_rx.await.unwrap();
+
+            if !is_loaded {
+                // Not loaded in memory - read from disk, compile, and load
+                match tokio::fs::read(&wasm_path).await {
+                    Ok(raw_bytes) => {
+                        // Compile WASM to Component in a blocking thread
+                        let component = match compile_wasm_component(
+                            &self.state.wasm_engine,
+                            raw_bytes,
+                        )
+                        .await
+                        {
+                            Ok(c) => c,
+                            Err(e) => {
+                                self.send_launch_result(corr_id, false, e.to_string()).await;
+                                return;
+                            }
+                        };
+
+                        let (load_tx, load_rx) = oneshot::channel();
+                        runtime::Command::LoadProgram {
+                            namespace: namespace.clone(),
+                            name: name.clone(),
+                            version: version.clone(),
+                            hash,
+                            component,
+                            event: load_tx,
+                        }
+                        .dispatch();
+
+                        load_rx.await.unwrap();
+                    }
+                    Err(e) => {
+                        self.send_launch_result(
+                            corr_id,
+                            false,
+                            format!("Failed to read program from disk: {}", e),
+                        )
+                        .await;
+                        return;
+                    }
                 }
-                .dispatch();
+            }
+        } else {
+            // Program not cached - download from registry
+            match download_inferlet_from_registry(
+                &self.state.registry_url,
+                &self.state.cache_dir,
+                &namespace,
+                &name,
+                &version,
+            )
+            .await
+            {
+                Ok((program_hash, program_data, _manifest)) => {
+                    // The wasm file is saved by `download_inferlet_from_registry` at:
+                    // {cache_dir}/registry/{namespace}/{name}/{version}.wasm
+                    let wasm_path = self
+                        .state
+                        .cache_dir
+                        .join("registry")
+                        .join(&namespace)
+                        .join(&name)
+                        .join(format!("{}.wasm", version));
 
-                if let Err(e) = evt_rx.await.unwrap() {
-                    self.send_launch_result(
-                        corr_id,
-                        false,
-                        format!("Failed to register program: {}", e),
-                    )
-                    .await;
+                    // Update the server's registry_programs_in_disk map
+                    self.state
+                        .registry_programs_in_disk
+                        .insert(program_key, wasm_path);
+
+                    // Compile WASM to Component in a blocking thread
+                    let component =
+                        match compile_wasm_component(&self.state.wasm_engine, program_data).await {
+                            Ok(c) => c,
+                            Err(e) => {
+                                self.send_launch_result(corr_id, false, e.to_string()).await;
+                                return;
+                            }
+                        };
+
+                    // Register the pre-compiled component with the runtime
+                    let (evt_tx, evt_rx) = oneshot::channel();
+                    runtime::Command::LoadProgram {
+                        namespace: namespace.clone(),
+                        name: name.clone(),
+                        version: version.clone(),
+                        hash: program_hash,
+                        component,
+                        event: evt_tx,
+                    }
+                    .dispatch();
+
+                    evt_rx.await.unwrap();
+                }
+                Err(e) => {
+                    self.send_launch_result(corr_id, false, e.to_string()).await;
                     return;
                 }
+            }
+        }
 
-                // Now launch the instance using the same flow as handle_launch_instance
-                self.handle_launch_instance(corr_id, namespace, name, version, arguments, detached)
+        // Launch the instance
+        let (evt_tx, evt_rx) = oneshot::channel();
+        runtime::Command::LaunchInstance {
+            username: self.username.clone(),
+            namespace,
+            name,
+            version,
+            arguments,
+            detached,
+            event: evt_tx,
+        }
+        .dispatch();
+
+        match evt_rx.await.unwrap() {
+            Ok(instance_id) => {
+                self.state
+                    .client_cmd_txs
+                    .insert(instance_id, self.client_cmd_tx.clone());
+
+                self.send_launch_result(corr_id, true, instance_id.to_string())
                     .await;
+
+                runtime::Command::AllowOutput {
+                    inst_id: instance_id,
+                }
+                .dispatch();
             }
             Err(e) => {
                 self.send_launch_result(corr_id, false, e.to_string()).await;
@@ -1361,44 +1482,50 @@ impl Session {
 
         let (namespace, name, version) = program_key;
 
-        // Check if the program is already compiled in memory (with hash verification)
-        let (compiled_tx, compiled_rx) = oneshot::channel();
-        runtime::Command::ProgramCompiled {
+        // Check if the program is already loaded in memory (with hash verification)
+        let (loaded_tx, loaded_rx) = oneshot::channel();
+        runtime::Command::ProgramLoaded {
             namespace: namespace.clone(),
             name: name.clone(),
             version: version.clone(),
             hash: hash.clone(),
-            event: compiled_tx,
+            event: loaded_tx,
         }
         .dispatch();
 
-        let is_compiled = compiled_rx.await.unwrap();
+        let is_loaded = loaded_rx.await.unwrap();
 
-        // If not compiled, load from disk and compile
-        if !is_compiled {
+        // If not loaded, read from disk, compile, and load
+        if !is_loaded {
             if let Some(wasm_path) = wasm_path {
                 match tokio::fs::read(&wasm_path).await {
                     Ok(raw_bytes) => {
-                        let (upload_tx, upload_rx) = oneshot::channel();
-                        runtime::Command::CompileProgram {
+                        // Compile WASM to Component in a blocking thread
+                        let component = match compile_wasm_component(
+                            &self.state.wasm_engine,
+                            raw_bytes,
+                        )
+                        .await
+                        {
+                            Ok(c) => c,
+                            Err(e) => {
+                                self.send_response(corr_id, false, e.to_string()).await;
+                                return;
+                            }
+                        };
+
+                        let (load_tx, load_rx) = oneshot::channel();
+                        runtime::Command::LoadProgram {
                             namespace: namespace.clone(),
                             name: name.clone(),
                             version: version.clone(),
                             hash,
-                            raw: raw_bytes,
-                            event: upload_tx,
+                            component,
+                            event: load_tx,
                         }
                         .dispatch();
 
-                        if let Err(e) = upload_rx.await.unwrap() {
-                            self.send_response(
-                                corr_id,
-                                false,
-                                format!("Failed to load program from disk: {}", e),
-                            )
-                            .await;
-                            return;
-                        }
+                        load_rx.await.unwrap();
                     }
                     Err(e) => {
                         self.send_response(
@@ -1750,6 +1877,19 @@ fn parse_manifest(manifest: &str) -> Result<(String, String, String)> {
         parts[1].to_string(),
         version.to_string(),
     ))
+}
+
+/// Compiles WASM bytes to a Component in a blocking thread.
+///
+/// This runs the compilation on a dedicated thread pool to avoid blocking the async runtime,
+/// since WASM compilation can be CPU-intensive.
+async fn compile_wasm_component(engine: &WasmEngine, wasm_bytes: Vec<u8>) -> Result<Component> {
+    let engine = engine.clone();
+    match tokio::task::spawn_blocking(move || Component::from_binary(&engine, &wasm_bytes)).await {
+        Ok(Ok(component)) => Ok(component),
+        Ok(Err(e)) => Err(anyhow!("Failed to compile WASM: {}", e)),
+        Err(e) => Err(anyhow!("Compilation task failed: {}", e)),
+    }
 }
 
 /// Parses an inferlet name into (namespace, name, version).
