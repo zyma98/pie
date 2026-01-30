@@ -89,6 +89,7 @@ pub enum Command {
         namespace: String,
         name: String,
         version: String,
+        hash: String,
         arguments: Vec<String>,
         detached: bool,
         event: oneshot::Sender<Result<InstanceId, RuntimeError>>,
@@ -112,6 +113,7 @@ pub enum Command {
         namespace: String,
         name: String,
         version: String,
+        hash: String,
         port: u32,
         arguments: Vec<String>,
         event: oneshot::Sender<Result<(), RuntimeError>>,
@@ -279,12 +281,13 @@ impl Service for Runtime {
                 namespace,
                 name,
                 version,
+                hash,
                 event,
                 arguments,
                 detached,
             } => {
                 let res = self
-                    .launch_instance(username, namespace, name, version, arguments, detached)
+                    .launch_instance(username, namespace, name, version, hash, arguments, detached)
                     .await;
                 event
                     .send(res)
@@ -313,12 +316,13 @@ impl Service for Runtime {
                 namespace,
                 name,
                 version,
+                hash,
                 port,
                 arguments,
                 event,
             } => {
                 let _ = self
-                    .launch_server_instance(username, namespace, name, version, port, arguments)
+                    .launch_server_instance(username, namespace, name, version, hash, port, arguments)
                     .await;
                 event.send(Ok(())).unwrap();
             }
@@ -449,13 +453,20 @@ impl Runtime {
         namespace: &str,
         name: &str,
         version: &str,
+        hash: &str,
     ) -> Result<Component, RuntimeError> {
         let key = (namespace.to_string(), name.to_string(), version.to_string());
 
         // Get the component from memory (the server is responsible for issuing compile commands)
         match self.compiled_programs.get(&key) {
             Some(entry) => {
-                let (component, _hash) = entry.value();
+                let (component, stored_hash) = entry.value();
+                if stored_hash != hash {
+                    return Err(RuntimeError::MissingProgram(format!(
+                        "{}/{} @ {} (hash mismatch: expected {}, got {})",
+                        namespace, name, version, hash, stored_hash
+                    )));
+                }
                 Ok(component.clone())
             }
             None => Err(RuntimeError::MissingProgram(format!(
@@ -472,10 +483,11 @@ impl Runtime {
         namespace: String,
         name: String,
         version: String,
+        hash: String,
         arguments: Vec<String>,
         detached: bool,
     ) -> Result<InstanceId, RuntimeError> {
-        let component = self.get_component(&namespace, &name, &version)?;
+        let component = self.get_component(&namespace, &name, &version, &hash)?;
         let instance_id = Uuid::new_v4();
 
         // Instantiate and run in a task
@@ -580,11 +592,12 @@ impl Runtime {
         namespace: String,
         name: String,
         version: String,
+        hash: String,
         port: u32,
         arguments: Vec<String>,
     ) -> Result<InstanceId, RuntimeError> {
         let instance_id = Uuid::new_v4();
-        let component = self.get_component(&namespace, &name, &version)?;
+        let component = self.get_component(&namespace, &name, &version, &hash)?;
 
         // Instantiate and run in a task
         let engine = self.engine.clone();

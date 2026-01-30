@@ -133,10 +133,10 @@ struct ServerState {
     clients: DashMap<ClientId, JoinHandle<()>>,
     client_cmd_txs: DashMap<InstanceId, mpsc::Sender<SessionEvent>>,
     backend_status: Arc<BackendStatus>,
-    /// Paths to uploaded programs on disk, keyed by (namespace, name, version)
-    uploaded_programs_in_disk: DashMap<(String, String, String), PathBuf>,
-    /// Paths to registry-downloaded programs on disk, keyed by (namespace, name, version)
-    registry_programs_in_disk: DashMap<(String, String, String), PathBuf>,
+    /// Uploaded programs on disk, keyed by (namespace, name, version), value is (path, hash)
+    uploaded_programs_in_disk: DashMap<(String, String, String), (PathBuf, String)>,
+    /// Registry-downloaded programs on disk, keyed by (namespace, name, version), value is (path, hash)
+    registry_programs_in_disk: DashMap<(String, String, String), (PathBuf, String)>,
 }
 
 struct BackendStatus {
@@ -605,11 +605,8 @@ impl Session {
                     arguments,
                     detached,
                 } => {
-                    let (namespace, name, version) = parse_inferlet_name(&inferlet);
-                    self.handle_launch_instance(
-                        corr_id, namespace, name, version, arguments, detached,
-                    )
-                    .await
+                    self.handle_launch_instance(corr_id, inferlet, arguments, detached)
+                        .await
                 }
                 ClientMessage::LaunchInstanceFromRegistry {
                     corr_id,
@@ -634,11 +631,8 @@ impl Session {
                     inferlet,
                     arguments,
                 } => {
-                    let (namespace, name, version) = parse_inferlet_name(&inferlet);
-                    self.handle_launch_server_instance(
-                        corr_id, port, namespace, name, version, arguments,
-                    )
-                    .await
+                    self.handle_launch_server_instance(corr_id, port, inferlet, arguments)
+                        .await
                 }
                 ClientMessage::SignalInstance {
                     instance_id,
@@ -1012,7 +1006,7 @@ impl Session {
             let program_key = (namespace.clone(), name.clone(), version.clone());
             self.state
                 .uploaded_programs_in_disk
-                .insert(program_key, wasm_file_path.clone());
+                .insert(program_key, (wasm_file_path.clone(), final_hash.clone()));
 
             // Compile WASM to Component in a blocking thread to avoid starving async runtime
             let component = match compile_wasm_component(&self.state.wasm_engine, raw_bytes).await {
@@ -1045,141 +1039,45 @@ impl Session {
     async fn handle_launch_instance(
         &mut self,
         corr_id: u32,
-        namespace: String,
-        name: String,
-        version: String,
+        inferlet: String,
         arguments: Vec<String>,
         detached: bool,
     ) {
-        let program_key = (namespace, name, version);
+        let program_key = parse_inferlet_name(&inferlet);
 
-        // Look up the wasm path from disk maps to get the hash
-        let wasm_path = self
+        // First, check if the program exists in uploaded programs
+        if let Some((wasm_path, hash)) = self
             .state
             .uploaded_programs_in_disk
             .get(&program_key)
             .map(|e| e.value().clone())
-            .or_else(|| {
-                self.state
-                    .registry_programs_in_disk
-                    .get(&program_key)
-                    .map(|e| e.value().clone())
-            });
+        {
+            let (namespace, name, version) = program_key;
 
-        // Read the hash from the hash file (if available)
-        let hash = if let Some(ref wasm_path) = wasm_path {
-            let hash_path = wasm_path.with_extension("hash");
-            tokio::fs::read_to_string(&hash_path)
-                .await
-                .map(|s| s.trim().to_string())
-                .unwrap_or_default()
+            // Program found in uploaded programs - ensure it's loaded and launch it
+            if let Err(e) = ensure_program_loaded_from_path(
+                &self.state.wasm_engine,
+                &wasm_path,
+                hash.clone(),
+                namespace.clone(),
+                name.clone(),
+                version.clone(),
+            )
+            .await
+            {
+                self.send_launch_result(corr_id, false, e).await;
+                return;
+            }
+
+            // Launch the instance
+            self.launch_instance_from_loaded_program(
+                corr_id, namespace, name, version, hash, arguments, detached,
+            )
+            .await;
+        // Program not found in uploaded programs - fall back to registry
         } else {
-            String::new()
-        };
-
-        let (namespace, name, version) = program_key;
-
-        // Check if the program is already loaded in memory (with hash verification)
-        let (loaded_tx, loaded_rx) = oneshot::channel();
-        runtime::Command::ProgramLoaded {
-            namespace: namespace.clone(),
-            name: name.clone(),
-            version: version.clone(),
-            hash: hash.clone(),
-            event: loaded_tx,
-        }
-        .dispatch();
-
-        let is_loaded = loaded_rx.await.unwrap();
-
-        // If not loaded, read from disk, compile, and load
-        if !is_loaded {
-            if let Some(wasm_path) = wasm_path {
-                match tokio::fs::read(&wasm_path).await {
-                    Ok(raw_bytes) => {
-                        // Compile WASM to Component in a blocking thread
-                        let component = match compile_wasm_component(
-                            &self.state.wasm_engine,
-                            raw_bytes,
-                        )
-                        .await
-                        {
-                            Ok(c) => c,
-                            Err(e) => {
-                                self.send_launch_result(corr_id, false, e.to_string()).await;
-                                return;
-                            }
-                        };
-
-                        let (load_tx, load_rx) = oneshot::channel();
-                        runtime::Command::LoadProgram {
-                            namespace: namespace.clone(),
-                            name: name.clone(),
-                            version: version.clone(),
-                            hash,
-                            component,
-                            event: load_tx,
-                        }
-                        .dispatch();
-
-                        load_rx.await.unwrap();
-                    }
-                    Err(e) => {
-                        self.send_launch_result(
-                            corr_id,
-                            false,
-                            format!("Failed to read program from disk at {:?}: {}", wasm_path, e),
-                        )
-                        .await;
-                        return;
-                    }
-                }
-            }
-        }
-
-        let (evt_tx, evt_rx) = oneshot::channel();
-
-        runtime::Command::LaunchInstance {
-            username: self.username.clone(),
-            namespace,
-            name,
-            version,
-            arguments,
-            detached,
-            event: evt_tx,
-        }
-        .dispatch();
-
-        match evt_rx.await.unwrap() {
-            // The instance was launched successfully. Notify the client about the instance ID.
-            Ok(instance_id) => {
-                // If the instance is not detached, add it to the attached instances so that its
-                // output can be streamed to the client after it is launched.
-                if !detached {
-                    self.state
-                        .client_cmd_txs
-                        .insert(instance_id, self.client_cmd_tx.clone());
-                    self.attached_instances.push(instance_id);
-                }
-
-                // Send the instance ID to the client before allowing output. This is especially
-                // important for attached instances to prevent a race condition where output
-                // arrives at the client side before the client receives the instance ID.
-                self.send_launch_result(corr_id, true, instance_id.to_string())
-                    .await;
-
-                // Allow the instance to start producing output. We must do this after sending the
-                // instance ID to the client to prevent a race condition where output arrives at
-                // the client side before the client receives the instance ID.
-                runtime::Command::AllowOutput {
-                    inst_id: instance_id,
-                }
-                .dispatch();
-            }
-            // The instance failed to launch. Notify the client about the error.
-            Err(e) => {
-                self.send_launch_result(corr_id, false, e.to_string()).await;
-            }
+            self.handle_launch_instance_from_registry(corr_id, inferlet, arguments, detached)
+                .await;
         }
     }
 
@@ -1198,76 +1096,32 @@ impl Session {
         let program_key = (namespace.clone(), name.clone(), version.clone());
 
         // Check if the program is already cached on disk
-        let wasm_path = self
+        if let Some((wasm_path, hash)) = self
             .state
             .registry_programs_in_disk
             .get(&program_key)
-            .map(|e| e.value().clone());
-
-        if let Some(wasm_path) = wasm_path {
-            // Program is cached on disk - check if it's already loaded in memory
-            let hash = {
-                let hash_path = wasm_path.with_extension("hash");
-                tokio::fs::read_to_string(&hash_path)
-                    .await
-                    .map(|s| s.trim().to_string())
-                    .unwrap_or_default()
-            };
-
-            let (loaded_tx, loaded_rx) = oneshot::channel();
-            runtime::Command::ProgramLoaded {
-                namespace: namespace.clone(),
-                name: name.clone(),
-                version: version.clone(),
-                hash: hash.clone(),
-                event: loaded_tx,
+            .map(|e| e.value().clone())
+        {
+            // Program is cached on disk - ensure it's loaded
+            if let Err(e) = ensure_program_loaded_from_path(
+                &self.state.wasm_engine,
+                &wasm_path,
+                hash.clone(),
+                namespace.clone(),
+                name.clone(),
+                version.clone(),
+            )
+            .await
+            {
+                self.send_launch_result(corr_id, false, e).await;
+                return;
             }
-            .dispatch();
 
-            let is_loaded = loaded_rx.await.unwrap();
-
-            if !is_loaded {
-                // Not loaded in memory - read from disk, compile, and load
-                match tokio::fs::read(&wasm_path).await {
-                    Ok(raw_bytes) => {
-                        // Compile WASM to Component in a blocking thread
-                        let component = match compile_wasm_component(
-                            &self.state.wasm_engine,
-                            raw_bytes,
-                        )
-                        .await
-                        {
-                            Ok(c) => c,
-                            Err(e) => {
-                                self.send_launch_result(corr_id, false, e.to_string()).await;
-                                return;
-                            }
-                        };
-
-                        let (load_tx, load_rx) = oneshot::channel();
-                        runtime::Command::LoadProgram {
-                            namespace: namespace.clone(),
-                            name: name.clone(),
-                            version: version.clone(),
-                            hash,
-                            component,
-                            event: load_tx,
-                        }
-                        .dispatch();
-
-                        load_rx.await.unwrap();
-                    }
-                    Err(e) => {
-                        self.send_launch_result(
-                            corr_id,
-                            false,
-                            format!("Failed to read program from disk: {}", e),
-                        )
-                        .await;
-                        return;
-                    }
-                }
-            }
+            // Launch the instance
+            self.launch_instance_from_loaded_program(
+                corr_id, namespace, name, version, hash, arguments, detached,
+            )
+            .await;
         } else {
             // Program not cached - download from registry
             match download_inferlet_from_registry(
@@ -1293,7 +1147,7 @@ impl Session {
                     // Update the server's registry_programs_in_disk map
                     self.state
                         .registry_programs_in_disk
-                        .insert(program_key, wasm_path);
+                        .insert(program_key, (wasm_path, program_hash.clone()));
 
                     // Compile WASM to Component in a blocking thread
                     let component =
@@ -1311,13 +1165,25 @@ impl Session {
                         namespace: namespace.clone(),
                         name: name.clone(),
                         version: version.clone(),
-                        hash: program_hash,
+                        hash: program_hash.clone(),
                         component,
                         event: evt_tx,
                     }
                     .dispatch();
 
                     evt_rx.await.unwrap();
+
+                    // Launch the instance
+                    self.launch_instance_from_loaded_program(
+                        corr_id,
+                        namespace,
+                        name,
+                        version,
+                        program_hash,
+                        arguments,
+                        detached,
+                    )
+                    .await;
                 }
                 Err(e) => {
                     self.send_launch_result(corr_id, false, e.to_string()).await;
@@ -1325,14 +1191,26 @@ impl Session {
                 }
             }
         }
+    }
 
-        // Launch the instance
+    /// Internal helper to launch an instance after the program is already loaded.
+    async fn launch_instance_from_loaded_program(
+        &mut self,
+        corr_id: u32,
+        namespace: String,
+        name: String,
+        version: String,
+        hash: String,
+        arguments: Vec<String>,
+        detached: bool,
+    ) {
         let (evt_tx, evt_rx) = oneshot::channel();
         runtime::Command::LaunchInstance {
             username: self.username.clone(),
             namespace,
             name,
             version,
+            hash,
             arguments,
             detached,
             event: evt_tx,
@@ -1341,13 +1219,24 @@ impl Session {
 
         match evt_rx.await.unwrap() {
             Ok(instance_id) => {
-                self.state
-                    .client_cmd_txs
-                    .insert(instance_id, self.client_cmd_tx.clone());
+                // If the instance is not detached, add it to the attached instances so that its
+                // output can be streamed to the client after it is launched.
+                if !detached {
+                    self.state
+                        .client_cmd_txs
+                        .insert(instance_id, self.client_cmd_tx.clone());
+                    self.attached_instances.push(instance_id);
+                }
 
+                // Send the instance ID to the client before allowing output. This is especially
+                // important for attached instances to prevent a race condition where output
+                // arrives at the client side before the client receives the instance ID.
                 self.send_launch_result(corr_id, true, instance_id.to_string())
                     .await;
 
+                // Allow the instance to start producing output. We must do this after sending the
+                // instance ID to the client to prevent a race condition where output arrives at
+                // the client side before the client receives the instance ID.
                 runtime::Command::AllowOutput {
                     inst_id: instance_id,
                 }
@@ -1449,15 +1338,14 @@ impl Session {
         &mut self,
         corr_id: u32,
         port: u32,
-        namespace: String,
-        name: String,
-        version: String,
+        inferlet: String,
         arguments: Vec<String>,
     ) {
-        let program_key = (namespace, name, version);
+        let (namespace, name, version) = parse_inferlet_name(&inferlet);
+        let program_key = (namespace.clone(), name.clone(), version.clone());
 
-        // Look up the wasm path from disk maps to get the hash
-        let wasm_path = self
+        // Look up the wasm path and hash from disk maps
+        let program_info = self
             .state
             .uploaded_programs_in_disk
             .get(&program_key)
@@ -1469,94 +1357,46 @@ impl Session {
                     .map(|e| e.value().clone())
             });
 
-        // Read the hash from the hash file (if available)
-        let hash = if let Some(ref wasm_path) = wasm_path {
-            let hash_path = wasm_path.with_extension("hash");
-            tokio::fs::read_to_string(&hash_path)
-                .await
-                .map(|s| s.trim().to_string())
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
+        // Ensure the program is loaded
+        if let Some((wasm_path, hash)) = program_info {
+            if let Err(e) = ensure_program_loaded_from_path(
+                &self.state.wasm_engine,
+                &wasm_path,
+                hash.clone(),
+                namespace.clone(),
+                name.clone(),
+                version.clone(),
+            )
+            .await
+            {
+                self.send_response(corr_id, false, e).await;
+                return;
+            }
 
-        let (namespace, name, version) = program_key;
+            let (evt_tx, evt_rx) = oneshot::channel();
+            runtime::Command::LaunchServerInstance {
+                username: self.username.clone(),
+                namespace,
+                name,
+                version,
+                hash,
+                port,
+                arguments,
+                event: evt_tx,
+            }
+            .dispatch();
 
-        // Check if the program is already loaded in memory (with hash verification)
-        let (loaded_tx, loaded_rx) = oneshot::channel();
-        runtime::Command::ProgramLoaded {
-            namespace: namespace.clone(),
-            name: name.clone(),
-            version: version.clone(),
-            hash: hash.clone(),
-            event: loaded_tx,
-        }
-        .dispatch();
-
-        let is_loaded = loaded_rx.await.unwrap();
-
-        // If not loaded, read from disk, compile, and load
-        if !is_loaded {
-            if let Some(wasm_path) = wasm_path {
-                match tokio::fs::read(&wasm_path).await {
-                    Ok(raw_bytes) => {
-                        // Compile WASM to Component in a blocking thread
-                        let component = match compile_wasm_component(
-                            &self.state.wasm_engine,
-                            raw_bytes,
-                        )
+            match evt_rx.await.unwrap() {
+                Ok(_) => {
+                    self.send_response(corr_id, true, "server launched".to_string())
                         .await
-                        {
-                            Ok(c) => c,
-                            Err(e) => {
-                                self.send_response(corr_id, false, e.to_string()).await;
-                                return;
-                            }
-                        };
-
-                        let (load_tx, load_rx) = oneshot::channel();
-                        runtime::Command::LoadProgram {
-                            namespace: namespace.clone(),
-                            name: name.clone(),
-                            version: version.clone(),
-                            hash,
-                            component,
-                            event: load_tx,
-                        }
-                        .dispatch();
-
-                        load_rx.await.unwrap();
-                    }
-                    Err(e) => {
-                        self.send_response(
-                            corr_id,
-                            false,
-                            format!("Failed to read program from disk at {:?}: {}", wasm_path, e),
-                        )
-                        .await;
-                        return;
-                    }
                 }
+                Err(e) => self.send_response(corr_id, false, e.to_string()).await,
             }
-        }
-
-        let (evt_tx, evt_rx) = oneshot::channel();
-        runtime::Command::LaunchServerInstance {
-            username: self.username.clone(),
-            namespace,
-            name,
-            version,
-            port,
-            arguments,
-            event: evt_tx,
-        }
-        .dispatch();
-        match evt_rx.await.unwrap() {
-            Ok(_) => {
-                self.send_response(corr_id, true, "server launched".to_string())
-                    .await
-            }
-            Err(e) => self.send_response(corr_id, false, e.to_string()).await,
+        } else {
+            self.send_response(corr_id, false, "Program not found".to_string())
+                .await;
+            return;
         }
     }
 
@@ -1783,7 +1623,7 @@ impl Drop for Session {
 /// Helper to load programs from a directory with structure {dir}/{namespace}/{name}/{version}.wasm
 fn load_programs_from_dir(
     dir: &std::path::Path,
-    programs_in_disk: &DashMap<(String, String, String), PathBuf>,
+    programs_in_disk: &DashMap<(String, String, String), (PathBuf, String)>,
 ) {
     // Iterate through namespace directories
     let ns_entries = match std::fs::read_dir(dir) {
@@ -1832,8 +1672,15 @@ fn load_programs_from_dir(
                         None => continue,
                     };
 
+                    // Read the hash from the corresponding .hash file
+                    let hash_path = file_path.with_extension("hash");
+                    let hash = match std::fs::read_to_string(&hash_path) {
+                        Ok(h) => h.trim().to_string(),
+                        Err(_) => continue, // Skip programs without a hash file
+                    };
+
                     let key = (namespace.clone(), name.clone(), version);
-                    programs_in_disk.insert(key, file_path);
+                    programs_in_disk.insert(key, (file_path, hash));
                 }
             }
         }
@@ -1890,6 +1737,60 @@ async fn compile_wasm_component(engine: &WasmEngine, wasm_bytes: Vec<u8>) -> Res
         Ok(Err(e)) => Err(anyhow!("Failed to compile WASM: {}", e)),
         Err(e) => Err(anyhow!("Compilation task failed: {}", e)),
     }
+}
+
+/// Ensures a program is loaded in the runtime from a given wasm file path with a known hash.
+///
+/// This checks if the program is already loaded in memory (with hash verification).
+/// If not, it reads the wasm from disk, compiles it, and loads it into the runtime.
+///
+/// Returns Ok(()) on success, or Err(error_message) on failure.
+async fn ensure_program_loaded_from_path(
+    wasm_engine: &WasmEngine,
+    wasm_path: &PathBuf,
+    hash: String,
+    namespace: String,
+    name: String,
+    version: String,
+) -> Result<(), String> {
+    // Check if the program is already loaded in memory (with hash verification)
+    let (loaded_tx, loaded_rx) = oneshot::channel();
+    runtime::Command::ProgramLoaded {
+        namespace: namespace.clone(),
+        name: name.clone(),
+        version: version.clone(),
+        hash: hash.clone(),
+        event: loaded_tx,
+    }
+    .dispatch();
+
+    let is_loaded = loaded_rx.await.unwrap();
+
+    if !is_loaded {
+        // Read from disk, compile, and load
+        let raw_bytes = tokio::fs::read(wasm_path)
+            .await
+            .map_err(|e| format!("Failed to read program from disk at {:?}: {}", wasm_path, e))?;
+
+        let component = compile_wasm_component(wasm_engine, raw_bytes)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let (load_tx, load_rx) = oneshot::channel();
+        runtime::Command::LoadProgram {
+            namespace: namespace,
+            name: name,
+            version: version,
+            hash: hash,
+            component,
+            event: load_tx,
+        }
+        .dispatch();
+
+        load_rx.await.unwrap();
+    }
+
+    Ok(())
 }
 
 /// Parses an inferlet name into (namespace, name, version).
