@@ -121,6 +121,56 @@ impl InternalEvent {
     }
 }
 
+/// Identifier for an inferlet (namespace, name, version).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ProgramName {
+    namespace: String,
+    name: String,
+    version: String,
+}
+
+impl ProgramName {
+    /// Parses an inferlet identifier from a string.
+    ///
+    /// Supported formats:
+    /// - `namespace/name@version` -> (namespace, name, version)
+    /// - `namespace/name` -> (namespace, name, "latest")
+    /// - `name@version` -> ("std", name, version)
+    /// - `name` -> ("std", name, "latest")
+    fn parse(s: &str) -> Self {
+        // Split on @ to get name_part and version
+        let (name_part, version) = if let Some((n, v)) = s.split_once('@') {
+            (n, v.to_string())
+        } else {
+            (s, "latest".to_string())
+        };
+
+        // Split on / to get namespace and name
+        let (namespace, name) = if let Some((ns, n)) = name_part.split_once('/') {
+            (ns.to_string(), n.to_string())
+        } else {
+            ("std".to_string(), name_part.to_string())
+        };
+
+        Self {
+            namespace,
+            name,
+            version,
+        }
+    }
+}
+
+/// Metadata for a cached inferlet program on disk.
+#[derive(Clone, Debug)]
+struct ProgramMetadata {
+    /// Path to the WASM binary file
+    wasm_path: PathBuf,
+    /// Blake3 hash of the WASM binary
+    hash: String,
+    /// Dependencies of this inferlet
+    dependencies: Vec<ProgramName>,
+}
+
 struct ServerState {
     /// Wasmtime engine for compiling WASM to native code (shared with runtime)
     wasm_engine: WasmEngine,
@@ -133,10 +183,10 @@ struct ServerState {
     clients: DashMap<ClientId, JoinHandle<()>>,
     client_cmd_txs: DashMap<InstanceId, mpsc::Sender<SessionEvent>>,
     backend_status: Arc<BackendStatus>,
-    /// Uploaded programs on disk, keyed by (namespace, name, version), value is (path, hash)
-    uploaded_programs_in_disk: DashMap<(String, String, String), (PathBuf, String)>,
-    /// Registry-downloaded programs on disk, keyed by (namespace, name, version), value is (path, hash)
-    registry_programs_in_disk: DashMap<(String, String, String), (PathBuf, String)>,
+    /// Uploaded programs on disk, keyed by program name (namespace, name, version)
+    uploaded_programs_in_disk: DashMap<ProgramName, ProgramMetadata>,
+    /// Registry-downloaded programs on disk, keyed by program name (namespace, name, version)
+    registry_programs_in_disk: DashMap<ProgramName, ProgramMetadata>,
 }
 
 struct BackendStatus {
@@ -778,15 +828,13 @@ impl Session {
                 } else {
                     (record.clone(), None)
                 };
-                let program_key = parse_inferlet_name(&inferlet_part);
+                let program_name = ProgramName::parse(&inferlet_part);
 
                 // Check only uploaded programs (not registry programs)
                 let program_exists = self
                     .state
                     .uploaded_programs_in_disk
-                    .contains_key(&program_key);
-
-                let (namespace, name, version) = program_key;
+                    .contains_key(&program_name);
 
                 // If hash is provided, verify it matches
                 let result = if program_exists && hash.is_some() {
@@ -796,9 +844,9 @@ impl Session {
                         .state
                         .cache_dir
                         .join("programs")
-                        .join(&namespace)
-                        .join(&name)
-                        .join(format!("{}.hash", version));
+                        .join(&program_name.namespace)
+                        .join(&program_name.name)
+                        .join(format!("{}.hash", program_name.version));
 
                     let stored_hash = tokio::fs::read_to_string(&hash_file_path).await;
 
@@ -943,9 +991,9 @@ impl Session {
                 return;
             }
 
-            // Parse the manifest to extract namespace, name, and version
+            // Parse the manifest to extract namespace, name, version, and dependencies
             let manifest_content = mem::take(&mut inflight.manifest);
-            let (namespace, name, version) = match parse_manifest(&manifest_content) {
+            let program_name = match parse_program_name_from_manifest(&manifest_content) {
                 Ok(result) => result,
                 Err(e) => {
                     self.send_response(corr_id, false, format!("Failed to parse manifest: {}", e))
@@ -954,14 +1002,15 @@ impl Session {
                     return;
                 }
             };
+            let dependencies = parse_program_dependencies_from_manifest(&manifest_content);
 
             // Write to disk: {cache_dir}/programs/{namespace}/{name}/{version}.{wasm,toml,hash}
             let dir_path = self
                 .state
                 .cache_dir
                 .join("programs")
-                .join(&namespace)
-                .join(&name);
+                .join(&program_name.namespace)
+                .join(&program_name.name);
             if let Err(e) = tokio::fs::create_dir_all(&dir_path).await {
                 self.send_response(
                     corr_id,
@@ -973,9 +1022,9 @@ impl Session {
                 return;
             }
 
-            let wasm_file_path = dir_path.join(format!("{}.wasm", version));
-            let manifest_file_path = dir_path.join(format!("{}.toml", version));
-            let hash_file_path = dir_path.join(format!("{}.hash", version));
+            let wasm_file_path = dir_path.join(format!("{}.wasm", program_name.version));
+            let manifest_file_path = dir_path.join(format!("{}.toml", program_name.version));
+            let hash_file_path = dir_path.join(format!("{}.hash", program_name.version));
 
             let raw_bytes = mem::take(&mut inflight.buffer);
 
@@ -1003,10 +1052,14 @@ impl Session {
             }
 
             // Update the server's uploaded_programs_in_disk map
-            let program_key = (namespace.clone(), name.clone(), version.clone());
-            self.state
-                .uploaded_programs_in_disk
-                .insert(program_key, (wasm_file_path.clone(), final_hash.clone()));
+            self.state.uploaded_programs_in_disk.insert(
+                program_name,
+                ProgramMetadata {
+                    wasm_path: wasm_file_path.clone(),
+                    hash: final_hash.clone(),
+                    dependencies,
+                },
+            );
 
             // Compile WASM to Component in a blocking thread to avoid starving async runtime
             let component = match compile_wasm_component(&self.state.wasm_engine, raw_bytes).await {
@@ -1040,25 +1093,29 @@ impl Session {
         arguments: Vec<String>,
         detached: bool,
     ) {
-        let program_key = parse_inferlet_name(&inferlet);
+        let program_name = ProgramName::parse(&inferlet);
 
         // First, check if the program exists in uploaded programs
-        if let Some((wasm_path, hash)) = self
+        if let Some(metadata) = self
             .state
             .uploaded_programs_in_disk
-            .get(&program_key)
+            .get(&program_name)
             .map(|e| e.value().clone())
         {
             // Program found in uploaded programs - ensure it's loaded and launch it
-            if let Err(e) =
-                ensure_program_loaded_from_path(&self.state.wasm_engine, &wasm_path, &hash).await
+            if let Err(e) = ensure_program_loaded_from_path(
+                &self.state.wasm_engine,
+                &metadata.wasm_path,
+                &metadata.hash,
+            )
+            .await
             {
                 self.send_launch_result(corr_id, false, e).await;
                 return;
             }
 
             // Launch the instance
-            self.launch_instance_from_loaded_program(corr_id, hash, arguments, detached)
+            self.launch_instance_from_loaded_program(corr_id, metadata.hash, arguments, detached)
                 .await;
         // Program not found in uploaded programs - fall back to registry
         } else {
@@ -1078,53 +1135,64 @@ impl Session {
         detached: bool,
     ) {
         // Parse the inferlet name into namespace, name, and version
-        let (namespace, name, version) = parse_inferlet_name(&inferlet);
-        let program_key = (namespace.clone(), name.clone(), version.clone());
+        let program_name = ProgramName::parse(&inferlet);
 
         // Check if the program is already cached on disk
-        if let Some((wasm_path, hash)) = self
+        if let Some(metadata) = self
             .state
             .registry_programs_in_disk
-            .get(&program_key)
+            .get(&program_name)
             .map(|e| e.value().clone())
         {
             // Program is cached on disk - ensure it's loaded
-            if let Err(e) =
-                ensure_program_loaded_from_path(&self.state.wasm_engine, &wasm_path, &hash).await
+            if let Err(e) = ensure_program_loaded_from_path(
+                &self.state.wasm_engine,
+                &metadata.wasm_path,
+                &metadata.hash,
+            )
+            .await
             {
                 self.send_launch_result(corr_id, false, e).await;
                 return;
             }
 
             // Launch the instance
-            self.launch_instance_from_loaded_program(corr_id, hash, arguments, detached)
+            self.launch_instance_from_loaded_program(corr_id, metadata.hash, arguments, detached)
                 .await;
         } else {
             // Program not cached - download from registry
             match download_inferlet_from_registry(
                 &self.state.registry_url,
                 &self.state.cache_dir,
-                &namespace,
-                &name,
-                &version,
+                &program_name.namespace,
+                &program_name.name,
+                &program_name.version,
             )
             .await
             {
-                Ok((program_hash, program_data, _manifest)) => {
+                Ok((program_hash, program_data, manifest)) => {
                     // The wasm file is saved by `download_inferlet_from_registry` at:
                     // {cache_dir}/registry/{namespace}/{name}/{version}.wasm
                     let wasm_path = self
                         .state
                         .cache_dir
                         .join("registry")
-                        .join(&namespace)
-                        .join(&name)
-                        .join(format!("{}.wasm", version));
+                        .join(&program_name.namespace)
+                        .join(&program_name.name)
+                        .join(format!("{}.wasm", program_name.version));
+
+                    // Parse the manifest to extract dependencies
+                    let dependencies = parse_program_dependencies_from_manifest(&manifest);
 
                     // Update the server's registry_programs_in_disk map
-                    self.state
-                        .registry_programs_in_disk
-                        .insert(program_key, (wasm_path, program_hash.clone()));
+                    self.state.registry_programs_in_disk.insert(
+                        program_name.clone(),
+                        ProgramMetadata {
+                            wasm_path,
+                            hash: program_hash.clone(),
+                            dependencies,
+                        },
+                    );
 
                     // Compile WASM to Component in a blocking thread
                     let component =
@@ -1306,25 +1374,29 @@ impl Session {
         inferlet: String,
         arguments: Vec<String>,
     ) {
-        let program_key = parse_inferlet_name(&inferlet);
+        let program_name = ProgramName::parse(&inferlet);
 
-        // Look up the wasm path and hash from disk maps
-        let program_info = self
+        // Look up the program metadata from disk maps
+        let program_metadata = self
             .state
             .uploaded_programs_in_disk
-            .get(&program_key)
+            .get(&program_name)
             .map(|e| e.value().clone())
             .or_else(|| {
                 self.state
                     .registry_programs_in_disk
-                    .get(&program_key)
+                    .get(&program_name)
                     .map(|e| e.value().clone())
             });
 
         // Ensure the program is loaded
-        if let Some((wasm_path, hash)) = program_info {
-            if let Err(e) =
-                ensure_program_loaded_from_path(&self.state.wasm_engine, &wasm_path, &hash).await
+        if let Some(metadata) = program_metadata {
+            if let Err(e) = ensure_program_loaded_from_path(
+                &self.state.wasm_engine,
+                &metadata.wasm_path,
+                &metadata.hash,
+            )
+            .await
             {
                 self.send_response(corr_id, false, e).await;
                 return;
@@ -1333,7 +1405,7 @@ impl Session {
             let (evt_tx, evt_rx) = oneshot::channel();
             runtime::Command::LaunchServerInstance {
                 username: self.username.clone(),
-                hash,
+                hash: metadata.hash,
                 port,
                 arguments,
                 event: evt_tx,
@@ -1577,7 +1649,7 @@ impl Drop for Session {
 /// Helper to load programs from a directory with structure {dir}/{namespace}/{name}/{version}.wasm
 fn load_programs_from_dir(
     dir: &std::path::Path,
-    programs_in_disk: &DashMap<(String, String, String), (PathBuf, String)>,
+    programs_in_disk: &DashMap<ProgramName, ProgramMetadata>,
 ) {
     // Iterate through namespace directories
     let ns_entries = match std::fs::read_dir(dir) {
@@ -1633,19 +1705,39 @@ fn load_programs_from_dir(
                         Err(_) => continue, // Skip programs without a hash file
                     };
 
-                    let key = (namespace.clone(), name.clone(), version);
-                    programs_in_disk.insert(key, (file_path, hash));
+                    // Read and parse the manifest to extract dependencies
+                    let manifest_path = file_path.with_extension("toml");
+                    let dependencies = match std::fs::read_to_string(&manifest_path) {
+                        Ok(manifest_content) => {
+                            parse_program_dependencies_from_manifest(&manifest_content)
+                        }
+                        Err(_) => continue, // Skip programs without a manifest file
+                    };
+
+                    let program_name = ProgramName {
+                        namespace: namespace.clone(),
+                        name: name.clone(),
+                        version,
+                    };
+                    programs_in_disk.insert(
+                        program_name,
+                        ProgramMetadata {
+                            wasm_path: file_path,
+                            hash,
+                            dependencies,
+                        },
+                    );
                 }
             }
         }
     }
 }
 
-/// Parses a manifest TOML string to extract namespace, name, and version.
+/// Parses a manifest TOML string to extract the program name (namespace, name, version).
 ///
 /// The manifest must have a [package] section with "name" (in "namespace/name" format)
 /// and "version" fields.
-fn parse_manifest(manifest: &str) -> Result<(String, String, String)> {
+fn parse_program_name_from_manifest(manifest: &str) -> Result<ProgramName> {
     let table: toml::Table =
         toml::from_str(manifest).map_err(|e| anyhow!("Failed to parse manifest TOML: {}", e))?;
 
@@ -1673,11 +1765,38 @@ fn parse_manifest(manifest: &str) -> Result<(String, String, String)> {
         );
     }
 
-    Ok((
-        parts[0].to_string(),
-        parts[1].to_string(),
-        version.to_string(),
-    ))
+    Ok(ProgramName {
+        namespace: parts[0].to_string(),
+        name: parts[1].to_string(),
+        version: version.to_string(),
+    })
+}
+
+/// Parses a manifest TOML string to extract the dependencies.
+///
+/// The optional "dependencies" field in the [package] section is an array of strings
+/// in the format "namespace/name@version". Returns an empty vector if parsing fails
+/// or no dependencies are specified.
+fn parse_program_dependencies_from_manifest(manifest: &str) -> Vec<ProgramName> {
+    let table: toml::Table = match toml::from_str(manifest) {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+
+    let package = match table.get("package").and_then(|p| p.as_table()) {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+
+    package
+        .get("dependencies")
+        .and_then(|d| d.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(ProgramName::parse))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Compiles WASM bytes to a Component in a blocking thread.
@@ -1736,31 +1855,6 @@ async fn ensure_program_loaded_from_path(
     }
 
     Ok(())
-}
-
-/// Parses an inferlet name into (namespace, name, version).
-///
-/// Supported formats:
-/// - `namespace/name@version` -> (namespace, name, version)
-/// - `namespace/name` -> (namespace, name, "latest")
-/// - `name@version` -> ("std", name, version)
-/// - `name` -> ("std", name, "latest")
-fn parse_inferlet_name(inferlet: &str) -> (String, String, String) {
-    // Split on @ to get name_part and version
-    let (name_part, version) = if let Some((n, v)) = inferlet.split_once('@') {
-        (n, v.to_string())
-    } else {
-        (inferlet, "latest".to_string())
-    };
-
-    // Split on / to get namespace and name
-    let (namespace, name) = if let Some((ns, n)) = name_part.split_once('/') {
-        (ns.to_string(), n.to_string())
-    } else {
-        ("std".to_string(), name_part.to_string())
-    };
-
-    (namespace, name, version)
 }
 
 /// Downloads an inferlet from the registry, with local caching.
