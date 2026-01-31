@@ -12,6 +12,7 @@ use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
 use pie_client::message::{self, ClientMessage, EventCode, ServerMessage, StreamingOutput};
 use ring::rand::{SecureRandom, SystemRandom};
+use std::collections::HashSet;
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -1105,6 +1106,7 @@ impl Session {
             if let Err(e) = ensure_program_loaded_with_dependencies(
                 &self.state.wasm_engine,
                 &program_metadata,
+                &program_name,
                 &self.state.uploaded_programs_in_disk,
                 &self.state.registry_programs_in_disk,
                 &self.state.registry_url,
@@ -1172,6 +1174,7 @@ impl Session {
         if let Err(e) = ensure_program_loaded_with_dependencies(
             &self.state.wasm_engine,
             &program_metadata,
+            &program_name,
             &self.state.uploaded_programs_in_disk,
             &self.state.registry_programs_in_disk,
             &self.state.registry_url,
@@ -1358,6 +1361,7 @@ impl Session {
             if let Err(e) = ensure_program_loaded_with_dependencies(
                 &self.state.wasm_engine,
                 &program_metadata,
+                &program_name,
                 &self.state.uploaded_programs_in_disk,
                 &self.state.registry_programs_in_disk,
                 &self.state.registry_url,
@@ -1801,90 +1805,135 @@ async fn compile_wasm_component(engine: &WasmEngine, wasm_bytes: Vec<u8>) -> Res
 async fn ensure_program_loaded_with_dependencies(
     wasm_engine: &WasmEngine,
     program_metadata: &ProgramMetadata,
+    program_name: &ProgramName,
     uploaded_programs: &DashMap<ProgramName, ProgramMetadata>,
     registry_programs: &DashMap<ProgramName, ProgramMetadata>,
     registry_url: &str,
     cache_dir: &Path,
 ) -> Result<(), String> {
-    // Check if the program is already loaded in memory
-    let (loaded_tx, loaded_rx) = oneshot::channel();
-    runtime::Command::ProgramLoaded {
-        wasm_hash: program_metadata.wasm_hash.clone(),
-        toml_hash: program_metadata.toml_hash.clone(),
-        event: loaded_tx,
-    }
-    .dispatch();
+    let mut visited = HashSet::new();
+    return recur_ensure_program_loaded_with_dependencies(
+        wasm_engine,
+        program_metadata,
+        program_name,
+        uploaded_programs,
+        registry_programs,
+        registry_url,
+        cache_dir,
+        &mut visited,
+    )
+    .await;
 
-    let is_loaded = loaded_rx.await.unwrap();
+    // Inner recursive helper function.
+    // The `visited` set is used to detect dependency cycles. It tracks which programs are currently
+    // being processed in the call stack. If a program is encountered that's already in the visited set,
+    // a cycle has been detected.
+    async fn recur_ensure_program_loaded_with_dependencies(
+        wasm_engine: &WasmEngine,
+        program_metadata: &ProgramMetadata,
+        program_name: &ProgramName,
+        uploaded_programs: &DashMap<ProgramName, ProgramMetadata>,
+        registry_programs: &DashMap<ProgramName, ProgramMetadata>,
+        registry_url: &str,
+        cache_dir: &Path,
+        visited: &mut HashSet<ProgramName>,
+    ) -> Result<(), String> {
+        // Check for dependency cycle
+        if visited.contains(program_name) {
+            return Err(format!(
+                "Dependency cycle detected: {}/{}@{}",
+                program_name.namespace, program_name.name, program_name.version
+            ));
+        }
 
-    // If already loaded, dependencies are guaranteed to be loaded (invariant)
-    if is_loaded {
-        return Ok(());
-    }
+        // Check if the program is already loaded in memory
+        let (loaded_tx, loaded_rx) = oneshot::channel();
+        runtime::Command::ProgramLoaded {
+            wasm_hash: program_metadata.wasm_hash.clone(),
+            toml_hash: program_metadata.toml_hash.clone(),
+            event: loaded_tx,
+        }
+        .dispatch();
 
-    // First, recursively ensure all dependencies are loaded
-    for dep_name in &program_metadata.dependencies {
-        // Look up the dependency in uploaded programs first, then registry programs,
-        // and download from registry if not found
-        let dep_metadata = if let Some(entry) = uploaded_programs.get(dep_name) {
-            entry.value().clone()
-        } else if let Some(entry) = registry_programs.get(dep_name) {
-            entry.value().clone()
-        } else {
-            // Download from registry
-            try_download_inferlet_from_registry(
+        let is_loaded = loaded_rx.await.unwrap();
+
+        // If already loaded, dependencies are guaranteed to be loaded (invariant)
+        if is_loaded {
+            return Ok(());
+        }
+
+        // Mark this program as being visited (in the current recursion stack)
+        visited.insert(program_name.clone());
+
+        // First, recursively ensure all dependencies are loaded
+        for dep_name in &program_metadata.dependencies {
+            // Look up the dependency in uploaded programs first, then registry programs,
+            // and download from registry if not found
+            let dep_metadata = if let Some(entry) = uploaded_programs.get(dep_name) {
+                entry.value().clone()
+            } else if let Some(entry) = registry_programs.get(dep_name) {
+                entry.value().clone()
+            } else {
+                // Download from registry
+                try_download_inferlet_from_registry(
+                    registry_url,
+                    cache_dir,
+                    dep_name,
+                    registry_programs,
+                )
+                .await
+                .map_err(|e| {
+                    format!(
+                        "Failed to resolve dependency {}/{}@{}. It was not uploaded nor found in the registry ({})",
+                        dep_name.namespace, dep_name.name, dep_name.version, e
+                    )
+                })?
+            };
+
+            // Recursively ensure the dependency and its dependencies are loaded
+            Box::pin(recur_ensure_program_loaded_with_dependencies(
+                wasm_engine,
+                &dep_metadata,
+                dep_name,
+                uploaded_programs,
+                registry_programs,
                 registry_url,
                 cache_dir,
-                dep_name,
-                registry_programs,
-            )
+                visited,
+            ))
+            .await?;
+        }
+
+        // Remove from visited set after processing dependencies (no longer in current recursion path)
+        visited.remove(program_name);
+
+        // Now load the current program (dependencies are already loaded)
+        let raw_bytes = tokio::fs::read(&program_metadata.wasm_path)
             .await
             .map_err(|e| {
                 format!(
-                    "Failed to resolve dependency {}/{}@{}. It was not uploaded nor found in the registry ({})",
-                    dep_name.namespace, dep_name.name, dep_name.version, e
+                    "Failed to read program from disk at {:?}: {}",
+                    program_metadata.wasm_path, e
                 )
-            })?
-        };
+            })?;
 
-        // Recursively ensure the dependency and its dependencies are loaded
-        Box::pin(ensure_program_loaded_with_dependencies(
-            wasm_engine,
-            &dep_metadata,
-            uploaded_programs,
-            registry_programs,
-            registry_url,
-            cache_dir,
-        ))
-        .await?;
+        let component = compile_wasm_component(wasm_engine, raw_bytes)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let (load_tx, load_rx) = oneshot::channel();
+        runtime::Command::LoadProgram {
+            wasm_hash: program_metadata.wasm_hash.clone(),
+            toml_hash: program_metadata.toml_hash.clone(),
+            component,
+            event: load_tx,
+        }
+        .dispatch();
+
+        load_rx.await.unwrap();
+
+        Ok(())
     }
-
-    // Now load the current program (dependencies are already loaded)
-    let raw_bytes = tokio::fs::read(&program_metadata.wasm_path)
-        .await
-        .map_err(|e| {
-            format!(
-                "Failed to read program from disk at {:?}: {}",
-                program_metadata.wasm_path, e
-            )
-        })?;
-
-    let component = compile_wasm_component(wasm_engine, raw_bytes)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let (load_tx, load_rx) = oneshot::channel();
-    runtime::Command::LoadProgram {
-        wasm_hash: program_metadata.wasm_hash.clone(),
-        toml_hash: program_metadata.toml_hash.clone(),
-        component,
-        event: load_tx,
-    }
-    .dispatch();
-
-    load_rx.await.unwrap();
-
-    Ok(())
 }
 
 /// Downloads an inferlet from the registry, with local caching.
