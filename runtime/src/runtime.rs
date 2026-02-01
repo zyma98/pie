@@ -8,7 +8,7 @@ use dashmap::DashMap;
 use hyper::server::conn::http1;
 use pie_client::message;
 use std::net::SocketAddr;
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 use thiserror::Error;
 use tokio::sync::oneshot;
 use uuid::Uuid;
@@ -168,7 +168,6 @@ struct CompiledProgram {
 struct Runtime {
     /// The Wasmtime engine (global)
     engine: Engine,
-    linker: Arc<Linker<InstanceState>>,
 
     /// Pre-compiled WASM components, keyed by ProgramHash
     compiled_programs: DashMap<ProgramHash, CompiledProgram>,
@@ -422,23 +421,28 @@ impl Service for Runtime {
     }
 }
 
+/// Creates a new linker with WASI and API bindings configured.
+fn create_linker(engine: &Engine) -> Linker<InstanceState> {
+    let mut linker = Linker::<InstanceState>::new(engine);
+
+    // Add WASI and HTTP bindings
+    wasmtime_wasi::p2::add_to_linker_async(&mut linker)
+        .map_err(|e| RuntimeError::Other(format!("Failed to link WASI: {e}")))
+        .unwrap();
+    wasmtime_wasi_http::add_only_http_to_linker_async(&mut linker)
+        .map_err(|e| RuntimeError::Other(format!("Failed to link WASI: {e}")))
+        .unwrap();
+
+    // Add custom API bindings
+    api::add_to_linker(&mut linker).unwrap();
+
+    linker
+}
+
 impl Runtime {
     fn new(engine: Engine) -> Self {
-        let mut linker = Linker::<InstanceState>::new(&engine);
-
-        // Add to linker
-        wasmtime_wasi::p2::add_to_linker_async(&mut linker)
-            .map_err(|e| RuntimeError::Other(format!("Failed to link WASI: {e}")))
-            .unwrap();
-        wasmtime_wasi_http::add_only_http_to_linker_async(&mut linker)
-            .map_err(|e| RuntimeError::Other(format!("Failed to link WASI: {e}")))
-            .unwrap();
-
-        api::add_to_linker(&mut linker).unwrap();
-
         Self {
             engine,
-            linker: Arc::new(linker),
             compiled_programs: DashMap::new(),
             running_instances: DashMap::new(),
             finished_instances: DashMap::new(),
@@ -470,7 +474,6 @@ impl Runtime {
 
         // Instantiate and run in a task
         let engine = self.engine.clone();
-        let linker = self.linker.clone();
 
         // Create a oneshot channel to signal when the task can start
         let (start_tx, start_rx) = oneshot::channel();
@@ -484,7 +487,6 @@ impl Runtime {
             arguments.clone(),
             detached,
             engine,
-            linker,
             start_rx,
             output_delivery_ctrl_tx,
         ));
@@ -574,7 +576,6 @@ impl Runtime {
 
         // Instantiate and run in a task
         let engine = self.engine.clone();
-        let linker = self.linker.clone();
         let addr = SocketAddr::from(([127, 0, 0, 1], port as u16));
 
         // Create a oneshot channel to signal when the task can start
@@ -586,7 +587,6 @@ impl Runtime {
             component,
             arguments.clone(),
             engine,
-            linker,
             start_rx,
         ));
 
@@ -692,7 +692,6 @@ impl Runtime {
 
     async fn handle_server_request(
         engine: Engine,
-        linker: Arc<Linker<InstanceState>>,
         username: String,
         component: Component,
         arguments: Vec<String>,
@@ -707,6 +706,8 @@ impl Runtime {
 
         let req = store.data_mut().new_incoming_request(Scheme::Http, req)?;
         let out = store.data_mut().new_response_outparam(sender)?;
+
+        let linker = create_linker(&engine);
 
         let instance = linker
             .instantiate_async(&mut store, &component)
@@ -757,7 +758,6 @@ impl Runtime {
         component: Component,
         arguments: Vec<String>,
         engine: Engine,
-        linker: Arc<Linker<InstanceState>>,
         start_rx: oneshot::Receiver<()>,
     ) {
         // Wait for the signal to start
@@ -769,13 +769,11 @@ impl Runtime {
             socket.bind(addr)?;
             let listener = socket.listen(100)?;
             eprintln!("Serving HTTP on http://{}/", listener.local_addr()?);
-            //store.data_mut().w
             tokio::task::spawn(async move {
                 loop {
                     let (stream, _) = listener.accept().await.unwrap();
                     let stream = TokioIo::new(stream);
                     let engine_ = engine.clone();
-                    let linker_ = linker.clone();
                     let component_ = component.clone();
                     let arguments_ = arguments.clone();
                     let username_ = username.clone();
@@ -787,7 +785,6 @@ impl Runtime {
                                 hyper::service::service_fn(move |req| {
                                     Self::handle_server_request(
                                         engine_.clone(),
-                                        linker_.clone(),
                                         username_.clone(),
                                         component_.clone(),
                                         arguments_.clone(),
@@ -816,7 +813,6 @@ impl Runtime {
         arguments: Vec<String>,
         detached: bool,
         engine: Engine,
-        linker: Arc<Linker<InstanceState>>,
         start_rx: oneshot::Receiver<()>,
         output_delivery_ctrl_tx: oneshot::Sender<OutputDeliveryCtrl>,
     ) {
@@ -846,6 +842,8 @@ impl Runtime {
         // so we can capture errors more systematically if desired:
         let result = async {
             let mut store = Store::new(&engine, inst_state);
+
+            let linker = create_linker(&engine);
 
             let instance = linker
                 .instantiate_async(&mut store, &component)
