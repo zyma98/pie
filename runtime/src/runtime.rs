@@ -46,7 +46,7 @@ pub enum RuntimeError {
     Wasmtime(#[from] wasmtime::Error),
 
     /// No program found for the given hashes
-    #[error("No such program with wasm_hash={0}, toml_hash={1}")]
+    #[error("No such program with wasm_hash={0}, manifest_hash={1}")]
     MissingProgram(String, String),
 
     /// Failed to compile a WASM component from disk
@@ -69,21 +69,21 @@ pub enum Command {
 
     LoadProgram {
         wasm_hash: String,
-        toml_hash: String,
+        manifest_hash: String,
         component: Component,
         event: oneshot::Sender<()>,
     },
 
     ProgramLoaded {
         wasm_hash: String,
-        toml_hash: String,
+        manifest_hash: String,
         event: oneshot::Sender<bool>,
     },
 
     LaunchInstance {
         username: String,
         wasm_hash: String,
-        toml_hash: String,
+        manifest_hash: String,
         arguments: Vec<String>,
         detached: bool,
         event: oneshot::Sender<Result<InstanceId, RuntimeError>>,
@@ -105,7 +105,7 @@ pub enum Command {
     LaunchServerInstance {
         username: String,
         wasm_hash: String,
-        toml_hash: String,
+        manifest_hash: String,
         port: u32,
         arguments: Vec<String>,
         event: oneshot::Sender<Result<(), RuntimeError>>,
@@ -148,7 +148,7 @@ struct Runtime {
     engine: Engine,
     linker: Arc<Linker<InstanceState>>,
 
-    /// Pre-compiled WASM components, keyed by (wasm_hash, toml_hash)
+    /// Pre-compiled WASM components, keyed by (wasm_hash, manifest_hash)
     compiled_programs: DashMap<(String, String), Component>,
 
     /// Running instances
@@ -220,7 +220,7 @@ pub enum AttachInstanceResult {
 struct InstanceHandle {
     username: String,
     wasm_hash: String,
-    toml_hash: String,
+    manifest_hash: String,
     arguments: Vec<String>,
     start_time: std::time::Instant,
     output_delivery_ctrl: OutputDeliveryCtrl,
@@ -235,35 +235,37 @@ impl Service for Runtime {
         match cmd {
             Command::LoadProgram {
                 wasm_hash,
-                toml_hash,
+                manifest_hash,
                 component,
                 event,
             } => {
-                // Store the pre-compiled component keyed by (wasm_hash, toml_hash)
+                // Store the pre-compiled component keyed by (wasm_hash, manifest_hash)
                 self.compiled_programs
-                    .insert((wasm_hash, toml_hash), component);
+                    .insert((wasm_hash, manifest_hash), component);
                 event.send(()).unwrap();
             }
 
             Command::ProgramLoaded {
                 wasm_hash,
-                toml_hash,
+                manifest_hash,
                 event,
             } => {
-                let is_loaded = self.compiled_programs.contains_key(&(wasm_hash, toml_hash));
+                let is_loaded = self
+                    .compiled_programs
+                    .contains_key(&(wasm_hash, manifest_hash));
                 event.send(is_loaded).unwrap();
             }
 
             Command::LaunchInstance {
                 username,
                 wasm_hash,
-                toml_hash,
+                manifest_hash,
                 event,
                 arguments,
                 detached,
             } => {
                 let res = self
-                    .launch_instance(username, wasm_hash, toml_hash, arguments, detached)
+                    .launch_instance(username, wasm_hash, manifest_hash, arguments, detached)
                     .await;
                 event
                     .send(res)
@@ -290,13 +292,13 @@ impl Service for Runtime {
             Command::LaunchServerInstance {
                 username,
                 wasm_hash,
-                toml_hash,
+                manifest_hash,
                 port,
                 arguments,
                 event,
             } => {
                 let _ = self
-                    .launch_server_instance(username, wasm_hash, toml_hash, port, arguments)
+                    .launch_server_instance(username, wasm_hash, manifest_hash, port, arguments)
                     .await;
                 event.send(Ok(())).unwrap();
             }
@@ -339,10 +341,10 @@ impl Service for Runtime {
                             .map(|item| {
                                 let handle = item.value();
                                 format!(
-                                    "Instance ID: {}, wasm_hash: {}, toml_hash: {}",
+                                    "Instance ID: {}, wasm_hash: {}, manifest_hash: {}",
                                     item.key(),
                                     handle.wasm_hash,
-                                    handle.toml_hash
+                                    handle.manifest_hash
                                 )
                             })
                             .collect();
@@ -354,8 +356,11 @@ impl Service for Runtime {
                             .compiled_programs
                             .iter()
                             .map(|item| {
-                                let (wasm_hash, toml_hash) = item.key();
-                                format!("wasm_hash: {}, toml_hash: {}", wasm_hash, toml_hash)
+                                let (wasm_hash, manifest_hash) = item.key();
+                                format!(
+                                    "wasm_hash: {}, manifest_hash: {}",
+                                    wasm_hash, manifest_hash
+                                )
                             })
                             .collect();
 
@@ -421,14 +426,18 @@ impl Runtime {
         }
     }
 
-    fn get_component(&self, wasm_hash: &str, toml_hash: &str) -> Result<Component, RuntimeError> {
-        // Get the component from memory by (wasm_hash, toml_hash)
-        let key = (wasm_hash.to_string(), toml_hash.to_string());
+    fn get_component(
+        &self,
+        wasm_hash: &str,
+        manifest_hash: &str,
+    ) -> Result<Component, RuntimeError> {
+        // Get the component from memory by (wasm_hash, manifest_hash)
+        let key = (wasm_hash.to_string(), manifest_hash.to_string());
         match self.compiled_programs.get(&key) {
             Some(entry) => Ok(entry.value().clone()),
             None => Err(RuntimeError::MissingProgram(
                 wasm_hash.to_string(),
-                toml_hash.to_string(),
+                manifest_hash.to_string(),
             )),
         }
     }
@@ -438,11 +447,11 @@ impl Runtime {
         &self,
         username: String,
         wasm_hash: String,
-        toml_hash: String,
+        manifest_hash: String,
         arguments: Vec<String>,
         detached: bool,
     ) -> Result<InstanceId, RuntimeError> {
-        let component = self.get_component(&wasm_hash, &toml_hash)?;
+        let component = self.get_component(&wasm_hash, &manifest_hash)?;
         let instance_id = Uuid::new_v4();
 
         // Instantiate and run in a task
@@ -479,7 +488,7 @@ impl Runtime {
         let instance_handle = InstanceHandle {
             username,
             wasm_hash,
-            toml_hash,
+            manifest_hash,
             arguments,
             start_time: std::time::Instant::now(),
             output_delivery_ctrl,
@@ -544,12 +553,12 @@ impl Runtime {
         &self,
         username: String,
         wasm_hash: String,
-        toml_hash: String,
+        manifest_hash: String,
         port: u32,
         arguments: Vec<String>,
     ) -> Result<InstanceId, RuntimeError> {
         let instance_id = Uuid::new_v4();
-        let component = self.get_component(&wasm_hash, &toml_hash)?;
+        let component = self.get_component(&wasm_hash, &manifest_hash)?;
 
         // Instantiate and run in a task
         let engine = self.engine.clone();
@@ -578,7 +587,7 @@ impl Runtime {
         let instance_handle = InstanceHandle {
             username,
             wasm_hash,
-            toml_hash,
+            manifest_hash,
             arguments,
             start_time: std::time::Instant::now(),
             output_delivery_ctrl,

@@ -168,8 +168,8 @@ struct ProgramMetadata {
     wasm_path: PathBuf,
     /// Blake3 hash of the WASM binary
     wasm_hash: String,
-    /// Blake3 hash of the TOML manifest
-    toml_hash: String,
+    /// Blake3 hash of the manifest
+    manifest_hash: String,
     /// Dependencies of this inferlet
     dependencies: Vec<ProgramName>,
 }
@@ -829,7 +829,7 @@ impl Session {
     async fn handle_query(&mut self, corr_id: u32, subject: String, record: String) {
         match subject.as_str() {
             message::QUERY_PROGRAM_EXISTS => {
-                // Parse the record as "namespace/name@version" or "namespace/name@version#wasm_hash+toml_hash"
+                // Parse the record as "namespace/name@version" or "namespace/name@version#wasm_hash+manifest_hash"
                 let (inferlet_part, hashes) = if let Some(idx) = record.find('#') {
                     let (inferlet, hash_part) = record.split_at(idx);
                     (inferlet.to_string(), Some(hash_part[1..].to_string()))
@@ -845,15 +845,15 @@ impl Session {
                     .get(&program_name)
                     .map(|entry| entry.value().clone());
 
-                // If hashes are provided, verify they match (format: "wasm_hash+toml_hash")
+                // If hashes are provided, verify they match (format: "wasm_hash+manifest_hash")
                 let result = match (&program_metadata, hashes) {
                     (Some(metadata), Some(hash_str)) => {
-                        // Parse the hash string as "wasm_hash+toml_hash"
+                        // Parse the hash string as "wasm_hash+manifest_hash"
                         if let Some(plus_idx) = hash_str.find('+') {
-                            let (expected_wasm_hash, toml_part) = hash_str.split_at(plus_idx);
-                            let expected_toml_hash = &toml_part[1..];
+                            let (expected_wasm_hash, manifest_part) = hash_str.split_at(plus_idx);
+                            let expected_manifest_hash = &manifest_part[1..];
                             metadata.wasm_hash == expected_wasm_hash
-                                && metadata.toml_hash == expected_toml_hash
+                                && metadata.manifest_hash == expected_manifest_hash
                         } else {
                             // Invalid format: '+' separator required
                             false
@@ -1028,10 +1028,11 @@ impl Session {
             let wasm_file_path = dir_path.join(format!("{}.wasm", program_name.version));
             let manifest_file_path = dir_path.join(format!("{}.toml", program_name.version));
             let wasm_hash_file_path = dir_path.join(format!("{}.wasm_hash", program_name.version));
-            let toml_hash_file_path = dir_path.join(format!("{}.toml_hash", program_name.version));
+            let manifest_hash_file_path =
+                dir_path.join(format!("{}.toml_hash", program_name.version));
 
             let raw_bytes = mem::take(&mut inflight.buffer);
-            let toml_hash = blake3::hash(manifest_content.as_bytes())
+            let manifest_hash = blake3::hash(manifest_content.as_bytes())
                 .to_hex()
                 .to_string();
 
@@ -1061,11 +1062,11 @@ impl Session {
                 self.inflight_program_upload = None;
                 return;
             }
-            if let Err(e) = tokio::fs::write(&toml_hash_file_path, &toml_hash).await {
+            if let Err(e) = tokio::fs::write(&manifest_hash_file_path, &manifest_hash).await {
                 self.send_response(
                     corr_id,
                     false,
-                    format!("Failed to write TOML hash file: {}", e),
+                    format!("Failed to write manifest hash file: {}", e),
                 )
                 .await;
                 self.inflight_program_upload = None;
@@ -1078,7 +1079,7 @@ impl Session {
                 ProgramMetadata {
                     wasm_path: wasm_file_path.clone(),
                     wasm_hash: final_hash.clone(),
-                    toml_hash,
+                    manifest_hash,
                     dependencies,
                 },
             );
@@ -1122,7 +1123,7 @@ impl Session {
             self.launch_instance_from_loaded_program(
                 corr_id,
                 program_metadata.wasm_hash,
-                program_metadata.toml_hash,
+                program_metadata.manifest_hash,
                 arguments,
                 detached,
             )
@@ -1190,7 +1191,7 @@ impl Session {
         self.launch_instance_from_loaded_program(
             corr_id,
             program_metadata.wasm_hash,
-            program_metadata.toml_hash,
+            program_metadata.manifest_hash,
             arguments,
             detached,
         )
@@ -1202,7 +1203,7 @@ impl Session {
         &mut self,
         corr_id: u32,
         wasm_hash: String,
-        toml_hash: String,
+        manifest_hash: String,
         arguments: Vec<String>,
         detached: bool,
     ) {
@@ -1210,7 +1211,7 @@ impl Session {
         runtime::Command::LaunchInstance {
             username: self.username.clone(),
             wasm_hash,
-            toml_hash,
+            manifest_hash,
             arguments,
             detached,
             event: evt_tx,
@@ -1377,7 +1378,7 @@ impl Session {
             runtime::Command::LaunchServerInstance {
                 username: self.username.clone(),
                 wasm_hash: program_metadata.wasm_hash,
-                toml_hash: program_metadata.toml_hash,
+                manifest_hash: program_metadata.manifest_hash,
                 port,
                 arguments,
                 event: evt_tx,
@@ -1675,10 +1676,10 @@ fn load_programs_from_dir(dir: &Path, programs_in_disk: &DashMap<ProgramName, Pr
                     };
 
                     // Read the hash from the corresponding .toml_hash file
-                    let toml_hash_path = file_path.with_extension("toml_hash");
-                    let toml_hash = match std::fs::read_to_string(&toml_hash_path) {
+                    let manifest_hash_path = file_path.with_extension("toml_hash");
+                    let manifest_hash = match std::fs::read_to_string(&manifest_hash_path) {
                         Ok(h) => h.trim().to_string(),
-                        Err(_) => continue, // Skip programs without a TOML hash file
+                        Err(_) => continue, // Skip programs without a manifest hash file
                     };
 
                     // Read and parse the manifest to extract dependencies
@@ -1700,7 +1701,7 @@ fn load_programs_from_dir(dir: &Path, programs_in_disk: &DashMap<ProgramName, Pr
                         ProgramMetadata {
                             wasm_path: file_path,
                             wasm_hash,
-                            toml_hash,
+                            manifest_hash,
                             dependencies,
                         },
                     );
@@ -1850,7 +1851,7 @@ async fn ensure_program_loaded_with_dependencies(
         let (loaded_tx, loaded_rx) = oneshot::channel();
         runtime::Command::ProgramLoaded {
             wasm_hash: program_metadata.wasm_hash.clone(),
-            toml_hash: program_metadata.toml_hash.clone(),
+            manifest_hash: program_metadata.manifest_hash.clone(),
             event: loaded_tx,
         }
         .dispatch();
@@ -1924,7 +1925,7 @@ async fn ensure_program_loaded_with_dependencies(
         let (load_tx, load_rx) = oneshot::channel();
         runtime::Command::LoadProgram {
             wasm_hash: program_metadata.wasm_hash.clone(),
-            toml_hash: program_metadata.toml_hash.clone(),
+            manifest_hash: program_metadata.manifest_hash.clone(),
             component,
             event: load_tx,
         }
@@ -1957,12 +1958,12 @@ async fn try_download_inferlet_from_registry(
     // - Wasm binary: {cache_dir}/registry/{namespace}/{name}/{version}.wasm
     // - Manifest: {cache_dir}/registry/{namespace}/{name}/{version}.toml
     // - Wasm hash: {cache_dir}/registry/{namespace}/{name}/{version}.wasm_hash
-    // - Toml hash: {cache_dir}/registry/{namespace}/{name}/{version}.toml_hash
+    // - Manifest hash: {cache_dir}/registry/{namespace}/{name}/{version}.toml_hash
     let cache_base = cache_dir.join("registry").join(namespace).join(name);
     let wasm_path = cache_base.join(format!("{}.wasm", version));
     let manifest_path = cache_base.join(format!("{}.toml", version));
     let wasm_hash_path = cache_base.join(format!("{}.wasm_hash", version));
-    let toml_hash_path = cache_base.join(format!("{}.toml_hash", version));
+    let manifest_hash_path = cache_base.join(format!("{}.toml_hash", version));
 
     // Build the download URLs
     let base_url = registry_url.trim_end_matches('/');
@@ -2058,7 +2059,7 @@ async fn try_download_inferlet_from_registry(
         .map_err(|e| anyhow!("Failed to read manifest data: {}", e))?;
 
     let wasm_hash = blake3::hash(&wasm_data).to_hex().to_string();
-    let toml_hash = blake3::hash(manifest_data.as_bytes()).to_hex().to_string();
+    let manifest_hash = blake3::hash(manifest_data.as_bytes()).to_hex().to_string();
 
     // Cache the downloaded files
     tokio::fs::create_dir_all(&cache_base)
@@ -2077,9 +2078,15 @@ async fn try_download_inferlet_from_registry(
         .await
         .map_err(|e| anyhow!("Failed to cache WASM hash at {:?}: {}", wasm_hash_path, e))?;
 
-    tokio::fs::write(&toml_hash_path, &toml_hash)
+    tokio::fs::write(&manifest_hash_path, &manifest_hash)
         .await
-        .map_err(|e| anyhow!("Failed to cache TOML hash at {:?}: {}", toml_hash_path, e))?;
+        .map_err(|e| {
+            anyhow!(
+                "Failed to cache manifest hash at {:?}: {}",
+                manifest_hash_path,
+                e
+            )
+        })?;
 
     tracing::info!(
         "Cached inferlet {}/{} @ {} to {:?} (hash: {})",
@@ -2095,7 +2102,7 @@ async fn try_download_inferlet_from_registry(
     let metadata = ProgramMetadata {
         wasm_path,
         wasm_hash,
-        toml_hash,
+        manifest_hash,
         dependencies,
     };
     registry_programs_in_disk.insert(program_name.clone(), metadata.clone());
