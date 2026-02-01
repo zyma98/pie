@@ -68,22 +68,20 @@ pub enum Command {
     },
 
     LoadProgram {
-        wasm_hash: String,
-        manifest_hash: String,
+        program_hash: ProgramHash,
         component: Component,
+        dependencies: Vec<ProgramHash>,
         event: oneshot::Sender<()>,
     },
 
     ProgramLoaded {
-        wasm_hash: String,
-        manifest_hash: String,
+        program_hash: ProgramHash,
         event: oneshot::Sender<bool>,
     },
 
     LaunchInstance {
         username: String,
-        wasm_hash: String,
-        manifest_hash: String,
+        program_hash: ProgramHash,
         arguments: Vec<String>,
         detached: bool,
         event: oneshot::Sender<Result<InstanceId, RuntimeError>>,
@@ -104,8 +102,7 @@ pub enum Command {
 
     LaunchServerInstance {
         username: String,
-        wasm_hash: String,
-        manifest_hash: String,
+        program_hash: ProgramHash,
         port: u32,
         arguments: Vec<String>,
         event: oneshot::Sender<Result<(), RuntimeError>>,
@@ -141,6 +138,31 @@ impl ServiceCommand for Command {
     const DISPATCHER: &'static OnceLock<CommandDispatcher<Self>> = &COMMAND_DISPATCHER;
 }
 
+/// A key identifying a compiled program by its WASM and manifest hashes.
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub struct ProgramHash {
+    wasm_hash: String,
+    manifest_hash: String,
+}
+
+impl ProgramHash {
+    pub fn new(wasm_hash: String, manifest_hash: String) -> Self {
+        Self {
+            wasm_hash,
+            manifest_hash,
+        }
+    }
+}
+
+/// A compiled program with its component and dependency information.
+#[derive(Clone)]
+struct CompiledProgram {
+    /// The compiled WASM component
+    component: Component,
+    /// Dependencies of this program, each specified by their hashes
+    dependencies: Vec<ProgramHash>,
+}
+
 /// Holds the “global” or “runtime” data that the controller needs to manage
 /// instances, compiled programs, etc.
 struct Runtime {
@@ -148,8 +170,8 @@ struct Runtime {
     engine: Engine,
     linker: Arc<Linker<InstanceState>>,
 
-    /// Pre-compiled WASM components, keyed by (wasm_hash, manifest_hash)
-    compiled_programs: DashMap<(String, String), Component>,
+    /// Pre-compiled WASM components, keyed by ProgramHash
+    compiled_programs: DashMap<ProgramHash, CompiledProgram>,
 
     /// Running instances
     running_instances: DashMap<InstanceId, InstanceHandle>,
@@ -219,8 +241,7 @@ pub enum AttachInstanceResult {
 
 struct InstanceHandle {
     username: String,
-    wasm_hash: String,
-    manifest_hash: String,
+    program_hash: ProgramHash,
     arguments: Vec<String>,
     start_time: std::time::Instant,
     output_delivery_ctrl: OutputDeliveryCtrl,
@@ -234,38 +255,38 @@ impl Service for Runtime {
     async fn handle(&mut self, cmd: Self::Command) {
         match cmd {
             Command::LoadProgram {
-                wasm_hash,
-                manifest_hash,
+                program_hash,
                 component,
+                dependencies,
                 event,
             } => {
-                // Store the pre-compiled component keyed by (wasm_hash, manifest_hash)
+                // Store the pre-compiled component with dependencies keyed by ProgramHash
+                let compiled_program = CompiledProgram {
+                    component,
+                    dependencies,
+                };
                 self.compiled_programs
-                    .insert((wasm_hash, manifest_hash), component);
+                    .insert(program_hash, compiled_program);
                 event.send(()).unwrap();
             }
 
             Command::ProgramLoaded {
-                wasm_hash,
-                manifest_hash,
+                program_hash,
                 event,
             } => {
-                let is_loaded = self
-                    .compiled_programs
-                    .contains_key(&(wasm_hash, manifest_hash));
+                let is_loaded = self.compiled_programs.contains_key(&program_hash);
                 event.send(is_loaded).unwrap();
             }
 
             Command::LaunchInstance {
                 username,
-                wasm_hash,
-                manifest_hash,
+                program_hash,
                 event,
                 arguments,
                 detached,
             } => {
                 let res = self
-                    .launch_instance(username, wasm_hash, manifest_hash, arguments, detached)
+                    .launch_instance(username, program_hash, arguments, detached)
                     .await;
                 event
                     .send(res)
@@ -291,14 +312,13 @@ impl Service for Runtime {
 
             Command::LaunchServerInstance {
                 username,
-                wasm_hash,
-                manifest_hash,
+                program_hash,
                 port,
                 arguments,
                 event,
             } => {
                 let _ = self
-                    .launch_server_instance(username, wasm_hash, manifest_hash, port, arguments)
+                    .launch_server_instance(username, program_hash, port, arguments)
                     .await;
                 event.send(Ok(())).unwrap();
             }
@@ -343,8 +363,8 @@ impl Service for Runtime {
                                 format!(
                                     "Instance ID: {}, wasm_hash: {}, manifest_hash: {}",
                                     item.key(),
-                                    handle.wasm_hash,
-                                    handle.manifest_hash
+                                    handle.program_hash.wasm_hash,
+                                    handle.program_hash.manifest_hash
                                 )
                             })
                             .collect();
@@ -356,10 +376,10 @@ impl Service for Runtime {
                             .compiled_programs
                             .iter()
                             .map(|item| {
-                                let (wasm_hash, manifest_hash) = item.key();
+                                let key = item.key();
                                 format!(
                                     "wasm_hash: {}, manifest_hash: {}",
-                                    wasm_hash, manifest_hash
+                                    key.wasm_hash, key.manifest_hash
                                 )
                             })
                             .collect();
@@ -426,18 +446,13 @@ impl Runtime {
         }
     }
 
-    fn get_component(
-        &self,
-        wasm_hash: &str,
-        manifest_hash: &str,
-    ) -> Result<Component, RuntimeError> {
-        // Get the component from memory by (wasm_hash, manifest_hash)
-        let key = (wasm_hash.to_string(), manifest_hash.to_string());
-        match self.compiled_programs.get(&key) {
-            Some(entry) => Ok(entry.value().clone()),
+    fn get_component(&self, program_hash: &ProgramHash) -> Result<Component, RuntimeError> {
+        // Get the component from memory by ProgramHash
+        match self.compiled_programs.get(program_hash) {
+            Some(entry) => Ok(entry.value().component.clone()),
             None => Err(RuntimeError::MissingProgram(
-                wasm_hash.to_string(),
-                manifest_hash.to_string(),
+                program_hash.wasm_hash.clone(),
+                program_hash.manifest_hash.clone(),
             )),
         }
     }
@@ -446,12 +461,11 @@ impl Runtime {
     async fn launch_instance(
         &self,
         username: String,
-        wasm_hash: String,
-        manifest_hash: String,
+        program_hash: ProgramHash,
         arguments: Vec<String>,
         detached: bool,
     ) -> Result<InstanceId, RuntimeError> {
-        let component = self.get_component(&wasm_hash, &manifest_hash)?;
+        let component = self.get_component(&program_hash)?;
         let instance_id = Uuid::new_v4();
 
         // Instantiate and run in a task
@@ -487,8 +501,7 @@ impl Runtime {
         // Record in the "running_instances" so we can manage it later
         let instance_handle = InstanceHandle {
             username,
-            wasm_hash,
-            manifest_hash,
+            program_hash,
             arguments,
             start_time: std::time::Instant::now(),
             output_delivery_ctrl,
@@ -552,13 +565,12 @@ impl Runtime {
     async fn launch_server_instance(
         &self,
         username: String,
-        wasm_hash: String,
-        manifest_hash: String,
+        program_hash: ProgramHash,
         port: u32,
         arguments: Vec<String>,
     ) -> Result<InstanceId, RuntimeError> {
         let instance_id = Uuid::new_v4();
-        let component = self.get_component(&wasm_hash, &manifest_hash)?;
+        let component = self.get_component(&program_hash)?;
 
         // Instantiate and run in a task
         let engine = self.engine.clone();
@@ -586,8 +598,7 @@ impl Runtime {
         // Record in the "running_instances" so we can manage it later
         let instance_handle = InstanceHandle {
             username,
-            wasm_hash,
-            manifest_hash,
+            program_hash,
             arguments,
             start_time: std::time::Instant::now(),
             output_delivery_ctrl,
