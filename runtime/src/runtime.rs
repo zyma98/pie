@@ -7,6 +7,7 @@ use crate::service::ServiceCommand;
 use dashmap::DashMap;
 use hyper::server::conn::http1;
 use pie_client::message;
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::OnceLock;
 use thiserror::Error;
@@ -21,6 +22,8 @@ use wasmtime_wasi_http::bindings::exports::wasi::http::incoming_handler::{
 use wasmtime_wasi_http::bindings::http::types::Scheme;
 use wasmtime_wasi_http::body::HyperOutgoingBody;
 use wasmtime_wasi_http::io::TokioIo;
+
+mod dynamic_linking;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -461,6 +464,49 @@ impl Runtime {
         }
     }
 
+    /// Collect all dependencies of a program in topological order (dependencies before dependents).
+    /// This handles deduplication when a dependency appears multiple times in the dependency graph.
+    fn collect_dependencies_topo_order(&self, program_hash: &ProgramHash) -> Vec<Component> {
+        /// Recursively collect a dependency and all its transitive dependencies.
+        /// Uses post-order DFS to ensure dependencies come before dependents.
+        fn collect_recursive(
+            compiled_programs: &DashMap<ProgramHash, CompiledProgram>,
+            dep_hash: &ProgramHash,
+            visited: &mut HashSet<ProgramHash>,
+            result: &mut Vec<Component>,
+        ) {
+            // Skip if already visited (deduplication)
+            if visited.contains(dep_hash) {
+                return;
+            }
+            visited.insert(dep_hash.clone());
+
+            if let Some(entry) = compiled_programs.get(dep_hash) {
+                let compiled_program = entry.value();
+
+                // First, recursively process all transitive dependencies (post-order DFS)
+                for child_dep_hash in &compiled_program.dependencies {
+                    collect_recursive(compiled_programs, child_dep_hash, visited, result);
+                }
+
+                // Then add this component (after all its dependencies are added)
+                result.push(compiled_program.component.clone());
+            }
+        }
+
+        let mut visited = HashSet::new();
+        let mut result = Vec::new();
+
+        // Get the direct dependencies of the main program and recursively collect them
+        if let Some(entry) = self.compiled_programs.get(program_hash) {
+            for dep_hash in &entry.value().dependencies {
+                collect_recursive(&self.compiled_programs, dep_hash, &mut visited, &mut result);
+            }
+        }
+
+        result
+    }
+
     /// Actually start a program instance
     async fn launch_instance(
         &self,
@@ -471,6 +517,9 @@ impl Runtime {
     ) -> Result<InstanceId, RuntimeError> {
         let component = self.get_component(&program_hash)?;
         let instance_id = Uuid::new_v4();
+
+        // Collect dependencies in topological order (deduplication handled inside)
+        let dependency_components = self.collect_dependencies_topo_order(&program_hash);
 
         // Instantiate and run in a task
         let engine = self.engine.clone();
@@ -484,6 +533,7 @@ impl Runtime {
             instance_id,
             username.clone(),
             component,
+            dependency_components,
             arguments.clone(),
             detached,
             engine,
@@ -574,6 +624,9 @@ impl Runtime {
         let instance_id = Uuid::new_v4();
         let component = self.get_component(&program_hash)?;
 
+        // Collect dependencies in topological order (deduplication handled inside)
+        let dependency_components = self.collect_dependencies_topo_order(&program_hash);
+
         // Instantiate and run in a task
         let engine = self.engine.clone();
         let addr = SocketAddr::from(([127, 0, 0, 1], port as u16));
@@ -585,6 +638,7 @@ impl Runtime {
             addr,
             username.clone(),
             component,
+            dependency_components,
             arguments.clone(),
             engine,
             start_rx,
@@ -694,6 +748,7 @@ impl Runtime {
         engine: Engine,
         username: String,
         component: Component,
+        dependency_components: Vec<Component>,
         arguments: Vec<String>,
         req: hyper::Request<hyper::body::Incoming>,
     ) -> anyhow::Result<hyper::Response<HyperOutgoingBody>> {
@@ -707,7 +762,17 @@ impl Runtime {
         let req = store.data_mut().new_incoming_request(Scheme::Http, req)?;
         let out = store.data_mut().new_response_outparam(sender)?;
 
-        let linker = create_linker(&engine);
+        let mut linker = create_linker(&engine);
+
+        // Instantiate dependencies and register their exports in the linker
+        dynamic_linking::instantiate_libraries(
+            &engine,
+            &mut linker,
+            &mut store,
+            dependency_components,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to instantiate dependencies: {e}"))?;
 
         let instance = linker
             .instantiate_async(&mut store, &component)
@@ -756,6 +821,7 @@ impl Runtime {
         addr: SocketAddr,
         username: String,
         component: Component,
+        dependency_components: Vec<Component>,
         arguments: Vec<String>,
         engine: Engine,
         start_rx: oneshot::Receiver<()>,
@@ -775,6 +841,7 @@ impl Runtime {
                     let stream = TokioIo::new(stream);
                     let engine_ = engine.clone();
                     let component_ = component.clone();
+                    let dependency_components_ = dependency_components.clone();
                     let arguments_ = arguments.clone();
                     let username_ = username.clone();
                     tokio::task::spawn(async move {
@@ -787,6 +854,7 @@ impl Runtime {
                                         engine_.clone(),
                                         username_.clone(),
                                         component_.clone(),
+                                        dependency_components_.clone(),
                                         arguments_.clone(),
                                         req,
                                     )
@@ -810,6 +878,7 @@ impl Runtime {
         instance_id: InstanceId,
         username: String,
         component: Component,
+        dependency_components: Vec<Component>,
         arguments: Vec<String>,
         detached: bool,
         engine: Engine,
@@ -843,7 +912,16 @@ impl Runtime {
         let result = async {
             let mut store = Store::new(&engine, inst_state);
 
-            let linker = create_linker(&engine);
+            let mut linker = create_linker(&engine);
+
+            // Instantiate dependencies and register their exports in the linker
+            dynamic_linking::instantiate_libraries(
+                &engine,
+                &mut linker,
+                &mut store,
+                dependency_components,
+            )
+            .await?;
 
             let instance = linker
                 .instantiate_async(&mut store, &component)
