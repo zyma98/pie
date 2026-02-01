@@ -634,7 +634,7 @@ impl Session {
                     subject,
                     record,
                 } => self.handle_query(corr_id, subject, record).await,
-                ClientMessage::UploadProgram {
+                ClientMessage::InstallProgram {
                     corr_id,
                     program_hash,
                     manifest,
@@ -642,7 +642,7 @@ impl Session {
                     total_chunks,
                     chunk_data,
                 } => {
-                    self.handle_upload_program(
+                    self.handle_install_program(
                         corr_id,
                         program_hash,
                         manifest,
@@ -903,7 +903,7 @@ impl Session {
             .await;
     }
 
-    async fn handle_upload_program(
+    async fn handle_install_program(
         &mut self,
         corr_id: u32,
         program_hash: String,

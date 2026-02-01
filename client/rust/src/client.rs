@@ -381,7 +381,7 @@ impl Client {
     /// Args:
     ///     wasm_path: Path to the WASM binary file.
     ///     manifest_path: Path to the manifest TOML file.
-    pub async fn upload_program(&self, wasm_path: &Path, manifest_path: &Path) -> Result<()> {
+    pub async fn install_program(&self, wasm_path: &Path, manifest_path: &Path) -> Result<()> {
         let blob = fs::read(wasm_path)
             .with_context(|| format!("Failed to read WASM file: {:?}", wasm_path))?;
         let manifest = fs::read_to_string(manifest_path)
@@ -402,7 +402,7 @@ impl Client {
         for chunk_index in 0..total_chunks {
             let start = chunk_index * CHUNK_SIZE_BYTES;
             let end = (start + CHUNK_SIZE_BYTES).min(total_size);
-            let msg = ClientMessage::UploadProgram {
+            let msg = ClientMessage::InstallProgram {
                 corr_id: *corr_id_guard,
                 program_hash: program_hash.clone(),
                 manifest: manifest.to_string(),
@@ -420,7 +420,7 @@ impl Client {
         if successful {
             Ok(())
         } else {
-            anyhow::bail!("Program upload failed: {}", result)
+            anyhow::bail!("Program install failed: {}", result)
         }
     }
 

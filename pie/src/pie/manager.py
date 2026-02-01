@@ -1207,10 +1207,10 @@ async def _submit_inferlet_async(
             # Authenticate with internal token
             await client.internal_authenticate(internal_token)
 
-            # Check if program already exists, upload if not
+            # Check if program already exists, install if not
             if not await client.program_exists(inferlet_name, inferlet_path, manifest_path):
-                emit("info", "Uploading inferlet...")
-                await client.upload_program(inferlet_path, manifest_path)
+                emit("info", "Installing inferlet...")
+                await client.install_program(inferlet_path, manifest_path)
             else:
                 emit("info", "Inferlet already cached on server.")
 

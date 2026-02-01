@@ -461,8 +461,8 @@ class PieClient:
 
         return result
 
-    async def upload_program(self, wasm_path: str | Path, manifest_path: str | Path):
-        """Upload a program to the server in chunks.
+    async def install_program(self, wasm_path: str | Path, manifest_path: str | Path):
+        """Install a program to the server in chunks.
 
         Args:
             wasm_path: Path to the WASM binary file.
@@ -472,7 +472,7 @@ class PieClient:
         manifest = Path(manifest_path).read_text()
         program_hash = blake3.blake3(program_bytes).hexdigest()
         template = {
-            "type": "upload_program",
+            "type": "install_program",
             "program_hash": program_hash,
             "manifest": manifest,
         }

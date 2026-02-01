@@ -346,12 +346,12 @@ export class PieClient {
     }
 
     /**
-     * Uploads a program to the server in chunks.
+     * Installs a program to the server in chunks.
      * @param {string} wasmPath Path to the WASM binary file (Node.js only).
      * @param {string} manifestPath Path to the manifest TOML file (Node.js only).
      * @returns {Promise<void>}
      */
-    async uploadProgram(wasmPath, manifestPath) {
+    async installProgram(wasmPath, manifestPath) {
         // Node.js file reading - dynamically import fs
         const fs = await import('fs');
         const programBytes = fs.readFileSync(wasmPath);
@@ -362,7 +362,7 @@ export class PieClient {
         const totalChunks = Math.ceil(programBytes.length / chunkSize);
         const corr_id = this._getNextCorrId();
 
-        const uploadPromise = new Promise((resolve, reject) => {
+        const installPromise = new Promise((resolve, reject) => {
             this.pendingRequests.set(corr_id, { resolve, reject });
         });
 
@@ -371,7 +371,7 @@ export class PieClient {
             const end = Math.min(start + chunkSize, programBytes.length);
             const chunkData = programBytes.slice(start, end);
             const msg = {
-                type: "upload_program",
+                type: "install_program",
                 corr_id: corr_id,
                 program_hash: programHash,
                 manifest: manifest,
@@ -382,11 +382,11 @@ export class PieClient {
             await this._sendMsg(msg);
         }
 
-        const { successful, result } = await uploadPromise;
+        const { successful, result } = await installPromise;
         if (successful) {
-            console.log(`[PieClient] Program uploaded successfully: ${result}`);
+            console.log(`[PieClient] Program installed successfully: ${result}`);
         } else {
-            throw new Error(`Program upload failed: ${result}`);
+            throw new Error(`Program install failed: ${result}`);
         }
     }
 

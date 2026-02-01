@@ -47,10 +47,10 @@ async def run_benchmark(args):
     async with PieClient(args.server) as client:
         await client.authenticate("benchmark-user")
 
-        # 3. Upload program (check both name and hashes match)
+        # 3. Install program (check both name and hashes match)
         if not await client.program_exists(inferlet_name, wasm_path, manifest_path):
-            print("Uploading program...")
-            await client.upload_program(wasm_path, manifest_path)
+            print("Installing program...")
+            await client.install_program(wasm_path, manifest_path)
         else:
             print("Program already exists on server.")
 

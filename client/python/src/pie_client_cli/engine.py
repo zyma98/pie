@@ -322,8 +322,8 @@ def attach_instance(client: PieClient, instance_id: str) -> Instance:
     )
 
 
-def upload_program(client: PieClient, wasm_path: str, manifest_path: str) -> None:
-    """Upload a program (sync wrapper).
+def install_program(client: PieClient, wasm_path: str, manifest_path: str) -> None:
+    """Install a program (sync wrapper).
 
     Args:
         client: The PieClient instance.
@@ -331,7 +331,7 @@ def upload_program(client: PieClient, wasm_path: str, manifest_path: str) -> Non
         manifest_path: Path to the manifest TOML file.
     """
     asyncio.get_event_loop().run_until_complete(
-        client.upload_program(wasm_path, manifest_path)
+        client.install_program(wasm_path, manifest_path)
     )
 
 

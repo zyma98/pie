@@ -216,15 +216,15 @@ def handle_submit_command(
                     composed_path = Path(tmp.name)
                     try:
                         compose_components(path, link, composed_path)
-                        engine.upload_program(client, composed_path, manifest)
+                        engine.install_program(client, composed_path, manifest)
                     finally:
                         composed_path.unlink(missing_ok=True)
-                typer.echo("✅ Inferlet upload successful.")
-            # No composition - check if program already exists before uploading
+                typer.echo("✅ Inferlet installed successfully.")
+            # No composition - check if program already exists before installing
             else:
                 if not engine.program_exists(client, inferlet_name, path, manifest):
-                    engine.upload_program(client, path, manifest)
-                    typer.echo("✅ Inferlet upload successful.")
+                    engine.install_program(client, path, manifest)
+                    typer.echo("✅ Inferlet installed successfully.")
                 else:
                     typer.echo("Inferlet already exists on server.")
 
