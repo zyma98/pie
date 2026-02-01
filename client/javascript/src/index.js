@@ -296,12 +296,67 @@ export class PieClient {
     }
 
     /**
+     * Sends a generic query to the server.
+     * @param {string} subject The query subject.
+     * @param {string} record The query record.
+     * @returns {Promise<{successful: boolean, result: string}>}
+     */
+    async query(subject, record) {
+        const msg = { type: "query", subject, record };
+        return await this._sendMsgAndWait(msg);
+    }
+
+    /**
+     * Check if a program exists on the server.
+     *
+     * The inferlet parameter can be:
+     * - Full name with version: "std/text-completion@0.1.0"
+     * - Without namespace (defaults to "std"): "text-completion@0.1.0"
+     * - Without version (defaults to "latest"): "std/text-completion" or "text-completion"
+     *
+     * @param {string} inferlet The inferlet name (e.g., "std/text-completion@0.1.0").
+     * @param {string|null} [wasmPath=null] Optional path to the WASM binary file for hash verification (Node.js only).
+     * @param {string|null} [manifestPath=null] Optional path to the manifest TOML file for hash verification (Node.js only).
+     *   If paths are provided, both must be specified together.
+     * @returns {Promise<boolean>} True if the program exists (and hashes match, if provided).
+     */
+    async programExists(inferlet, wasmPath = null, manifestPath = null) {
+        if ((wasmPath === null) !== (manifestPath === null)) {
+            throw new Error("wasmPath and manifestPath must both be provided or both be null");
+        }
+
+        let queryRecord;
+        if (wasmPath && manifestPath) {
+            // Node.js file reading - dynamically import fs
+            const fs = await import('fs');
+            const wasmBytes = fs.readFileSync(wasmPath);
+            const manifestContent = fs.readFileSync(manifestPath, 'utf-8');
+            const wasmHash = blake3(wasmBytes).toString('hex');
+            const tomlHash = blake3(Buffer.from(manifestContent)).toString('hex');
+            queryRecord = `${inferlet}#${wasmHash}+${tomlHash}`;
+        } else {
+            queryRecord = inferlet;
+        }
+
+        const { successful, result } = await this.query("program_exists", queryRecord);
+        if (successful) {
+            return result === "true";
+        }
+        throw new Error(`Query for program_exists failed: ${result}`);
+    }
+
+    /**
      * Uploads a program to the server in chunks.
-     * @param {Uint8Array} programBytes The program content as a byte array.
-     * @param {string} manifest The manifest TOML content as a string.
+     * @param {string} wasmPath Path to the WASM binary file (Node.js only).
+     * @param {string} manifestPath Path to the manifest TOML file (Node.js only).
      * @returns {Promise<void>}
      */
-    async uploadProgram(programBytes, manifest) {
+    async uploadProgram(wasmPath, manifestPath) {
+        // Node.js file reading - dynamically import fs
+        const fs = await import('fs');
+        const programBytes = fs.readFileSync(wasmPath);
+        const manifest = fs.readFileSync(manifestPath, 'utf-8');
+
         const programHash = blake3(programBytes).toString('hex');
         const chunkSize = 256 * 1024; // 256 KiB, must match server
         const totalChunks = Math.ceil(programBytes.length / chunkSize);

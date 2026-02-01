@@ -6,6 +6,7 @@ import blake3
 
 from enum import Enum
 from dataclasses import dataclass
+from pathlib import Path
 
 from .crypto import ParsedPrivateKey
 
@@ -388,8 +389,8 @@ class PieClient:
     async def program_exists(
         self,
         inferlet: str,
-        wasm_hash: str | None = None,
-        toml_hash: str | None = None,
+        wasm_path: str | Path | None = None,
+        manifest_path: str | Path | None = None,
     ) -> bool:
         """Check if a program exists on the server.
 
@@ -400,15 +401,19 @@ class PieClient:
 
         Args:
             inferlet: The inferlet name (e.g., "std/text-completion@0.1.0").
-            wasm_hash: Optional WASM binary hash to verify.
-            toml_hash: Optional TOML manifest hash to verify.
-                If hashes are provided, both must be specified together.
+            wasm_path: Optional path to the WASM binary file for hash verification.
+            manifest_path: Optional path to the manifest TOML file for hash verification.
+                If paths are provided, both must be specified together.
         """
-        if (wasm_hash is None) != (toml_hash is None):
+        if (wasm_path is None) != (manifest_path is None):
             raise ValueError(
-                "wasm_hash and toml_hash must both be provided or both be None"
+                "wasm_path and manifest_path must both be provided or both be None"
             )
-        if wasm_hash and toml_hash:
+        if wasm_path and manifest_path:
+            wasm_bytes = Path(wasm_path).read_bytes()
+            manifest_content = Path(manifest_path).read_text()
+            wasm_hash = blake3.blake3(wasm_bytes).hexdigest()
+            toml_hash = blake3.blake3(manifest_content.encode()).hexdigest()
             query = f"{inferlet}#{wasm_hash}+{toml_hash}"
         else:
             query = inferlet
@@ -456,13 +461,15 @@ class PieClient:
 
         return result
 
-    async def upload_program(self, program_bytes: bytes, manifest: str):
+    async def upload_program(self, wasm_path: str | Path, manifest_path: str | Path):
         """Upload a program to the server in chunks.
 
         Args:
-            program_bytes: The WASM binary data.
-            manifest: The manifest TOML content as a string.
+            wasm_path: Path to the WASM binary file.
+            manifest_path: Path to the manifest TOML file.
         """
+        program_bytes = Path(wasm_path).read_bytes()
+        manifest = Path(manifest_path).read_text()
         program_hash = blake3.blake3(program_bytes).hexdigest()
         template = {
             "type": "upload_program",

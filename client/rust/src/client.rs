@@ -10,6 +10,8 @@ use bytes::Bytes;
 use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
 use rmp_serde::{decode, encode};
+use std::fs;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::sync::{Mutex, mpsc, oneshot};
@@ -341,32 +343,51 @@ impl Client {
     }
 
     /// Check if a program exists by its inferlet name.
-    /// Optionally verifies that the stored hashes match the provided hashes.
+    /// Optionally verifies that the stored hashes match the provided file contents.
     ///
     /// The `inferlet` parameter can be:
     /// - Full name with version: `std/text-completion@0.1.0`
     /// - Without namespace (defaults to `std`): `text-completion@0.1.0`
     /// - Without version (defaults to `latest`): `std/text-completion` or `text-completion`
     ///
-    /// If hashes are provided, both `wasm_hash` and `toml_hash` must be specified together.
+    /// If paths are provided, both `wasm_path` and `manifest_path` must be specified together.
+    /// The function will read the files and compute blake3 hashes for verification.
     pub async fn program_exists(
         &self,
         inferlet: &str,
-        wasm_hash: Option<&str>,
-        toml_hash: Option<&str>,
+        wasm_path: Option<&Path>,
+        manifest_path: Option<&Path>,
     ) -> Result<bool> {
-        let query = match (wasm_hash, toml_hash) {
-            (Some(wasm), Some(toml)) => format!("{}#{}+{}", inferlet, wasm, toml),
+        let query = match (wasm_path, manifest_path) {
+            (Some(wasm_p), Some(manifest_p)) => {
+                let wasm_bytes = fs::read(wasm_p)
+                    .with_context(|| format!("Failed to read WASM file: {:?}", wasm_p))?;
+                let manifest_content = fs::read_to_string(manifest_p)
+                    .with_context(|| format!("Failed to read manifest file: {:?}", manifest_p))?;
+                let wasm_hash = hash_blob(&wasm_bytes);
+                let toml_hash = hash_blob(manifest_content.as_bytes());
+                format!("{}#{}+{}", inferlet, wasm_hash, toml_hash)
+            }
             (None, None) => inferlet.to_string(),
-            _ => anyhow::bail!("wasm_hash and toml_hash must both be provided or both be None"),
+            _ => anyhow::bail!("wasm_path and manifest_path must both be provided or both be None"),
         };
         self.query(QUERY_PROGRAM_EXISTS, query)
             .await
             .map(|r| r == "true")
     }
 
-    pub async fn upload_program(&self, blob: &[u8], manifest: &str) -> Result<()> {
-        let program_hash = hash_blob(blob);
+    /// Upload a program to the server.
+    ///
+    /// Args:
+    ///     wasm_path: Path to the WASM binary file.
+    ///     manifest_path: Path to the manifest TOML file.
+    pub async fn upload_program(&self, wasm_path: &Path, manifest_path: &Path) -> Result<()> {
+        let blob = fs::read(wasm_path)
+            .with_context(|| format!("Failed to read WASM file: {:?}", wasm_path))?;
+        let manifest = fs::read_to_string(manifest_path)
+            .with_context(|| format!("Failed to read manifest file: {:?}", manifest_path))?;
+
+        let program_hash = hash_blob(&blob);
         let corr_id_guard = self.inner.corr_id_pool.acquire().await?;
         let (tx, rx) = oneshot::channel();
         self.inner.pending_requests.insert(*corr_id_guard, tx);

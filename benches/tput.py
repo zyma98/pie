@@ -4,7 +4,6 @@ import time
 import sys
 import tomllib
 from pathlib import Path
-from blake3 import blake3
 from pie_client import PieClient, Event
 
 
@@ -37,15 +36,11 @@ async def run_benchmark(args):
 
     print(f"Using WASM: {wasm_path}")
     print(f"Using Manifest: {manifest_path}")
-    program_bytes = wasm_path.read_bytes()
-    manifest_content = manifest_path.read_text()
-    manifest = tomllib.loads(manifest_content)
+    manifest = tomllib.loads(manifest_path.read_text())
     namespace, name = manifest["package"]["name"].split("/", 1)
     version = manifest["package"]["version"]
-    wasm_hash = blake3(program_bytes).hexdigest()
-    toml_hash = blake3(manifest_content.encode()).hexdigest()
     inferlet_name = f"{namespace}/{name}@{version}"
-    print(f"Inferlet: {inferlet_name} (wasm: {wasm_hash}, toml: {toml_hash})")
+    print(f"Inferlet: {inferlet_name}")
 
     # 2. Connect to server
     print(f"Connecting to {args.server}...")
@@ -53,9 +48,9 @@ async def run_benchmark(args):
         await client.authenticate("benchmark-user")
 
         # 3. Upload program (check both name and hashes match)
-        if not await client.program_exists(inferlet_name, wasm_hash, toml_hash):
+        if not await client.program_exists(inferlet_name, wasm_path, manifest_path):
             print("Uploading program...")
-            await client.upload_program(program_bytes, manifest_content)
+            await client.upload_program(wasm_path, manifest_path)
         else:
             print("Program already exists on server.")
 
