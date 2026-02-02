@@ -1,0 +1,6 @@
+[package]
+name = "zyma98/inferlib-model"
+version = "0.1.0"
+
+[engine]
+min_version = "^1.0.0"

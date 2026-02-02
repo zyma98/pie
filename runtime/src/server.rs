@@ -1850,6 +1850,8 @@ async fn ensure_program_loaded_with_dependencies(
             ));
         }
 
+        eprintln!("Checking if program is loaded: {}/{}@{}", program_name.namespace, program_name.name, program_name.version);
+
         // Check if the program is already loaded in memory
         let (loaded_tx, loaded_rx) = oneshot::channel();
         runtime::Command::ProgramLoaded {
@@ -1865,8 +1867,12 @@ async fn ensure_program_loaded_with_dependencies(
 
         // If already loaded, dependencies are guaranteed to be loaded (invariant)
         if is_loaded {
+            eprintln!("Program is already loaded: {}/{}@{}", program_name.namespace, program_name.name, program_name.version);
             return Ok(());
         }
+
+        eprintln!("Program is not loaded: {}/{}@{}", program_name.namespace, program_name.name, program_name.version);
+        eprintln!("Dependencies: {:?}", program_metadata.dependencies);
 
         // Mark this program as being visited (in the current recursion stack)
         visited.insert(program_name.clone());

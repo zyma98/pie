@@ -1,0 +1,5 @@
+package inferlib:chat;
+
+world chat-formatter {
+    export formatter;
+}

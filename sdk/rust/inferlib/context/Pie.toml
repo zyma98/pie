@@ -1,0 +1,13 @@
+[package]
+name = "zyma98/inferlib-context"
+version = "0.1.0"
+dependencies = [
+    "zyma98/inferlib-brle@0.1.0",
+    "zyma98/inferlib-chat@0.1.0",
+    "zyma98/inferlib-environment@0.1.0",
+    "zyma98/inferlib-model@0.1.0",
+    "zyma98/inferlib-queue@0.1.0",
+]
+
+[engine]
+min_version = "^1.0.0"
