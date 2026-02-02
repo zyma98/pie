@@ -617,8 +617,9 @@ def _ipc_worker_process(
              _init_distributed(rank, world_size, master_port, devices[rank])
         else:
              # Skip distributed for single device to avoid NCCL/socket issues
-             torch.cuda.set_device(devices[rank])
-             pass
+            device_str = devices[rank]
+            if device_str.startswith("cuda"):
+                torch.cuda.set_device(device_str)
 
         # Setup process groups (collective ops - all ranks must participate)
         # Capture the mappings to pass to Runtime
