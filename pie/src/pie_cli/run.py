@@ -19,7 +19,7 @@ console = Console()
 
 def run(
     inferlet: Optional[str] = typer.Argument(
-        None, help="Inferlet name from registry (e.g., 'std/text-completion@0.1.0')"
+        None, help="Inferlet name from registry (e.g., 'text-completion@0.1.0')"
     ),
     path: Optional[Path] = typer.Option(
         None, "--path", "-p", help="Path to a local .wasm inferlet file"
@@ -46,7 +46,7 @@ def run(
 
     You can specify an inferlet either by registry name or by path (mutually exclusive):
 
-    - By registry: pie run std/text-completion@0.1.0
+    - By registry: pie run text-completion@0.1.0
     - By path: pie run --path ./my_inferlet.wasm
     """
     # Validate at least one of inferlet or path is provided

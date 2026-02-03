@@ -122,10 +122,9 @@ impl InternalEvent {
     }
 }
 
-/// Identifier for an inferlet (namespace, name, version).
+/// Identifier for an inferlet (name, version).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct ProgramName {
-    namespace: String,
     name: String,
     version: String,
 }
@@ -134,30 +133,17 @@ impl ProgramName {
     /// Parses an inferlet identifier from a string.
     ///
     /// Supported formats:
-    /// - `namespace/name@version` -> (namespace, name, version)
-    /// - `namespace/name` -> (namespace, name, "latest")
-    /// - `name@version` -> ("std", name, version)
-    /// - `name` -> ("std", name, "latest")
+    /// - `name@version` -> (name, version)
+    /// - `name` -> (name, "latest")
     fn parse(s: &str) -> Self {
-        // Split on @ to get name_part and version
-        let (name_part, version) = if let Some((n, v)) = s.split_once('@') {
-            (n, v.to_string())
+        // Split on @ to get name and version
+        let (name, version) = if let Some((n, v)) = s.split_once('@') {
+            (n.to_string(), v.to_string())
         } else {
-            (s, "latest".to_string())
+            (s.to_string(), "latest".to_string())
         };
 
-        // Split on / to get namespace and name
-        let (namespace, name) = if let Some((ns, n)) = name_part.split_once('/') {
-            (ns.to_string(), n.to_string())
-        } else {
-            ("std".to_string(), name_part.to_string())
-        };
-
-        Self {
-            namespace,
-            name,
-            version,
-        }
+        Self { name, version }
     }
 }
 
@@ -186,9 +172,9 @@ struct ServerState {
     clients: DashMap<ClientId, JoinHandle<()>>,
     client_cmd_txs: DashMap<InstanceId, mpsc::Sender<SessionEvent>>,
     backend_status: Arc<BackendStatus>,
-    /// Uploaded programs on disk, keyed by program name (namespace, name, version)
+    /// Uploaded programs on disk, keyed by program name (name, version)
     uploaded_programs_in_disk: DashMap<ProgramName, ProgramMetadata>,
-    /// Registry-downloaded programs on disk, keyed by program name (namespace, name, version)
+    /// Registry-downloaded programs on disk, keyed by program name (name, version)
     registry_programs_in_disk: DashMap<ProgramName, ProgramMetadata>,
 }
 
@@ -269,8 +255,8 @@ impl Server {
         let registry_programs_in_disk = DashMap::new();
 
         // Load existing programs from disk
-        // - Uploads: {cache_dir}/programs/{namespace}/{name}/{version}.wasm
-        // - Registry: {cache_dir}/registry/{namespace}/{name}/{version}.wasm
+        // - Uploads: {cache_dir}/programs/{name}/{version}.wasm
+        // - Registry: {cache_dir}/registry/{name}/{version}.wasm
         let programs_dir = cache_dir.join("programs");
         if programs_dir.exists() {
             load_programs_from_dir(&programs_dir, &uploaded_programs_in_disk);
@@ -829,7 +815,7 @@ impl Session {
     async fn handle_query(&mut self, corr_id: u32, subject: String, record: String) {
         match subject.as_str() {
             message::QUERY_PROGRAM_EXISTS => {
-                // Parse the record as "namespace/name@version" or "namespace/name@version#wasm_hash+manifest_hash"
+                // Parse the record as "name@version" or "name@version#wasm_hash+manifest_hash"
                 let (inferlet_part, hashes) = if let Some(idx) = record.find('#') {
                     let (inferlet, hash_part) = record.split_at(idx);
                     (inferlet.to_string(), Some(hash_part[1..].to_string()))
@@ -994,7 +980,7 @@ impl Session {
                 return;
             }
 
-            // Parse the manifest to extract namespace, name, version, and dependencies
+            // Parse the manifest to extract name, version, and dependencies
             let manifest_content = mem::take(&mut inflight.manifest);
             let program_name = match parse_program_name_from_manifest(&manifest_content) {
                 Ok(result) => result,
@@ -1007,12 +993,11 @@ impl Session {
             };
             let dependencies = parse_program_dependencies_from_manifest(&manifest_content);
 
-            // Write to disk: {cache_dir}/programs/{namespace}/{name}/{version}.{wasm,toml,hash}
+            // Write to disk: {cache_dir}/programs/{name}/{version}.{wasm,toml,hash}
             let dir_path = self
                 .state
                 .cache_dir
                 .join("programs")
-                .join(&program_name.namespace)
                 .join(&program_name.name);
             if let Err(e) = tokio::fs::create_dir_all(&dir_path).await {
                 self.send_response(
@@ -1622,102 +1607,83 @@ impl Drop for Session {
     }
 }
 
-/// Helper to load programs from a directory with structure {dir}/{namespace}/{name}/{version}.wasm
+/// Helper to load programs from a directory with structure {dir}/{name}/{version}.wasm
 fn load_programs_from_dir(dir: &Path, programs_in_disk: &DashMap<ProgramName, ProgramMetadata>) {
-    // Iterate through namespace directories
-    let ns_entries = match std::fs::read_dir(dir) {
+    // Iterate through name directories
+    let name_entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(_) => return,
     };
 
-    for ns_entry in ns_entries.flatten() {
-        let ns_path = ns_entry.path();
-        if !ns_path.is_dir() {
+    for name_entry in name_entries.flatten() {
+        let name_path = name_entry.path();
+        if !name_path.is_dir() {
             continue;
         }
-        let namespace = match ns_path.file_name().and_then(|n| n.to_str()) {
+        let name = match name_path.file_name().and_then(|n| n.to_str()) {
             Some(n) => n.to_string(),
             None => continue,
         };
 
-        // Iterate through name directories
-        let name_entries = match std::fs::read_dir(&ns_path) {
+        // Iterate through version files
+        let file_entries = match std::fs::read_dir(&name_path) {
             Ok(entries) => entries,
             Err(_) => continue,
         };
 
-        for name_entry in name_entries.flatten() {
-            let name_path = name_entry.path();
-            if !name_path.is_dir() {
-                continue;
-            }
-            let name = match name_path.file_name().and_then(|n| n.to_str()) {
-                Some(n) => n.to_string(),
-                None => continue,
-            };
+        for file_entry in file_entries.flatten() {
+            let file_path = file_entry.path();
+            if file_path.extension().is_some_and(|ext| ext == "wasm") {
+                // Extract version from filename (e.g., "0.1.0.wasm" -> "0.1.0")
+                let version = match file_path.file_stem().and_then(|s| s.to_str()) {
+                    Some(v) => v.to_string(),
+                    None => continue,
+                };
 
-            // Iterate through version files
-            let file_entries = match std::fs::read_dir(&name_path) {
-                Ok(entries) => entries,
-                Err(_) => continue,
-            };
+                // Read the hash from the corresponding .wasm_hash file
+                let wasm_hash_path = file_path.with_extension("wasm_hash");
+                let wasm_hash = match std::fs::read_to_string(&wasm_hash_path) {
+                    Ok(h) => h.trim().to_string(),
+                    Err(_) => continue, // Skip programs without a WASM hash file
+                };
 
-            for file_entry in file_entries.flatten() {
-                let file_path = file_entry.path();
-                if file_path.extension().is_some_and(|ext| ext == "wasm") {
-                    // Extract version from filename (e.g., "0.1.0.wasm" -> "0.1.0")
-                    let version = match file_path.file_stem().and_then(|s| s.to_str()) {
-                        Some(v) => v.to_string(),
-                        None => continue,
-                    };
+                // Read the hash from the corresponding .toml_hash file
+                let manifest_hash_path = file_path.with_extension("toml_hash");
+                let manifest_hash = match std::fs::read_to_string(&manifest_hash_path) {
+                    Ok(h) => h.trim().to_string(),
+                    Err(_) => continue, // Skip programs without a manifest hash file
+                };
 
-                    // Read the hash from the corresponding .wasm_hash file
-                    let wasm_hash_path = file_path.with_extension("wasm_hash");
-                    let wasm_hash = match std::fs::read_to_string(&wasm_hash_path) {
-                        Ok(h) => h.trim().to_string(),
-                        Err(_) => continue, // Skip programs without a WASM hash file
-                    };
+                // Read and parse the manifest to extract dependencies
+                let manifest_path = file_path.with_extension("toml");
+                let dependencies = match std::fs::read_to_string(&manifest_path) {
+                    Ok(manifest_content) => {
+                        parse_program_dependencies_from_manifest(&manifest_content)
+                    }
+                    Err(_) => continue, // Skip programs without a manifest file
+                };
 
-                    // Read the hash from the corresponding .toml_hash file
-                    let manifest_hash_path = file_path.with_extension("toml_hash");
-                    let manifest_hash = match std::fs::read_to_string(&manifest_hash_path) {
-                        Ok(h) => h.trim().to_string(),
-                        Err(_) => continue, // Skip programs without a manifest hash file
-                    };
-
-                    // Read and parse the manifest to extract dependencies
-                    let manifest_path = file_path.with_extension("toml");
-                    let dependencies = match std::fs::read_to_string(&manifest_path) {
-                        Ok(manifest_content) => {
-                            parse_program_dependencies_from_manifest(&manifest_content)
-                        }
-                        Err(_) => continue, // Skip programs without a manifest file
-                    };
-
-                    let program_name = ProgramName {
-                        namespace: namespace.clone(),
-                        name: name.clone(),
-                        version,
-                    };
-                    programs_in_disk.insert(
-                        program_name,
-                        ProgramMetadata {
-                            wasm_path: file_path,
-                            wasm_hash,
-                            manifest_hash,
-                            dependencies,
-                        },
-                    );
-                }
+                let program_name = ProgramName {
+                    name: name.clone(),
+                    version,
+                };
+                programs_in_disk.insert(
+                    program_name,
+                    ProgramMetadata {
+                        wasm_path: file_path,
+                        wasm_hash,
+                        manifest_hash,
+                        dependencies,
+                    },
+                );
             }
         }
     }
 }
 
-/// Parses a manifest TOML string to extract the program name (namespace, name, version).
+/// Parses a manifest TOML string to extract the program name (name, version).
 ///
-/// The manifest must have a [package] section with "name" (in "namespace/name" format)
-/// and "version" fields.
+/// The manifest must have a [package] section with "name" and "version" fields.
 fn parse_program_name_from_manifest(manifest: &str) -> Result<ProgramName> {
     let table: toml::Table =
         toml::from_str(manifest).map_err(|e| anyhow!("Failed to parse manifest TOML: {}", e))?;
@@ -1727,7 +1693,7 @@ fn parse_program_name_from_manifest(manifest: &str) -> Result<ProgramName> {
         .and_then(|p| p.as_table())
         .ok_or_else(|| anyhow!("Manifest missing [package] section"))?;
 
-    let full_name = package
+    let name = package
         .get("name")
         .and_then(|n| n.as_str())
         .ok_or_else(|| anyhow!("Manifest missing package.name field"))?;
@@ -1737,18 +1703,8 @@ fn parse_program_name_from_manifest(manifest: &str) -> Result<ProgramName> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("Manifest missing package.version field"))?;
 
-    // Parse "namespace/name" format
-    let parts: Vec<&str> = full_name.splitn(2, '/').collect();
-    if parts.len() != 2 {
-        bail!(
-            "Invalid package.name format '{}': expected 'namespace/name'",
-            full_name
-        );
-    }
-
     Ok(ProgramName {
-        namespace: parts[0].to_string(),
-        name: parts[1].to_string(),
+        name: name.to_string(),
         version: version.to_string(),
     })
 }
@@ -1756,7 +1712,7 @@ fn parse_program_name_from_manifest(manifest: &str) -> Result<ProgramName> {
 /// Parses a manifest TOML string to extract the dependencies.
 ///
 /// The optional "dependencies" field in the [package] section is an array of strings
-/// in the format "namespace/name@version". Returns an empty vector if parsing fails
+/// in the format "name@version". Returns an empty vector if parsing fails
 /// or no dependencies are specified.
 fn parse_program_dependencies_from_manifest(manifest: &str) -> Vec<ProgramName> {
     let table: toml::Table = match toml::from_str(manifest) {
@@ -1845,8 +1801,8 @@ async fn ensure_program_loaded_with_dependencies(
         // Check for dependency cycle
         if visited.contains(program_name) {
             return Err(format!(
-                "Dependency cycle detected: {}/{}@{}",
-                program_name.namespace, program_name.name, program_name.version
+                "Dependency cycle detected: {}@{}",
+                program_name.name, program_name.version
             ));
         }
 
@@ -1890,8 +1846,8 @@ async fn ensure_program_loaded_with_dependencies(
                 .await
                 .map_err(|e| {
                     format!(
-                        "Failed to resolve dependency {}/{}@{}. It was not uploaded nor found in the registry ({})",
-                        dep_name.namespace, dep_name.name, dep_name.version, e
+                        "Failed to resolve dependency {}@{}. It was not uploaded nor found in the registry ({})",
+                        dep_name.name, dep_name.version, e
                     )
                 })?
             };
@@ -1974,16 +1930,15 @@ async fn try_download_inferlet_from_registry(
     program_name: &ProgramName,
     registry_programs_in_disk: &DashMap<ProgramName, ProgramMetadata>,
 ) -> Result<ProgramMetadata> {
-    let namespace = &program_name.namespace;
     let name = &program_name.name;
     let version = &program_name.version;
 
     // Build the cache paths:
-    // - Wasm binary: {cache_dir}/registry/{namespace}/{name}/{version}.wasm
-    // - Manifest: {cache_dir}/registry/{namespace}/{name}/{version}.toml
-    // - Wasm hash: {cache_dir}/registry/{namespace}/{name}/{version}.wasm_hash
-    // - Manifest hash: {cache_dir}/registry/{namespace}/{name}/{version}.toml_hash
-    let cache_base = cache_dir.join("registry").join(namespace).join(name);
+    // - Wasm binary: {cache_dir}/registry/{name}/{version}.wasm
+    // - Manifest: {cache_dir}/registry/{name}/{version}.toml
+    // - Wasm hash: {cache_dir}/registry/{name}/{version}.wasm_hash
+    // - Manifest hash: {cache_dir}/registry/{name}/{version}.toml_hash
+    let cache_base = cache_dir.join("registry").join(name);
     let wasm_path = cache_base.join(format!("{}.wasm", version));
     let manifest_path = cache_base.join(format!("{}.toml", version));
     let wasm_hash_path = cache_base.join(format!("{}.wasm_hash", version));
@@ -1992,17 +1947,16 @@ async fn try_download_inferlet_from_registry(
     // Build the download URLs
     let base_url = registry_url.trim_end_matches('/');
     let wasm_download_url = format!(
-        "{}/api/v1/inferlets/{}/{}/{}/download",
-        base_url, namespace, name, version
+        "{}/api/v1/inferlets/{}/{}/download",
+        base_url, name, version
     );
     let manifest_download_url = format!(
-        "{}/api/v1/inferlets/{}/{}/{}/manifest",
-        base_url, namespace, name, version
+        "{}/api/v1/inferlets/{}/{}/manifest",
+        base_url, name, version
     );
 
     tracing::info!(
-        "Downloading inferlet: {}/{} @ {} from {}",
-        namespace,
+        "Downloading inferlet: {} @ {} from {}",
         name,
         version,
         wasm_download_url
@@ -2025,9 +1979,8 @@ async fn try_download_inferlet_from_registry(
         let status = wasm_response.status();
         let body = wasm_response.text().await.unwrap_or_default();
         bail!(
-            "Registry returned error {} for {}/{} @ {}: {}",
+            "Registry returned error {} for {} @ {}: {}",
             status,
-            namespace,
             name,
             version,
             body
@@ -2041,18 +1994,12 @@ async fn try_download_inferlet_from_registry(
         .to_vec();
 
     if wasm_data.is_empty() {
-        bail!(
-            "Registry returned empty data for {}/{} @ {}",
-            namespace,
-            name,
-            version
-        );
+        bail!("Registry returned empty data for {} @ {}", name, version);
     }
 
     // Download the manifest
     tracing::info!(
-        "Downloading manifest for {}/{} @ {} from {}",
-        namespace,
+        "Downloading manifest for {} @ {} from {}",
         name,
         version,
         manifest_download_url
@@ -2068,9 +2015,8 @@ async fn try_download_inferlet_from_registry(
         let status = manifest_response.status();
         let body = manifest_response.text().await.unwrap_or_default();
         bail!(
-            "Registry returned error {} for manifest {}/{} @ {}: {}",
+            "Registry returned error {} for manifest {} @ {}: {}",
             status,
-            namespace,
             name,
             version,
             body
@@ -2113,8 +2059,7 @@ async fn try_download_inferlet_from_registry(
         })?;
 
     tracing::info!(
-        "Cached inferlet {}/{} @ {} to {:?} (hash: {})",
-        namespace,
+        "Cached inferlet {} @ {} to {:?} (hash: {})",
         name,
         version,
         wasm_path,

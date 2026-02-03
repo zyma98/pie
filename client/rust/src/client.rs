@@ -346,9 +346,8 @@ impl Client {
     /// Optionally verifies that the stored hashes match the provided file contents.
     ///
     /// The `inferlet` parameter can be:
-    /// - Full name with version: `std/text-completion@0.1.0`
-    /// - Without namespace (defaults to `std`): `text-completion@0.1.0`
-    /// - Without version (defaults to `latest`): `std/text-completion` or `text-completion`
+    /// - Full name with version: `text-completion@0.1.0`
+    /// - Without version (defaults to `latest`): `text-completion`
     ///
     /// If paths are provided, both `wasm_path` and `manifest_path` must be specified together.
     /// The function will read the files and compute blake3 hashes for verification.
@@ -431,9 +430,8 @@ impl Client {
     /// 2. If not found, it falls back to searching the registry.
     ///
     /// The `inferlet` parameter can be:
-    /// - Full name with version: `std/text-completion@0.1.0`
-    /// - Without namespace (defaults to `std`): `text-completion@0.1.0`
-    /// - Without version (defaults to `latest`): `std/text-completion` or `text-completion`
+    /// - Full name with version: `text-completion@0.1.0`
+    /// - Without version (defaults to `latest`): `text-completion`
     pub async fn launch_instance(
         &self,
         inferlet: String,
@@ -472,9 +470,8 @@ impl Client {
     /// explicitly want to launch an inferlet from the registry.
     ///
     /// The `inferlet` parameter can be:
-    /// - Full name with version: `std/text-completion@0.1.0`
-    /// - Without namespace (defaults to `std`): `text-completion@0.1.0`
-    /// - Without version (defaults to `latest`): `std/text-completion` or `text-completion`
+    /// - Full name with version: `text-completion@0.1.0`
+    /// - Without version (defaults to `latest`): `text-completion`
     pub async fn launch_instance_from_registry(
         &self,
         inferlet: String,

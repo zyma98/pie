@@ -16,17 +16,17 @@ import typer
 from . import engine
 
 
-def parse_manifest(manifest_content: str) -> tuple[str, str, str]:
-    """Parse the manifest to extract namespace, name, and version.
+def parse_manifest(manifest_content: str) -> tuple[str, str]:
+    """Parse the manifest to extract name and version.
 
     Args:
         manifest_content: The TOML manifest content as a string.
 
     Returns:
-        A tuple of (namespace, name, version).
+        A tuple of (name, version).
 
     Raises:
-        ValueError: If the manifest is missing required fields or has invalid format.
+        ValueError: If the manifest is missing required fields.
     """
     manifest = tomllib.loads(manifest_content)
 
@@ -34,22 +34,15 @@ def parse_manifest(manifest_content: str) -> tuple[str, str, str]:
     if package is None:
         raise ValueError("Manifest missing [package] section")
 
-    full_name = package.get("name")
-    if full_name is None:
+    name = package.get("name")
+    if name is None:
         raise ValueError("Manifest missing package.name field")
 
     version = package.get("version")
     if version is None:
         raise ValueError("Manifest missing package.version field")
 
-    # Parse "namespace/name" format
-    parts = full_name.split("/", 1)
-    if len(parts) != 2:
-        raise ValueError(
-            f"Invalid package.name format '{full_name}': expected 'namespace/name'"
-        )
-
-    return parts[0], parts[1], version
+    return name, version
 
 
 def compose_components(
@@ -152,7 +145,7 @@ def handle_submit_command(
 
     You can specify an inferlet either by registry name or by path (mutually exclusive):
 
-    - By registry: pie-client submit std/text-completion@0.1.0
+    - By registry: pie-client submit text-completion@0.1.0
     - By path: pie-client submit --path ./my_inferlet.wasm --manifest ./Pie.toml
 
     Steps:
@@ -204,9 +197,9 @@ def handle_submit_command(
 
             manifest_content = manifest.read_text()
 
-            # Parse the manifest to extract namespace, name, and version
-            namespace, name, version = parse_manifest(manifest_content)
-            inferlet_name = f"{namespace}/{name}@{version}"
+            # Parse the manifest to extract name and version
+            name, version = parse_manifest(manifest_content)
+            inferlet_name = f"{name}@{version}"
 
             typer.echo(f"Inferlet: {inferlet_name}")
 

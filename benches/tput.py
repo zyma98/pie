@@ -26,7 +26,7 @@ async def run_benchmark(args):
     if not wasm_path.exists():
         print(f"Error: WASM binary not found at {wasm_path}")
         print(
-            "Please run `cargo build --target wasm32-wasip2 --release` in `std/text-completion` first."
+            "Please run `cargo build --target wasm32-wasip2 --release` in `text-completion` first."
         )
         sys.exit(1)
 

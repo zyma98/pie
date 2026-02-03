@@ -310,11 +310,10 @@ export class PieClient {
      * Check if a program exists on the server.
      *
      * The inferlet parameter can be:
-     * - Full name with version: "std/text-completion@0.1.0"
-     * - Without namespace (defaults to "std"): "text-completion@0.1.0"
-     * - Without version (defaults to "latest"): "std/text-completion" or "text-completion"
+     * - Full name with version: "text-completion@0.1.0"
+     * - Without version (defaults to "latest"): "text-completion"
      *
-     * @param {string} inferlet The inferlet name (e.g., "std/text-completion@0.1.0").
+     * @param {string} inferlet The inferlet name (e.g., "text-completion@0.1.0").
      * @param {string|null} [wasmPath=null] Optional path to the WASM binary file for hash verification (Node.js only).
      * @param {string|null} [manifestPath=null] Optional path to the manifest TOML file for hash verification (Node.js only).
      *   If paths are provided, both must be specified together.
@@ -404,11 +403,10 @@ export class PieClient {
      * 2. If not found, it falls back to searching the registry.
      *
      * The inferlet parameter can be:
-     * - Full name with version: "std/text-completion@0.1.0"
-     * - Without namespace (defaults to "std"): "text-completion@0.1.0"
-     * - Without version (defaults to "latest"): "std/text-completion" or "text-completion"
+     * - Full name with version: "text-completion@0.1.0"
+     * - Without version (defaults to "latest"): "text-completion"
      *
-     * @param {string} inferlet The inferlet name (e.g., "std/text-completion@0.1.0").
+     * @param {string} inferlet The inferlet name (e.g., "text-completion@0.1.0").
      * @param {string[]} [args=[]] Optional command-line arguments.
      * @param {boolean} [detached=false] If true, the instance runs in detached mode.
      * @returns {Promise<Instance>}
@@ -438,11 +436,10 @@ export class PieClient {
      * an inferlet from the registry.
      * 
      * The inferlet parameter can be:
-     * - Full name with version: "std/text-completion@0.1.0"
-     * - Without namespace (defaults to "std"): "text-completion@0.1.0"
-     * - Without version (defaults to "latest"): "std/text-completion" or "text-completion"
+     * - Full name with version: "text-completion@0.1.0"
+     * - Without version (defaults to "latest"): "text-completion"
      * 
-     * @param {string} inferlet The inferlet name (e.g., "std/text-completion@0.1.0").
+     * @param {string} inferlet The inferlet name (e.g., "text-completion@0.1.0").
      * @param {string[]} [args=[]] Optional command-line arguments.
      * @param {boolean} [detached=false] If true, the instance runs in detached mode.
      * @returns {Promise<Instance>}
@@ -504,15 +501,15 @@ async function main() {
         // 2. Upload a simple program with manifest
         const programCode = new TextEncoder().encode('print("Hello from JavaScript instance!")');
         const manifest = `[package]
-name = "example/hello-world"
+name = "hello-world"
 version = "0.1.0"
 `;
         await client.uploadProgram(programCode, manifest);
-        console.log(`[Example] Uploaded program: example/hello-world@0.1.0`);
+        console.log(`[Example] Uploaded program: hello-world@0.1.0`);
 
         // 3. Launch the instance using inferlet name
         console.log("[Example] Launching instance...");
-        const instance = await client.launchInstance("example/hello-world@0.1.0");
+        const instance = await client.launchInstance("hello-world@0.1.0");
         console.log(`[Example] Launched instance with ID: ${instance.instanceId}`);
 
         // 4. Wait for the instance to finish
