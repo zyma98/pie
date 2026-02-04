@@ -1308,7 +1308,7 @@ def submit_inferlet_from_registry_and_wait(
 
     Args:
         client_config: Client configuration with host, port, internal_auth_token
-        inferlet_name: Inferlet name (e.g., "std/text-completion@0.1.0")
+        inferlet_name: Inferlet name (e.g., "text-completion@0.1.0")
         arguments: Arguments to pass to the inferlet
         server_handle: Optional server handle for process monitoring
         backend_processes: Optional list of backend processes to monitor

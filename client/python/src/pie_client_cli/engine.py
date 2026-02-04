@@ -344,13 +344,12 @@ def program_exists(
     """Check if a program exists (sync wrapper).
 
     The inferlet parameter can be:
-    - Full name with version: "std/text-completion@0.1.0"
-    - Without namespace (defaults to "std"): "text-completion@0.1.0"
-    - Without version (defaults to "latest"): "std/text-completion" or "text-completion"
+    - Full name with version: "text-completion@0.1.0"
+    - Without version (defaults to "latest"): "text-completion"
 
     Args:
         client: The Pie client.
-        inferlet: The inferlet name (e.g., "std/text-completion@0.1.0").
+        inferlet: The inferlet name (e.g., "text-completion@0.1.0").
         wasm_path: Optional path to the WASM binary file for hash verification.
         manifest_path: Optional path to the manifest TOML file for hash verification.
             If paths are provided, both must be specified together.
@@ -373,9 +372,8 @@ def launch_instance(
     2. If not found, it falls back to searching the registry.
 
     The inferlet parameter can be:
-    - Full name with version: "std/text-completion@0.1.0"
-    - Without namespace (defaults to "std"): "text-completion@0.1.0"
-    - Without version (defaults to "latest"): "std/text-completion" or "text-completion"
+    - Full name with version: "text-completion@0.1.0"
+    - Without version (defaults to "latest"): "text-completion"
     """
     return asyncio.get_event_loop().run_until_complete(
         client.launch_instance(inferlet, arguments, detached)
@@ -395,9 +393,8 @@ def launch_instance_from_registry(
     an inferlet from the registry.
 
     The inferlet parameter can be:
-    - Full name with version: "std/text-completion@0.1.0"
-    - Without namespace (defaults to "std"): "text-completion@0.1.0"
-    - Without version (defaults to "latest"): "std/text-completion" or "text-completion"
+    - Full name with version: "text-completion@0.1.0"
+    - Without version (defaults to "latest"): "text-completion"
     """
     return asyncio.get_event_loop().run_until_complete(
         client.launch_instance_from_registry(inferlet, arguments, detached)

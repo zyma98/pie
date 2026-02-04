@@ -395,12 +395,11 @@ class PieClient:
         """Check if a program exists on the server.
 
         The inferlet parameter can be:
-        - Full name with version: "std/text-completion@0.1.0"
-        - Without namespace (defaults to "std"): "text-completion@0.1.0"
-        - Without version (defaults to "latest"): "std/text-completion" or "text-completion"
+        - Full name with version: "text-completion@0.1.0"
+        - Without version (defaults to "latest"): "text-completion"
 
         Args:
-            inferlet: The inferlet name (e.g., "std/text-completion@0.1.0").
+            inferlet: The inferlet name (e.g., "text-completion@0.1.0").
             wasm_path: Optional path to the WASM binary file for hash verification.
             manifest_path: Optional path to the manifest TOML file for hash verification.
                 If paths are provided, both must be specified together.
@@ -501,11 +500,10 @@ class PieClient:
         2. If not found, it falls back to searching the registry.
 
         The inferlet parameter can be:
-        - Full name with version: "std/text-completion@0.1.0"
-        - Without namespace (defaults to "std"): "text-completion@0.1.0"
-        - Without version (defaults to "latest"): "std/text-completion" or "text-completion"
+        - Full name with version: "text-completion@0.1.0"
+        - Without version (defaults to "latest"): "text-completion"
 
-        :param inferlet: The inferlet name (e.g., "std/text-completion@0.1.0").
+        :param inferlet: The inferlet name (e.g., "text-completion@0.1.0").
         :param arguments: Command-line arguments to pass to the inferlet.
         :param detached: If True, the instance runs in detached mode.
         :return: An Instance object for the launched inferlet.
@@ -541,11 +539,10 @@ class PieClient:
         an inferlet from the registry.
 
         The inferlet parameter can be:
-        - Full name with version: "std/text-completion@0.1.0"
-        - Without namespace (defaults to "std"): "text-completion@0.1.0"
-        - Without version (defaults to "latest"): "std/text-completion" or "text-completion"
+        - Full name with version: "text-completion@0.1.0"
+        - Without version (defaults to "latest"): "text-completion"
 
-        :param inferlet: The inferlet name (e.g., "std/text-completion@0.1.0").
+        :param inferlet: The inferlet name (e.g., "text-completion@0.1.0").
         :param arguments: Command-line arguments to pass to the inferlet.
         :param detached: If True, the instance runs in detached mode.
         :return: An Instance object for the launched inferlet.
