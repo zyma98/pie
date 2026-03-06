@@ -3,7 +3,9 @@ use std::path::PathBuf;
 /// Resolves the Pie home directory ($PIE_HOME or ~/.pie).
 pub fn get_pie_home() -> PathBuf {
     if let Ok(pie_home) = std::env::var("PIE_HOME") {
-        return PathBuf::from(pie_home);
+        if !pie_home.trim().is_empty() {
+            return PathBuf::from(pie_home);
+        }
     }
     dirs::home_dir()
         .expect("could not determine home directory")
