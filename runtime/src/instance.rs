@@ -185,8 +185,8 @@ impl InstanceState {
                 .preopened_dir(
                     runtime_dir.join("python"),
                     "python",
-                    DirPerms::all(),
-                    FilePerms::all(),
+                    DirPerms::READ,
+                    FilePerms::READ,
                 )
                 .expect("failed to preopen python dir");
 
@@ -194,13 +194,13 @@ impl InstanceState {
                 .preopened_dir(
                     runtime_dir.join("bundled"),
                     "bundled",
-                    DirPerms::all(),
-                    FilePerms::all(),
+                    DirPerms::READ,
+                    FilePerms::READ,
                 )
                 .expect("failed to preopen bundled dir");
 
             builder
-                .preopened_dir(site_packages_dir, "0", DirPerms::all(), FilePerms::all())
+                .preopened_dir(site_packages_dir, "0", DirPerms::READ, FilePerms::READ)
                 .expect("failed to preopen site-packages dir");
         }
 
