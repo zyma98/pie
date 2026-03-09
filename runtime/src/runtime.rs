@@ -76,6 +76,7 @@ pub enum Command {
         program_hash: ProgramHash,
         component: Component,
         dependencies: Vec<ProgramHash>,
+        python_runtime: Option<String>,
         event: oneshot::Sender<()>,
     },
 
@@ -167,6 +168,8 @@ struct CompiledProgram {
     component: Component,
     /// Dependencies of this program, each specified by their hashes
     dependencies: Vec<ProgramHash>,
+    /// Optional python runtime version requirement (from manifest `[runtime] python-runtime`)
+    python_runtime: Option<String>,
 }
 
 /// Holds the “global” or “runtime” data that the controller needs to manage
@@ -269,12 +272,14 @@ impl Service for Runtime {
                 program_hash,
                 component,
                 dependencies,
+                python_runtime,
                 event,
             } => {
                 // Store the pre-compiled component with dependencies keyed by ProgramHash
                 let compiled_program = CompiledProgram {
                     component,
                     dependencies,
+                    python_runtime,
                 };
                 self.compiled_programs
                     .insert(program_hash, compiled_program);
@@ -550,7 +555,14 @@ impl Runtime {
 
     /// Collect all dependencies of a program in topological order (dependencies before dependents).
     /// This handles deduplication when a dependency appears multiple times in the dependency graph.
-    fn collect_dependencies_topo_order(&self, program_hash: &ProgramHash) -> Vec<Component> {
+    ///
+    /// Returns the dependency components and the unified `python_runtime` version, if any
+    /// dependency declares one. Returns an error if multiple dependencies declare conflicting
+    /// python runtime versions.
+    fn collect_dependencies_topo_order(
+        &self,
+        program_hash: &ProgramHash,
+    ) -> Result<(Vec<Component>, Option<String>), RuntimeError> {
         /// Recursively collect a dependency and all its transitive dependencies.
         /// Uses post-order DFS to ensure dependencies come before dependents.
         fn collect_recursive(
@@ -558,37 +570,70 @@ impl Runtime {
             dep_hash: &ProgramHash,
             visited: &mut HashSet<ProgramHash>,
             result: &mut Vec<Component>,
-        ) {
-            // Skip if already visited (deduplication)
+            python_runtime: &mut Option<String>,
+        ) -> Result<(), RuntimeError> {
             if visited.contains(dep_hash) {
-                return;
+                return Ok(());
             }
             visited.insert(dep_hash.clone());
 
             if let Some(entry) = compiled_programs.get(dep_hash) {
                 let compiled_program = entry.value();
 
-                // First, recursively process all transitive dependencies (post-order DFS)
-                for child_dep_hash in &compiled_program.dependencies {
-                    collect_recursive(compiled_programs, child_dep_hash, visited, result);
+                // Check python_runtime consistency
+                if let Some(dep_py_rt) = &compiled_program.python_runtime {
+                    match python_runtime {
+                        Some(existing) if existing.as_str() != dep_py_rt => {
+                            return Err(RuntimeError::Other(format!(
+                                "Conflicting python-runtime versions among dependencies: \
+                                 '{}' vs '{}'",
+                                existing, dep_py_rt
+                            )));
+                        }
+                        None => {
+                            *python_runtime = Some(dep_py_rt.clone());
+                        }
+                        _ => {}
+                    }
                 }
 
-                // Then add this component (after all its dependencies are added)
+                for child_dep_hash in &compiled_program.dependencies {
+                    collect_recursive(
+                        compiled_programs,
+                        child_dep_hash,
+                        visited,
+                        result,
+                        python_runtime,
+                    )?;
+                }
+
                 result.push(compiled_program.component.clone());
             }
+            Ok(())
         }
 
         let mut visited = HashSet::new();
         let mut result = Vec::new();
+        let mut python_runtime: Option<String> = None;
 
-        // Get the direct dependencies of the main program and recursively collect them
         if let Some(entry) = self.compiled_programs.get(program_hash) {
+            // Also check the main program's python_runtime
+            if let Some(ref py_rt) = entry.value().python_runtime {
+                python_runtime = Some(py_rt.clone());
+            }
+
             for dep_hash in &entry.value().dependencies {
-                collect_recursive(&self.compiled_programs, dep_hash, &mut visited, &mut result);
+                collect_recursive(
+                    &self.compiled_programs,
+                    dep_hash,
+                    &mut visited,
+                    &mut result,
+                    &mut python_runtime,
+                )?;
             }
         }
 
-        result
+        Ok((result, python_runtime))
     }
 
     /// Actually start a program instance
@@ -604,7 +649,14 @@ impl Runtime {
         let instance_id = Uuid::new_v4();
 
         // Collect dependencies in topological order (deduplication handled inside)
-        let dependency_components = self.collect_dependencies_topo_order(&program_hash);
+        let (dependency_components, python_runtime) =
+            self.collect_dependencies_topo_order(&program_hash)?;
+
+        let (shared_modules, py_runtime_dir) = if python_runtime.is_some() {
+            (self.shared_modules.clone(), self.py_runtime_dir.clone())
+        } else {
+            (Arc::new(Vec::new()), None)
+        };
 
         // Instantiate and run in a task
         let engine = self.engine.clone();
@@ -623,8 +675,8 @@ impl Runtime {
             arguments.clone(),
             detached,
             engine,
-            self.shared_modules.clone(),
-            self.py_runtime_dir.clone(),
+            shared_modules,
+            py_runtime_dir,
             start_rx,
             output_delivery_ctrl_tx,
         ));
@@ -713,7 +765,14 @@ impl Runtime {
         let component = self.get_component(&program_hash)?;
 
         // Collect dependencies in topological order (deduplication handled inside)
-        let dependency_components = self.collect_dependencies_topo_order(&program_hash);
+        let (dependency_components, python_runtime) =
+            self.collect_dependencies_topo_order(&program_hash)?;
+
+        let (shared_modules, py_runtime_dir) = if python_runtime.is_some() {
+            (self.shared_modules.clone(), self.py_runtime_dir.clone())
+        } else {
+            (Arc::new(Vec::new()), None)
+        };
 
         // Instantiate and run in a task
         let engine = self.engine.clone();
@@ -729,8 +788,8 @@ impl Runtime {
             dependency_components,
             arguments.clone(),
             engine,
-            self.shared_modules.clone(),
-            self.py_runtime_dir.clone(),
+            shared_modules,
+            py_runtime_dir,
             start_rx,
         ));
 
