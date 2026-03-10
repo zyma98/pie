@@ -26,6 +26,7 @@ use wasmtime_wasi_http::body::HyperOutgoingBody;
 use wasmtime_wasi_http::io::TokioIo;
 
 mod dynamic_linking;
+mod snapshot;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -77,6 +78,7 @@ pub enum Command {
         component: Component,
         dependencies: Vec<ProgramHash>,
         python_runtime: Option<String>,
+        wasm_bytes: Option<Vec<u8>>,
         event: oneshot::Sender<()>,
     },
 
@@ -193,6 +195,9 @@ struct Runtime {
     /// Shared core modules (e.g. CPython interpreter) loaded from py-runtime/shared/
     shared_modules: Arc<Vec<(String, Module)>>,
 
+    /// Stripped shared modules (data/start sections removed) for snapshotted component instantiation
+    stripped_shared_modules: Arc<Vec<(String, Module)>>,
+
     /// Path to the py-runtime directory (~/.pie/py-runtime), if it exists
     py_runtime_dir: Option<PathBuf>,
 }
@@ -273,16 +278,17 @@ impl Service for Runtime {
                 component,
                 dependencies,
                 python_runtime,
+                wasm_bytes,
                 event,
             } => {
-                // Store the pre-compiled component with dependencies keyed by ProgramHash
-                let compiled_program = CompiledProgram {
+                self.load_program(
+                    program_hash,
                     component,
                     dependencies,
                     python_runtime,
-                };
-                self.compiled_programs
-                    .insert(program_hash, compiled_program);
+                    wasm_bytes,
+                )
+                .await;
                 event.send(()).unwrap();
             }
 
@@ -440,8 +446,13 @@ impl Service for Runtime {
 }
 
 /// Loads shared core modules (.wasm files) from a directory.
-fn load_shared_modules(engine: &Engine, shared_dir: &Path) -> Vec<(String, Module)> {
-    let mut modules = Vec::new();
+/// Returns both full modules and stripped modules (data/start sections removed).
+fn load_shared_modules(
+    engine: &Engine,
+    shared_dir: &Path,
+) -> (Vec<(String, Module)>, Vec<(String, Module)>) {
+    let mut full_modules = Vec::new();
+    let mut stripped_modules = Vec::new();
     let entries = match fs::read_dir(shared_dir) {
         Ok(entries) => entries,
         Err(e) => {
@@ -449,7 +460,7 @@ fn load_shared_modules(engine: &Engine, shared_dir: &Path) -> Vec<(String, Modul
                 "Failed to read shared modules dir {}: {e}",
                 shared_dir.display()
             );
-            return modules;
+            return (full_modules, stripped_modules);
         }
     };
     for entry in entries {
@@ -468,13 +479,37 @@ fn load_shared_modules(engine: &Engine, shared_dir: &Path) -> Vec<(String, Modul
                 path.display(),
                 import_name
             );
-            match Module::from_file(engine, &path) {
-                Ok(module) => modules.push((import_name, module)),
-                Err(e) => tracing::error!("Failed to load shared module {}: {e}", path.display()),
+            let bytes = match fs::read(&path) {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::error!("Failed to read shared module {}: {e}", path.display());
+                    continue;
+                }
+            };
+            match Module::new(engine, &bytes) {
+                Ok(module) => full_modules.push((import_name.clone(), module)),
+                Err(e) => {
+                    tracing::error!("Failed to compile shared module {}: {e}", path.display());
+                    continue;
+                }
+            }
+            match snapshot::strip_module_data(&bytes) {
+                Ok(stripped_bytes) => match Module::new(engine, &stripped_bytes) {
+                    Ok(module) => stripped_modules.push((import_name, module)),
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to compile stripped shared module {}: {e}",
+                            path.display()
+                        );
+                    }
+                },
+                Err(e) => {
+                    tracing::error!("Failed to strip shared module {}: {e}", path.display());
+                }
             }
         }
     }
-    modules
+    (full_modules, stripped_modules)
 }
 
 /// Creates a new linker with WASI and API bindings configured.
@@ -516,15 +551,15 @@ impl Runtime {
             }
         };
 
-        let shared_modules = if let Some(ref dir) = py_runtime_dir {
+        let (shared_modules, stripped_shared_modules) = if let Some(ref dir) = py_runtime_dir {
             let shared_dir = dir.join("shared");
             if shared_dir.is_dir() {
                 load_shared_modules(&engine, &shared_dir)
             } else {
-                Vec::new()
+                (Vec::new(), Vec::new())
             }
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
 
         if !shared_modules.is_empty() {
@@ -538,6 +573,7 @@ impl Runtime {
             finished_instances: DashMap::new(),
             running_server_instances: DashMap::new(),
             shared_modules: Arc::new(shared_modules),
+            stripped_shared_modules: Arc::new(stripped_shared_modules),
             py_runtime_dir,
         }
     }
@@ -551,6 +587,76 @@ impl Runtime {
                 program_hash.manifest_hash.clone(),
             )),
         }
+    }
+
+    async fn load_program(
+        &self,
+        program_hash: ProgramHash,
+        component: Component,
+        dependencies: Vec<ProgramHash>,
+        python_runtime: Option<String>,
+        wasm_bytes: Option<Vec<u8>>,
+    ) {
+        // Perform snapshot optimization if the program requires a Python runtime,
+        // otherwise use the original component.
+        let final_component = if python_runtime.is_some() {
+            if let Some(original_bytes) = wasm_bytes {
+                match self.snapshot_python_component(&original_bytes).await {
+                    Ok(snapshotted) => snapshotted,
+                    Err(e) => {
+                        tracing::error!("Snapshot failed, falling back to original component: {e}");
+                        component
+                    }
+                }
+            } else {
+                tracing::warn!("Python component missing wasm_bytes for snapshot, using original");
+                component
+            }
+        } else {
+            component
+        };
+
+        let compiled_program = CompiledProgram {
+            component: final_component,
+            dependencies,
+            python_runtime,
+        };
+        self.compiled_programs
+            .insert(program_hash, compiled_program);
+    }
+
+    /// Snapshot a Python component by instrumenting, initializing, and capturing
+    /// its post-init memory/globals state into a new component binary.
+    async fn snapshot_python_component(
+        &self,
+        original_bytes: &[u8],
+    ) -> Result<Component, RuntimeError> {
+        let engine = self.engine.clone();
+        let shared_modules = self.shared_modules.clone();
+        let py_runtime_dir = self.py_runtime_dir.clone();
+
+        let linker = create_linker(&engine, &shared_modules);
+
+        let make_store = move |engine: &Engine| -> anyhow::Result<Store<InstanceState>> {
+            let (inst_state, _output_delivery_ctrl) = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(InstanceState::new(
+                    Uuid::new_v4(),
+                    "snapshot".to_string(),
+                    vec![],
+                    py_runtime_dir.as_deref(),
+                ))
+            });
+            Ok(Store::new(engine, inst_state))
+        };
+
+        let snapshotted_bytes =
+            snapshot::snapshot_component(&engine, original_bytes, &linker, &make_store)
+                .await
+                .map_err(|e| RuntimeError::Other(format!("Snapshot failed: {e}")))?;
+
+        Component::new(&engine, &snapshotted_bytes).map_err(|e| {
+            RuntimeError::Other(format!("Failed to compile snapshotted component: {e}"))
+        })
     }
 
     /// Collect all dependencies of a program in topological order (dependencies before dependents).
@@ -653,7 +759,10 @@ impl Runtime {
             self.collect_dependencies_topo_order(&program_hash)?;
 
         let (shared_modules, py_runtime_dir) = if python_runtime.is_some() {
-            (self.shared_modules.clone(), self.py_runtime_dir.clone())
+            (
+                self.stripped_shared_modules.clone(),
+                self.py_runtime_dir.clone(),
+            )
         } else {
             (Arc::new(Vec::new()), None)
         };
@@ -769,7 +878,10 @@ impl Runtime {
             self.collect_dependencies_topo_order(&program_hash)?;
 
         let (shared_modules, py_runtime_dir) = if python_runtime.is_some() {
-            (self.shared_modules.clone(), self.py_runtime_dir.clone())
+            (
+                self.stripped_shared_modules.clone(),
+                self.py_runtime_dir.clone(),
+            )
         } else {
             (Arc::new(Vec::new()), None)
         };

@@ -1905,6 +1905,12 @@ async fn ensure_program_loaded_with_dependencies(
                 )
             })?;
 
+        let wasm_bytes_for_snapshot = if program_metadata.python_runtime.is_some() {
+            Some(raw_bytes.clone())
+        } else {
+            None
+        };
+
         let component = compile_wasm_component(wasm_engine, raw_bytes)
             .await
             .map_err(|e| e.to_string())?;
@@ -1934,6 +1940,7 @@ async fn ensure_program_loaded_with_dependencies(
             component,
             dependencies,
             python_runtime: program_metadata.python_runtime.clone(),
+            wasm_bytes: wasm_bytes_for_snapshot,
             event: load_tx,
         }
         .dispatch();
