@@ -1,0 +1,128 @@
+// WARNING: This file is the source of truth for the queue interface.
+// It is accessed from multiple locations:
+//   - inferlib/queue/wit/queue.wit (this file, source)
+//   - inferlib/queue-bindings/wit/deps/queue/queue.wit (symlink)
+// Any changes made here will be reflected in all locations that symlink to this file.
+
+package inferlib:queue;
+
+/// Interface for queue and forward pass management
+interface queues {
+    /// Resource type enumeration for allocation
+    enum resource-type {
+        kv-page,
+        embed,
+        adapter,
+    }
+
+    /// Priority levels for queue scheduling
+    enum priority {
+        low,
+        normal,
+        high,
+    }
+
+    /// Result of a forward pass containing distributions and/or tokens
+    record forward-pass-result {
+        /// Token distributions (ids and probabilities)
+        distributions: option<list<distribution>>,
+        /// Sampled token IDs
+        tokens: option<list<u32>>,
+    }
+
+    /// A probability distribution over tokens
+    record distribution {
+        /// Token IDs
+        ids: list<u32>,
+        /// Probabilities corresponding to token IDs
+        probs: list<f32>,
+    }
+
+    /// A forward pass builder for configuring and executing model inference
+    resource forward-pass {
+        /// Set input tokens with their positions
+        input-tokens: func(tokens: list<u32>, positions: list<u32>);
+
+        /// Set input embedding pointers with their positions
+        input-embed-ptrs: func(embed-ptrs: list<u32>, positions: list<u32>);
+
+        /// Set the KV cache pages and the length of the last page
+        kv-cache: func(kv-page-ptrs: list<u32>, last-kv-page-len: u32);
+
+        /// Set the attention mask (list of brle-encoded masks per token)
+        attention-mask: func(mask: list<list<u32>>);
+
+        /// Set the adapter pointer
+        set-adapter: func(adapter-ptr: u32);
+
+        /// Set the adapter random seed
+        set-adapter-seed: func(seed: s64);
+
+        /// Request output distributions at specified indices
+        output-distributions: func(indices: list<u32>, temperature: f32, top-k: option<u32>);
+
+        /// Request output tokens at specified indices with multinomial sampling
+        output-tokens: func(indices: list<u32>, temperature: f32);
+
+        /// Request output tokens with top-p sampling
+        output-tokens-top-p: func(indices: list<u32>, temperature: f32, top-p: f32);
+
+        /// Request output tokens with top-k sampling
+        output-tokens-top-k: func(indices: list<u32>, temperature: f32, top-k: u32);
+
+        /// Request output tokens with min-p sampling
+        output-tokens-min-p: func(indices: list<u32>, temperature: f32, min-p: f32);
+
+        /// Request output tokens with combined top-k and top-p sampling
+        output-tokens-top-k-top-p: func(indices: list<u32>, temperature: f32, top-k: u32, top-p: f32);
+
+        /// Request output embedding pointers at specified indices
+        output-embed-ptrs: func(embed-ptrs: list<u32>, indices: list<u32>);
+
+        /// Execute the forward pass and return results
+        execute: func() -> forward-pass-result;
+    }
+
+    /// A command queue for model inference operations
+    resource queue {
+        /// Create a new queue from a model name
+        /// The model is looked up by name internally
+        from-model-name: static func(model-name: string) -> queue;
+
+        /// Gets the service ID for the queue
+        get-service-id: func() -> u32;
+
+        /// Synchronize the queue (blocks until all pending operations complete)
+        synchronize: func() -> bool;
+
+        /// Set the queue's priority
+        set-priority: func(priority: priority);
+
+        /// Allocate KV page pointers
+        allocate-kv-pages: func(count: u32) -> list<u32>;
+
+        /// Deallocate KV page pointers
+        deallocate-kv-pages: func(ptrs: list<u32>);
+
+        /// Export KV pages with a name
+        export-kv-pages: func(ptrs: list<u32>, name: string);
+
+        /// Import KV pages by name
+        import-kv-pages: func(name: string) -> list<u32>;
+
+        /// Get all exported KV pages (name, count)
+        get-all-exported-kv-pages: func() -> list<tuple<string, u32>>;
+
+        /// Release exported KV pages by name
+        release-exported-kv-pages: func(name: string);
+
+        /// Allocate embedding pointers
+        allocate-embeds: func(count: u32) -> list<u32>;
+
+        /// Deallocate embedding pointers
+        deallocate-embeds: func(ptrs: list<u32>);
+
+        /// Create a forward pass for this queue
+        create-forward-pass: func() -> forward-pass;
+    }
+}
