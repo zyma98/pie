@@ -1,0 +1,17 @@
+package testlib:testlib;
+
+interface models {
+    resource model {
+        get-auto: static func() -> model;
+        get-name: func() -> string;
+    }
+}
+
+interface inference {
+    use models.{model};
+
+    resource context {
+        constructor(model: borrow<model>);
+        get-value: func() -> string;
+    }
+}

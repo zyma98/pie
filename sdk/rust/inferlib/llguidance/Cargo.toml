@@ -1,0 +1,14 @@
+[package]
+name = "inferlib-llguidance"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+name = "inferlib_llguidance"
+
+[dependencies]
+wit-bindgen = { workspace = true }
+llguidance = { version = "1.1.1", default-features = false, features = ["lark"] }
+fancy-regex = "0.15.0"
+once_cell = "1.21"

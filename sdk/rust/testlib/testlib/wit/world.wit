@@ -1,0 +1,6 @@
+package testlib:testlib;
+
+world testlib-provider {
+    export models;
+    export inference;
+}
