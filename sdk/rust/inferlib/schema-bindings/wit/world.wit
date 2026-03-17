@@ -1,0 +1,5 @@
+package inferlib:schema-bindings;
+
+world importer {
+    import inferlib:schema/json-schema;
+}

@@ -1,0 +1,179 @@
+mod adapter;
+mod brle;
+mod chat;
+mod context;
+mod formatter;
+mod forward;
+mod image;
+mod models;
+mod queues;
+mod zo;
+
+wit_bindgen::generate!({
+    path: "wit",
+    world: "inference-provider",
+    generate_all,
+    with: {
+        "wasi:io/poll@0.2.0": wasip2::io::poll,
+    },
+});
+
+use context::{ContextImpl, DecodeStepFutureImpl, FlushFutureImpl, GenerateFutureImpl};
+use formatter::ChatFormatterImpl;
+use forward::ForwardPassImpl;
+use models::{ModelImpl, TokenizerImpl};
+use queues::QueueImpl;
+
+use exports::inferlib::inference::formatter::Guest as FormatterGuest;
+use exports::inferlib::inference::inference::Guest as InferenceGuest;
+use exports::inferlib::inference::kvstore::Guest as KvstoreGuest;
+use exports::inferlib::inference::messaging::Guest as MessagingGuest;
+use exports::inferlib::inference::models::Guest as ModelsGuest;
+use exports::inferlib::inference::queues::Guest as QueuesGuest;
+use exports::inferlib::inference::runtime::Guest as RuntimeGuest;
+
+use wstd::runtime::{AsyncPollable, block_on};
+
+struct InferenceComponentImpl;
+
+impl ModelsGuest for InferenceComponentImpl {
+    type Model = ModelImpl;
+    type Tokenizer = TokenizerImpl;
+}
+
+impl QueuesGuest for InferenceComponentImpl {
+    type Queue = QueueImpl;
+    type ForwardPass = ForwardPassImpl;
+}
+
+impl RuntimeGuest for InferenceComponentImpl {
+    /// Returns the runtime version string.
+    fn get_version() -> String {
+        inferlib_engine_bindings::inferlet::core::runtime::get_version()
+    }
+
+    /// Returns a unique identifier for the running instance.
+    fn get_instance_id() -> String {
+        inferlib_engine_bindings::inferlet::core::runtime::get_instance_id()
+    }
+
+    /// Retrieves POSIX-style CLI arguments passed to the inferlet from the remote user client.
+    fn get_arguments() -> Vec<String> {
+        inferlib_engine_bindings::inferlet::core::runtime::get_arguments()
+    }
+
+    fn set_return(value: String) {
+        inferlib_engine_bindings::inferlet::core::runtime::set_return(&value);
+    }
+
+    /// Get names of models that have all specified traits (e.g. "input_text", "tokenize").
+    fn get_all_models_with_traits(traits: Vec<String>) -> Vec<String> {
+        inferlib_engine_bindings::inferlet::core::runtime::get_all_models_with_traits(&traits)
+    }
+
+    /// Executes a debug command and returns the result as a string.
+    fn debug_query(query: String) -> String {
+        let future = inferlib_engine_bindings::inferlet::core::runtime::debug_query(&query);
+        let pollable = future.pollable();
+        block_on(async {
+            AsyncPollable::new(pollable).wait_for().await;
+        });
+        future.get().unwrap()
+    }
+}
+
+impl InferenceGuest for InferenceComponentImpl {
+    type Context = ContextImpl;
+    type DecodeStepFuture = DecodeStepFutureImpl;
+    type FlushFuture = FlushFutureImpl;
+    type GenerateFuture = GenerateFutureImpl;
+}
+
+impl FormatterGuest for InferenceComponentImpl {
+    type ChatFormatter = ChatFormatterImpl;
+}
+
+impl MessagingGuest for InferenceComponentImpl {
+    /// Sends a message to the remote user client.
+    fn send(message: String) {
+        inferlib_engine_bindings::inferlet::core::message::send(&message);
+    }
+
+    /// Receives an incoming message from the remote user client.
+    fn receive() -> String {
+        let future = inferlib_engine_bindings::inferlet::core::message::receive();
+        let pollable = future.pollable();
+        block_on(async {
+            AsyncPollable::new(pollable).wait_for().await;
+        });
+        future.get().unwrap()
+    }
+
+    /// Sends a blob to the remote user client.
+    fn send_blob(data: Vec<u8>) {
+        use inferlib_engine_bindings::inferlet::core::common::Blob;
+        let blob = Blob::new(&data);
+        inferlib_engine_bindings::inferlet::core::message::send_blob(blob);
+    }
+
+    /// Receives an incoming blob from the remote user client.
+    fn receive_blob() -> Vec<u8> {
+        let future = inferlib_engine_bindings::inferlet::core::message::receive_blob();
+        let pollable = future.pollable();
+        block_on(async {
+            AsyncPollable::new(pollable).wait_for().await;
+        });
+        let blob = future.get().unwrap();
+        blob.read(0, blob.size())
+    }
+
+    /// Publishes a message to a topic, broadcasting it to all subscribers.
+    fn broadcast(topic: String, message: String) {
+        inferlib_engine_bindings::inferlet::core::message::broadcast(&topic, &message);
+    }
+
+    /// Subscribes to a topic and waits for the next message.
+    fn subscribe(topic: String) -> String {
+        let subscription = inferlib_engine_bindings::inferlet::core::message::subscribe(&topic);
+        let pollable = subscription.pollable();
+        block_on(async {
+            AsyncPollable::new(pollable).wait_for().await;
+        });
+        subscription.get().unwrap()
+    }
+}
+
+impl KvstoreGuest for InferenceComponentImpl {
+    /// Retrieves a value from the persistent store for a given key.
+    ///
+    /// Returns `Some(value)` if the key exists, or `None` if it does not.
+    fn store_get(key: String) -> Option<String> {
+        inferlib_engine_bindings::inferlet::core::kvs::store_get(&key)
+    }
+
+    /// Sets a value in the persistent store for a given key.
+    ///
+    /// This will create a new entry or overwrite an existing one.
+    fn store_set(key: String, value: String) {
+        inferlib_engine_bindings::inferlet::core::kvs::store_set(&key, &value);
+    }
+
+    /// Deletes a key-value pair from the store.
+    ///
+    /// If the key does not exist, this function does nothing.
+    fn store_delete(key: String) {
+        inferlib_engine_bindings::inferlet::core::kvs::store_delete(&key);
+    }
+
+    /// Checks if a key exists in the store.
+    fn store_exists(key: String) -> bool {
+        inferlib_engine_bindings::inferlet::core::kvs::store_exists(&key)
+    }
+
+    /// Returns a list of all keys currently in the store.
+    fn store_list_keys() -> Vec<String> {
+        inferlib_engine_bindings::inferlet::core::kvs::store_list_keys()
+    }
+}
+
+export!(InferenceComponentImpl);

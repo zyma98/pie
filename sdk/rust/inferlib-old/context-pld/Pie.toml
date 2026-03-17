@@ -1,0 +1,14 @@
+[package]
+name = "inferlib-context-pld"
+version = "0.1.0"
+authors = ["Pie Team"]
+
+[runtime]
+core = "^0.2.0"
+mcp = "^0.2.0"
+
+[dependencies]
+inferlib-brle = "0.1.0"
+inferlib-chat = "0.1.0"
+inferlib-model = "0.1.0"
+inferlib-queue = "0.1.0"

@@ -1,0 +1,17 @@
+[package]
+name = "text-completion-inferlib-old"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+inferlib-chat-bindings = { path = "../../rust/inferlib-old/chat-bindings" }
+inferlib-environment-bindings = { path = "../../rust/inferlib-old/environment-bindings" }
+inferlib-context-bindings = { path = "../../rust/inferlib-old/context-bindings" }
+inferlib-old-run-bindings = { path = "../../rust/inferlib-old/run-bindings" }
+inferlib-old-macros = { path = "../../rust/inferlib-old-macros" }
+futures = "0.3.31"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
