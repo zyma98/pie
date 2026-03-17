@@ -1,0 +1,13 @@
+[package]
+name = "text-completion-inferlib2"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+inferlib2-context-bindings = { path = "../../rust/inferlib2/context-bindings" }
+inferlib2-engine-bindings = { path = "../../rust/inferlib2/engine-bindings" }
+inferlib-run-bindings = { path = "../../rust/inferlib/run-bindings" }
+inferlib2-macros = { path = "../../rust/inferlib2-macros" }

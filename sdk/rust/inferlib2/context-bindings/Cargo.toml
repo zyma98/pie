@@ -1,0 +1,10 @@
+[package]
+name = "inferlib2-context-bindings"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+wit-bindgen = { workspace = true }
+
+# Import engine bindings for model types instead of regenerating
+inferlib2-engine-bindings = { path = "../engine-bindings" }
