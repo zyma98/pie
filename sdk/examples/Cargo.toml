@@ -19,6 +19,7 @@ members = [
     "prefix-tree",
     "recursion-of-thought",
     "skeleton-of-thought",
+    "text-completion-inferlib",
     "tree-of-thought",
     "watermarking",
     "windowed-attention",
