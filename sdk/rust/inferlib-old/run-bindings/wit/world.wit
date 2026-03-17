@@ -1,0 +1,6 @@
+package inferlib:run-bindings;
+
+/// World for application entry point - applications export the run interface
+world app {
+    export inferlet:core/run;
+}

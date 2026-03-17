@@ -1,0 +1,5 @@
+package inferlib:js-engine;
+
+interface js-engine {
+    execute: func(code: string) -> string;
+}
