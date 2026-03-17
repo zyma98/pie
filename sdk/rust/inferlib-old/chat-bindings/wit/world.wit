@@ -1,0 +1,5 @@
+package inferlib:chat-bindings;
+
+world importer {
+    import inferlib:chat/formatter;
+}

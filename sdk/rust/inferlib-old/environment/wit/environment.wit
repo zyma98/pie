@@ -1,0 +1,22 @@
+// WARNING: This file is the source of truth for the environment interface.
+// It is accessed from multiple locations:
+//   - inferlib/environment/wit/environment.wit (this file, source)
+//   - inferlib/environment-bindings/wit/deps/environment/environment.wit (symlink)
+// Any changes made here will be reflected in all locations that symlink to this file.
+
+package inferlib:environment;
+
+/// Interface for runtime environment interaction
+interface runtime {
+    /// Returns the runtime version string
+    get-version: func() -> string;
+    
+    /// Returns a unique identifier for the running instance
+    get-instance-id: func() -> string;
+    
+    /// Retrieves POSIX-style CLI arguments passed to the inferlet from the remote user client
+    get-arguments: func() -> list<string>;
+    
+    /// Sets the return value for the inferlet execution
+    set-return: func(value: string);
+}

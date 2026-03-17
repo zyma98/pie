@@ -1,0 +1,14 @@
+[package]
+name = "recursion-of-thought"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+inferlib-inference-bindings = { path = "../../rust/inferlib/inference-bindings" }
+inferlib-run-bindings = { path = "../../rust/inferlib/run-bindings" }
+inferlib-macros = { path = "../../rust/inferlib-macros" }
+futures = "0.3"
+wstd = "0.5.6"
