@@ -1,0 +1,6 @@
+package testlib:testlib-bindings;
+
+world importer {
+    import testlib:testlib/models;
+    import testlib:testlib/inference;
+}

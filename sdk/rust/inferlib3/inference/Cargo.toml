@@ -1,0 +1,16 @@
+[package]
+name = "inferlib3-inference"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+name = "inferlib3_inference"
+
+[dependencies]
+wit-bindgen = { workspace = true }
+wstd = "0.5.6"
+wasip2 = "1.0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+minijinja = { version = "2.5", features = ["loader"] }

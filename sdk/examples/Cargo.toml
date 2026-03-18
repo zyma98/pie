@@ -21,6 +21,8 @@ members = [
     "skeleton-of-thought",
     "text-completion-inferlib",
     "text-completion-inferlib2",
+    "testapp",
+    "text-completion-inferlib3",
     "tree-of-thought",
     "watermarking",
     "windowed-attention",
