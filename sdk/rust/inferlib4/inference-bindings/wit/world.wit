@@ -1,0 +1,11 @@
+package inferlib4:inference-bindings;
+
+world importer {
+    import inferlib4:inference/models;
+    import inferlib4:inference/queues;
+    import inferlib4:inference/runtime;
+    import inferlib4:inference/inference;
+    import inferlib4:inference/formatter;
+    import inferlib4:inference/messaging;
+    import inferlib4:inference/kvstore;
+}

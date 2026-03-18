@@ -23,6 +23,7 @@ members = [
     "text-completion-inferlib2",
     "testapp",
     "text-completion-inferlib3",
+    "text-completion-inferlib4",
     "tree-of-thought",
     "watermarking",
     "windowed-attention",
