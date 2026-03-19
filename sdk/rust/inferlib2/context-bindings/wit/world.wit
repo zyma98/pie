@@ -1,7 +1,0 @@
-package inferlib2:context-bindings;
-
-world importer {
-    import inferlib2:engine/models;
-    import inferlib2:context/inference;
-    import inferlib2:context/formatter;
-}

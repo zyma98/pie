@@ -1,7 +1,0 @@
-[package]
-name = "inferlib3-inference-bindings"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-wit-bindgen = { workspace = true }

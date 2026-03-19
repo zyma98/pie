@@ -1,9 +1,0 @@
-package inferlib2:context;
-
-world context-provider {
-    import inferlib2:engine/models;
-    import inferlib2:engine/queues;
-
-    export inference;
-    export formatter;
-}
