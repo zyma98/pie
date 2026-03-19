@@ -3,7 +3,6 @@ use proc_macro2::Span;
 use quote::quote;
 use syn::{parse_macro_input, ItemFn};
 
-/// Reads the package name from Pie.toml.
 fn read_package_name() -> Result<String, String> {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
         .map_err(|_| "CARGO_MANIFEST_DIR not set".to_string())?;
@@ -23,28 +22,11 @@ fn read_package_name() -> Result<String, String> {
         .ok_or_else(|| "Missing [package].name in Pie.toml".to_string())
 }
 
-/// Converts a package name like "text-completion" to a valid Rust identifier "text_completion"
 fn to_rust_ident(name: &str) -> syn::Ident {
     let sanitized = name.replace('-', "_");
     syn::Ident::new(&sanitized, Span::call_site())
 }
 
-/// Attribute macro for defining the main entry point of an inferlib application.
-///
-/// This macro generates the boilerplate code needed to implement the `Guest` trait
-/// and export the application entry point under `pie:{package_name}/run`, where
-/// `package_name` is read from the `Pie.toml` file.
-///
-/// # Example
-///
-/// ```rust,no_run
-/// use inferlib_run_bindings::{Args, Result};
-///
-/// #[inferlib_macros::main]
-/// async fn main(args: Args) -> Result<String> {
-///     Ok("Hello, world!".to_string())
-/// }
-/// ```
 #[proc_macro_attribute]
 pub fn main(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut input_fn = parse_macro_input!(item as ItemFn);
@@ -103,7 +85,7 @@ world inferlet {{
         impl __pie_export::exports::pie::#package_ident::run::Guest for __PieMain {
             fn run() -> ::core::result::Result<(), ::std::string::String> {
                 let args = ::inferlib_run_bindings::Args::from_vec(
-                    ::inferlib_environment_bindings::get_arguments()
+                    ::inferlib_inference_bindings::get_arguments()
                         .into_iter()
                         .map(::std::ffi::OsString::from)
                         .collect(),
@@ -122,7 +104,7 @@ world inferlet {{
                             ::std::format!("{:?}", r)
                         };
 
-                        ::inferlib_environment_bindings::set_return(&output);
+                        ::inferlib_inference_bindings::set_return(&output);
                         ::core::result::Result::Ok(())
                     }
                     ::core::result::Result::Err(e) => ::core::result::Result::Err(::std::format!("{:?}", e)),

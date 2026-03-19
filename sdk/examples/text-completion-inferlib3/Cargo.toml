@@ -8,5 +8,5 @@ crate-type = ["cdylib"]
 
 [dependencies]
 inferlib3-inference-bindings = { path = "../../rust/inferlib3/inference-bindings" }
-inferlib-run-bindings = { path = "../../rust/inferlib/run-bindings" }
+inferlib-old-run-bindings = { path = "../../rust/inferlib-old/run-bindings" }
 inferlib3-macros = { path = "../../rust/inferlib3-macros" }

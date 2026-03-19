@@ -1,15 +1,18 @@
-use inferlib_inference_bindings::{ChatFormatter, Context, Model, SamplerConfig, StopConfig};
-use inferlib_run_bindings::{Args, Result, anyhow};
+use inferlib_chat_bindings::ChatFormatter;
+use inferlib_context_bindings::{Context, Model, SamplerConfig, StopConfig};
+use inferlib_old_run_bindings::{Args, Result, anyhow};
 use std::time::Instant;
 
-#[inferlib_macros::main]
+#[inferlib_old_macros::main]
 async fn main(mut args: Args) -> Result<String> {
     let prompt: String = args.value_from_str(["-p", "--prompt"])?;
     let max_num_outputs: usize = args.value_from_str(["-n", "--max-tokens"]).unwrap_or(256);
 
     let start = Instant::now();
+
     let model = Model::get_auto();
     let tokenizer = model.get_tokenizer();
+    let ctx = Context::new(&model);
 
     let formatter = ChatFormatter::new(&model.get_prompt_template())
         .map_err(|e| anyhow!("Failed to create ChatFormatter: {}", e))?;
@@ -18,8 +21,6 @@ async fn main(mut args: Args) -> Result<String> {
     formatter.add_user(&prompt);
 
     let rendered_prompt = formatter.render(true, true);
-
-    let ctx = Context::new(&model);
     ctx.fill(&rendered_prompt);
 
     let sampler = SamplerConfig::TopP((0.6, 0.95));

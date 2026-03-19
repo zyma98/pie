@@ -1,5 +1,5 @@
 use inferlib2_context_bindings::{ChatFormatter, Context, Model, SamplerConfig, StopConfig};
-use inferlib_run_bindings::{Args, Result, anyhow};
+use inferlib_old_run_bindings::{Args, Result, anyhow};
 use std::time::Instant;
 
 #[inferlib2_macros::main]

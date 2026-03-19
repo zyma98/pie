@@ -1,8 +1,0 @@
-[package]
-name = "inferlib4-engine-bindings"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-wit-bindgen = { workspace = true }
-wasip2 = "1.0.1"

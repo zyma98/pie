@@ -1,7 +1,7 @@
 [package]
-name = "text-completion-inferlib"
+name = "text-completion-inferlib-old"
 version = "0.1.0"
-description = "Simple text completion inferlet using inferlib"
+description = "Simple text completion inferlet"
 authors = ["Pie Team"]
 
 [runtime]
@@ -16,4 +16,7 @@ temperature = {type = "float", optional = true, description = "Sampling temperat
 top_p = {type = "float", optional = true, description = "Top-p nucleus sampling threshold (default: 0.95)"}
 
 [dependencies]
-inferlib-inference = "0.1.0"
+inferlib-environment = "0.1.0"
+inferlib-chat = "0.1.0"
+inferlib-model = "0.1.0"
+inferlib-context = "0.1.0"

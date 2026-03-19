@@ -70,11 +70,11 @@ world inferlet {{
 
     let expanded = quote! {
         mod __pie_export {
-            ::inferlib_run_bindings::wit_bindgen::generate!({
+            ::inferlib_old_run_bindings::wit_bindgen::generate!({
                 inline: #export_wit,
                 world: "inferlet",
                 pub_export_macro: true,
-                runtime_path: "::inferlib_run_bindings::wit_bindgen::rt",
+                runtime_path: "::inferlib_old_run_bindings::wit_bindgen::rt",
             });
         }
 
@@ -84,14 +84,14 @@ world inferlet {{
 
         impl __pie_export::exports::pie::#package_ident::run::Guest for __PieMain {
             fn run() -> ::core::result::Result<(), ::std::string::String> {
-                let args = ::inferlib_run_bindings::Args::from_vec(
+                let args = ::inferlib_old_run_bindings::Args::from_vec(
                     ::inferlib3_inference_bindings::get_arguments()
                         .into_iter()
                         .map(::std::ffi::OsString::from)
                         .collect(),
                 );
 
-                let result = ::inferlib_run_bindings::block_on(async { #inner_fn_name(args).await });
+                let result = ::inferlib_old_run_bindings::block_on(async { #inner_fn_name(args).await });
 
                 match result {
                     ::core::result::Result::Ok(r) => {

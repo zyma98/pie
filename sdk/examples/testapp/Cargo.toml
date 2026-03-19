@@ -8,4 +8,4 @@ crate-type = ["cdylib"]
 
 [dependencies]
 testlib-bindings = { path = "../../rust/testlib/testlib-bindings" }
-inferlib-run-bindings = { path = "../../rust/inferlib/run-bindings" }
+inferlib-old-run-bindings = { path = "../../rust/inferlib-old/run-bindings" }

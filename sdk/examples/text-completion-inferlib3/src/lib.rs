@@ -1,5 +1,5 @@
 use inferlib3_inference_bindings::{ChatFormatter, Context, Model, SamplerConfig, StopConfig};
-use inferlib_run_bindings::{Args, Result, anyhow};
+use inferlib_old_run_bindings::{Args, Result, anyhow};
 
 #[inferlib3_macros::main]
 async fn main(mut args: Args) -> Result<String> {
