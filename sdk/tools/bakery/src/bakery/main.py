@@ -68,13 +68,20 @@ def build(
     debug: Annotated[
         bool, typer.Option("--debug", help="Enable debug build (include source maps).")
     ] = False,
+    inferlib: Annotated[
+        bool,
+        typer.Option(
+            "--inferlib", help="Build using inferlib WIT instead of inferlet."
+        ),
+    ] = False,
 ) -> None:
-    """Build a JavaScript/TypeScript inferlet into a WebAssembly component."""
+    """Build an inferlet into a WebAssembly component."""
     try:
         build_cmd.handle_build_command(
             input_path=expand_path(input_path),
             output=expand_path(output),
             debug=debug,
+            inferlib=inferlib,
         )
     except Exception as e:
         typer.echo(f"Error: {e}", err=True)
