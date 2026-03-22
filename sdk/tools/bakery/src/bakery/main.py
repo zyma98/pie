@@ -68,13 +68,42 @@ def build(
     debug: Annotated[
         bool, typer.Option("--debug", help="Enable debug build (include source maps).")
     ] = False,
+    inferlib: Annotated[
+        Optional[list[Path]],
+        typer.Option(
+            "--inferlib",
+            help="Build using inferlib mode; value is a directory containing bindings WIT. Can be specified multiple times.",
+        ),
+    ] = None,
+    lib: Annotated[
+        bool,
+        typer.Option(
+            "--lib",
+            help="Build as a library component (exports custom WIT interfaces, no run wrapper).",
+        ),
+    ] = False,
+    world: Annotated[
+        Optional[str],
+        typer.Option("--world", help="WIT world name (required with --lib)."),
+    ] = None,
+    extra: Annotated[
+        Optional[list[Path]],
+        typer.Option(
+            "--extra",
+            help="Extra Python package path passed as -p to componentize-py. Can be specified multiple times.",
+        ),
+    ] = None,
 ) -> None:
-    """Build a JavaScript/TypeScript inferlet into a WebAssembly component."""
+    """Build an inferlet into a WebAssembly component."""
     try:
         build_cmd.handle_build_command(
             input_path=expand_path(input_path),
             output=expand_path(output),
             debug=debug,
+            inferlib=inferlib,
+            lib=lib,
+            world=world,
+            extra=extra,
         )
     except Exception as e:
         typer.echo(f"Error: {e}", err=True)
