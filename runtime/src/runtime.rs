@@ -16,6 +16,8 @@ use thiserror::Error;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 use wasmtime::component::Resource;
+#[cfg(feature = "microbench_call_latency")]
+use wasmtime::component::Val;
 use wasmtime::{Engine, Module, Store, component::Component, component::Linker};
 use wasmtime_wasi_http::WasiHttpView;
 use wasmtime_wasi_http::bindings::exports::wasi::http::incoming_handler::{
@@ -540,6 +542,9 @@ fn create_linker(engine: &Engine, shared_modules: &[(String, Module)]) -> Linker
             .unwrap_or_else(|e| panic!("Failed to register shared module '{name}': {e}"));
     }
 
+    #[cfg(feature = "microbench_call_latency")]
+    register_microbench_host_functions(&mut linker);
+
     linker
 }
 
@@ -599,6 +604,79 @@ fn collect_deps_recursive(
         result.push(compiled_program.component.clone());
     }
     Ok(())
+}
+
+#[cfg(feature = "microbench_call_latency")]
+fn register_microbench_host_functions(linker: &mut Linker<InstanceState>) {
+    // R2H: host-side echo function for measuring guest-to-host round trip
+    {
+        let mut root = linker.root();
+        let mut inst = root.instance("microbench:host-echo/host-echo").unwrap();
+        inst.func_new_async("echo", |_store, _ty, args, returns| {
+            Box::new(async move {
+                returns[0] = args[0].clone();
+                Ok(())
+            })
+        })
+        .unwrap();
+    }
+
+    // H2R: host function that benchmarks calling a library-exported guest function directly
+    {
+        let mut root = linker.root();
+        let mut inst = root
+            .instance("microbench:h2r-benchmark/h2r-benchmark")
+            .unwrap();
+        inst.func_new_async("run-benchmark", |mut store, _ty, args, returns| {
+            Box::new(async move {
+                let warmup = match &args[0] {
+                    Val::U64(v) => *v,
+                    _ => return Err(wasmtime::Error::msg("expected u64 for warmup")),
+                };
+                let iterations = match &args[1] {
+                    Val::U64(v) => *v,
+                    _ => return Err(wasmtime::Error::msg("expected u64 for iterations")),
+                };
+
+                let func = store.data().benchmark_target_func.ok_or_else(|| {
+                    wasmtime::Error::msg(
+                        "no benchmark target function; ensure inferlib-r2r-echo-callee \
+                             is listed as a dependency",
+                    )
+                })?;
+
+                let call_args = [Val::String("hello".to_string())];
+                let mut call_returns = [Val::String(String::new())];
+
+                for _ in 0..warmup {
+                    func.call_async(&mut store, &call_args, &mut call_returns)
+                        .await?;
+                    func.post_return_async(&mut store).await?;
+                }
+
+                let start = std::time::Instant::now();
+                for _ in 0..iterations {
+                    func.call_async(&mut store, &call_args, &mut call_returns)
+                        .await?;
+                    func.post_return_async(&mut store).await?;
+                }
+                let elapsed = start.elapsed();
+
+                let per_call_ns = elapsed.as_nanos() as f64 / iterations as f64;
+                let result = format!(
+                    "Host-to-guest echo() call benchmark (H2R)\n  \
+                     Warmup iterations:  {warmup}\n  \
+                     Bench iterations:   {iterations}\n  \
+                     Total elapsed:      {elapsed:?}\n  \
+                     Per-call latency:   {per_call_ns:.1} ns"
+                );
+
+                returns[0] = Val::String(result.into());
+                Ok(())
+            })
+        })
+        .unwrap();
+    }
 }
 
 impl Runtime {
@@ -1332,6 +1410,9 @@ impl Runtime {
             };
         }
         .await;
+
+        #[cfg(feature = "microbench_call_latency")]
+        dynamic_linking::log_and_reset_dynamic_linking_stats();
 
         match result {
             Ok(return_value) => {
