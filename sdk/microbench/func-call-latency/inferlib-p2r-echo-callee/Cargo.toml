@@ -1,0 +1,11 @@
+[package]
+name = "inferlib-p2r-echo-callee"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+name = "inferlib_p2r_echo_callee"
+
+[dependencies]
+wit-bindgen = { workspace = true }
