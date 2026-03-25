@@ -1,0 +1,5 @@
+package microbench:echo-callee-bindings;
+
+world importer {
+    import microbench:echo-callee/echo;
+}

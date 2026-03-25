@@ -1,0 +1,13 @@
+[package]
+name = "inferlib-r2p-echo-caller"
+version = "0.1.0"
+description = "Microbenchmark: R2P cross-component echo function call"
+authors = ["Pie Team"]
+
+[runtime]
+core = "^0.2.0"
+mcp = "^0.2.0"
+
+[dependencies]
+inferlib-inference = "0.1.0"
+inferlib-r2p-echo-callee = "0.1.0"

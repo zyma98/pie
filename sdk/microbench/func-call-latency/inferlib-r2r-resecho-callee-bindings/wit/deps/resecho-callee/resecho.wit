@@ -1,0 +1,9 @@
+package microbench:resecho-callee;
+
+interface resecho {
+    resource dummy {
+        constructor();
+    }
+
+    resecho: func(s: string, resources: list<borrow<dummy>>) -> string;
+}
