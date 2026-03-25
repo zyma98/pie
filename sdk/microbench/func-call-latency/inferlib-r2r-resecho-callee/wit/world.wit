@@ -1,0 +1,5 @@
+package microbench:resecho-callee;
+
+world resecho-provider {
+    export resecho;
+}

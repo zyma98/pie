@@ -1,0 +1,5 @@
+package microbench:resecho-callee-bindings;
+
+world importer {
+    import microbench:resecho-callee/resecho;
+}
