@@ -218,6 +218,17 @@ use std::sync::Arc;
 
 use smallvec::SmallVec;
 
+#[cfg(feature = "microbench_call_latency")]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "microbench_call_latency")]
+use std::time::Instant;
+
+#[cfg(feature = "microbench_call_latency")]
+static DL_CALL_ASYNC_NS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "microbench_call_latency")]
+static DL_POST_RETURN_NS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "microbench_call_latency")]
+static DL_CALL_COUNT: AtomicU64 = AtomicU64::new(0);
 use wasmtime::component::types::{ComponentInstance as ComponentInstanceType, ComponentItem, Type};
 use wasmtime::component::{
     Component, Func, Instance, Linker, LinkerInstance, Resource, ResourceAny, ResourceType, Val,
@@ -1170,6 +1181,11 @@ fn register_interface_exports(
                 ))
             })?;
 
+        #[cfg(feature = "microbench_call_latency")]
+        if func_name == "echo" && store.data().benchmark_target_func.is_none() {
+            store.data_mut().benchmark_target_func = Some(func);
+        }
+
         let arg_types: Vec<Type> = func_type.params().map(|(_, ty)| ty).collect();
         let return_types: Vec<Type> = func_type.results().collect();
 
@@ -1209,13 +1225,33 @@ fn register_call_forwarding(
         // forward args and returns directly without any transformation. The
         // closure captures only the callee `Func` (which is `Copy`), avoiding
         // the Arc overhead and producing a smaller `Box<dyn Future>`.
-        inst.func_new_async(func_name, move |mut store, _ty, args, returns| {
-            Box::new(async move {
-                func.call_async(&mut store, args, returns).await?;
-                func.post_return_async(&mut store).await?;
-                Ok(())
+        #[cfg(not(feature = "microbench_call_latency"))]
+        {
+            inst.func_new_async(func_name, move |mut store, _ty, args, returns| {
+                Box::new(async move {
+                    func.call_async(&mut store, args, returns).await?;
+                    func.post_return_async(&mut store).await?;
+                    Ok(())
+                })
             })
-        })
+        }
+        #[cfg(feature = "microbench_call_latency")]
+        {
+            inst.func_new_async(func_name, move |mut store, _ty, args, returns| {
+                Box::new(async move {
+                    let t0 = Instant::now();
+                    func.call_async(&mut store, args, returns).await?;
+                    let t1 = Instant::now();
+                    func.post_return_async(&mut store).await?;
+                    let t2 = Instant::now();
+
+                    DL_CALL_ASYNC_NS.fetch_add((t1 - t0).as_nanos() as u64, Ordering::Relaxed);
+                    DL_POST_RETURN_NS.fetch_add((t2 - t1).as_nanos() as u64, Ordering::Relaxed);
+                    DL_CALL_COUNT.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                })
+            })
+        }
     } else {
         // Slow path: the function signature involves resource types, so we must
         // transform arguments from caller view to callee view (and vice versa
@@ -1259,4 +1295,34 @@ pub(super) async fn instantiate_libraries(
     }
 
     Ok(())
+}
+
+#[cfg(feature = "microbench_call_latency")]
+pub(super) fn log_and_reset_dynamic_linking_stats() {
+    let count = DL_CALL_COUNT.swap(0, Ordering::Relaxed);
+    if count == 0 {
+        return;
+    }
+    let call_ns = DL_CALL_ASYNC_NS.swap(0, Ordering::Relaxed);
+    let post_return_ns = DL_POST_RETURN_NS.swap(0, Ordering::Relaxed);
+
+    let call_avg = call_ns as f64 / count as f64;
+    let post_return_avg = post_return_ns as f64 / count as f64;
+    let total_avg = call_avg + post_return_avg;
+
+    let msg = format!(
+        "[dynamic-linking stats] {} calls | call_async: {:.1} ns/call | \
+         post_return_async: {:.1} ns/call | measured total: {:.1} ns/call\n",
+        count, call_avg, post_return_avg, total_avg,
+    );
+
+    eprintln!("{}", msg.trim());
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/pie_dl_stats.txt")
+    {
+        use std::io::Write;
+        let _ = f.write_all(msg.as_bytes());
+    }
 }
