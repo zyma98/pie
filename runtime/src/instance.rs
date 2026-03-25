@@ -129,6 +129,9 @@ pub struct InstanceState {
     guest_resource_map: Vec<(ResourceAny, u32)>,
     // Counter for generating unique dynamic resource reps
     next_dynamic_rep: u32,
+
+    #[cfg(feature = "microbench_call_latency")]
+    pub(crate) benchmark_target_func: Option<wasmtime::component::Func>,
 }
 
 impl WasiView for InstanceState {
@@ -221,6 +224,8 @@ impl InstanceState {
             dynamic_resource_map: HashMap::new(),
             guest_resource_map: Vec::new(),
             next_dynamic_rep: 1,
+            #[cfg(feature = "microbench_call_latency")]
+            benchmark_target_func: None,
         };
 
         (state, streaming_ctrl)
