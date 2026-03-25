@@ -1,0 +1,5 @@
+package microbench:echo-callee;
+
+interface echo {
+    echo: func(s: string) -> string;
+}

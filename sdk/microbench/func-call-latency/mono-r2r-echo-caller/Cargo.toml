@@ -1,0 +1,12 @@
+[package]
+name = "mono-r2r-echo-caller"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+inferlet = { workspace = true }
+inferlet-macros = { workspace = true }
+mono-r2r-echo-callee = { path = "../mono-r2r-echo-callee" }
