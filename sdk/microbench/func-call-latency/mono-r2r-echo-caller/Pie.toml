@@ -1,0 +1,9 @@
+[package]
+name = "mono-r2r-echo-caller"
+version = "0.1.0"
+description = "Microbenchmark: monolithic intra-component echo function call"
+authors = ["Pie Team"]
+
+[runtime]
+core = "^0.2.0"
+mcp = "^0.2.0"

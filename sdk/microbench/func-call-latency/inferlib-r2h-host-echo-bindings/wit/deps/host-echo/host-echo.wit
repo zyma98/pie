@@ -1,0 +1,5 @@
+package microbench:host-echo;
+
+interface host-echo {
+    echo: func(s: string) -> string;
+}

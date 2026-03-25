@@ -1,0 +1,5 @@
+package microbench:h2r-benchmark-bindings;
+
+world importer {
+    import microbench:h2r-benchmark/h2r-benchmark;
+}
