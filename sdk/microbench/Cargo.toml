@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = [
+    "func-call-latency/inferlib-r2r-echo-callee",
+    "func-call-latency/inferlib-r2r-echo-callee-bindings",
+    "func-call-latency/inferlib-r2r-echo-caller",
+    "func-call-latency/inferlib-r2h-host-echo-bindings",
+    "func-call-latency/inferlib-r2h-echo-caller",
+    "func-call-latency/inferlib-h2r-benchmark-bindings",
+    "func-call-latency/inferlib-h2r-echo-caller",
+    "func-call-latency/inferlib-r2r-resecho-callee",
+    "func-call-latency/inferlib-r2r-resecho-callee-bindings",
+    "func-call-latency/inferlib-r2r-resecho-caller",
+    "func-call-latency/inferlib-p2r-echo-callee",
+    "func-call-latency/inferlib-r2p-echo-caller",
+    "func-call-latency/mono-r2r-echo-callee",
+    "func-call-latency/mono-r2r-echo-caller",
+]
+
+[workspace.dependencies]
+wit-bindgen = "0.48.0"
+inferlet = { path = "../rust/inferlet" }
+inferlet-macros = { path = "../rust/inferlet-macros" }
+
+[profile.release]
+lto = true

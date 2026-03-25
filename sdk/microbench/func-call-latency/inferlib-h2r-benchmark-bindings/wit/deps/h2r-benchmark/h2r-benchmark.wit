@@ -1,0 +1,5 @@
+package microbench:h2r-benchmark;
+
+interface h2r-benchmark {
+    run-benchmark: func(warmup: u64, iterations: u64) -> string;
+}
