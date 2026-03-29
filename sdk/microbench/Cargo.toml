@@ -17,6 +17,8 @@ members = [
     "func-call-latency/mono-r2r-echo-caller",
     "snapshot-latency/snapshot-benchmark-bindings",
     "snapshot-latency/echo-caller",
+    "benchdebug/inferlib-debug-r2p-echo-caller",
+    "benchdebug/inferlib-debug-r2r-echo-callee-bindings",
 ]
 
 [workspace.dependencies]

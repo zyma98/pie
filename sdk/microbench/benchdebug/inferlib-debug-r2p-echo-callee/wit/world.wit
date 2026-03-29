@@ -1,0 +1,5 @@
+package microbench:echo-callee;
+
+world echo-provider {
+    export echo;
+}
