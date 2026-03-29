@@ -16,7 +16,7 @@ use thiserror::Error;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 use wasmtime::component::Resource;
-#[cfg(feature = "microbench_call_latency")]
+#[cfg(any(feature = "microbench_call_latency", feature = "microbench_snapshot"))]
 use wasmtime::component::Val;
 use wasmtime::{Engine, Module, Store, component::Component, component::Linker};
 use wasmtime_wasi_http::WasiHttpView;
@@ -545,6 +545,9 @@ fn create_linker(engine: &Engine, shared_modules: &[(String, Module)]) -> Linker
     #[cfg(feature = "microbench_call_latency")]
     register_microbench_host_functions(&mut linker);
 
+    #[cfg(feature = "microbench_snapshot")]
+    register_snapshot_benchmark_host_functions(&mut linker);
+
     linker
 }
 
@@ -679,6 +682,64 @@ fn register_microbench_host_functions(linker: &mut Linker<InstanceState>) {
     }
 }
 
+#[cfg(feature = "microbench_snapshot")]
+fn register_snapshot_benchmark_host_functions(linker: &mut Linker<InstanceState>) {
+    let mut root = linker.root();
+    let mut inst = root
+        .instance("microbench:snapshot-benchmark/snapshot-benchmark")
+        .unwrap();
+    inst.func_new_async("run-benchmark", |mut store, _ty, args, returns| {
+        Box::new(async move {
+            let warmup = match &args[0] {
+                Val::U64(v) => *v,
+                _ => return Err(wasmtime::Error::msg("expected u64 for warmup")),
+            };
+            let iterations = match &args[1] {
+                Val::U64(v) => *v,
+                _ => return Err(wasmtime::Error::msg("expected u64 for iterations")),
+            };
+
+            let func = store.data().benchmark_target_func.ok_or_else(|| {
+                wasmtime::Error::msg(
+                    "no benchmark target function; ensure a Python echo callee \
+                         is listed as a dependency",
+                )
+            })?;
+
+            let call_args = [Val::String("hello".to_string())];
+            let mut call_returns = [Val::String(String::new())];
+
+            for _ in 0..warmup {
+                func.call_async(&mut store, &call_args, &mut call_returns)
+                    .await?;
+                func.post_return_async(&mut store).await?;
+            }
+
+            let start = std::time::Instant::now();
+            for _ in 0..iterations {
+                func.call_async(&mut store, &call_args, &mut call_returns)
+                    .await?;
+                func.post_return_async(&mut store).await?;
+            }
+            let elapsed = start.elapsed();
+
+            let per_call_ns = elapsed.as_nanos() as f64 / iterations as f64;
+            let elapsed_us = elapsed.as_nanos() as f64 / 1000.0;
+            let result = format!(
+                "Host-to-Python echo() call benchmark (H2P)\n  \
+                 Warmup iterations:  {warmup}\n  \
+                 Bench iterations:   {iterations}\n  \
+                 Total elapsed:      {elapsed_us:.1} us\n  \
+                 Per-call latency:   {per_call_ns:.1} ns"
+            );
+
+            returns[0] = Val::String(result.into());
+            Ok(())
+        })
+    })
+    .unwrap();
+}
+
 impl Runtime {
     fn new(engine: Engine, python_snapshot: bool) -> Self {
         let py_runtime_dir = {
@@ -741,6 +802,9 @@ impl Runtime {
     ) {
         // Perform snapshot optimization if the program requires a Python runtime
         // and python_snapshot is enabled, otherwise use the original component.
+        #[cfg(feature = "microbench_snapshot")]
+        let snapshot_start = std::time::Instant::now();
+
         let (final_component, snapshotted) = if python_runtime.is_some() && self.python_snapshot {
             if let Some(original_bytes) = wasm_bytes {
                 match self
@@ -760,6 +824,14 @@ impl Runtime {
         } else {
             (component, false)
         };
+
+        #[cfg(feature = "microbench_snapshot")]
+        if snapshotted {
+            let elapsed = snapshot_start.elapsed();
+            let elapsed_us = elapsed.as_nanos() as f64 / 1000.0;
+            tracing::info!("[microbench] Snapshot creation took: {elapsed:?}");
+            println!("[microbench] Snapshot creation latency: {elapsed_us:.1} us");
+        }
 
         let compiled_program = CompiledProgram {
             component: final_component,
