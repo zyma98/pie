@@ -130,7 +130,7 @@ pub struct InstanceState {
     // Counter for generating unique dynamic resource reps
     next_dynamic_rep: u32,
 
-    #[cfg(feature = "microbench_call_latency")]
+    #[cfg(any(feature = "microbench_call_latency", feature = "microbench_snapshot"))]
     pub(crate) benchmark_target_func: Option<wasmtime::component::Func>,
 }
 
@@ -224,7 +224,7 @@ impl InstanceState {
             dynamic_resource_map: HashMap::new(),
             guest_resource_map: Vec::new(),
             next_dynamic_rep: 1,
-            #[cfg(feature = "microbench_call_latency")]
+            #[cfg(any(feature = "microbench_call_latency", feature = "microbench_snapshot"))]
             benchmark_target_func: None,
         };
 
