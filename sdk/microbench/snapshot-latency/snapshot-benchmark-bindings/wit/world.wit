@@ -1,0 +1,5 @@
+package microbench:snapshot-benchmark-bindings;
+
+world importer {
+    import microbench:snapshot-benchmark/snapshot-benchmark;
+}

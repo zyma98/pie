@@ -1,0 +1,138 @@
+=== Building runtime with microbench_snapshot feature ===
+=== Building inferlib dependencies ===
+=== Building microbench Rust crates ===
+=== Building snapshot-echo-callee (Python, shared modules) ===
+Building Python library component...
+   Input: /home/acciente/work/pie/sdk/microbench/snapshot-latency/echo-callee
+   Output: /home/acciente/work/pie/sdk/microbench/target/wasm32-wasip2/release/snapshot_echo_callee.wasm
+   World: echo-provider
+   Module: app
+╭──────────────────────────────────────────────────────────────────── Build successful! ─────────────────────────────────────────────────────────────────────╮
+│ Output: /home/acciente/work/pie/sdk/microbench/target/wasm32-wasip2/release/snapshot_echo_callee.wasm (0.7 MB)                                             │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+============================================================
+  Phase 2: WITH snapshot optimization (10 runs)
+============================================================
+  Run 1/10: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=993.266 us, snapshot=1932788.6 us
+  Run 2/10: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=447.686 us, snapshot=1958938.1 us
+  Run 3/10: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=725.982 us, snapshot=1876488.9 us
+  Run 4/10: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=352.516 us, snapshot=1574482.2 us
+  Run 5/10: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=421.29 us, snapshot=1294826.7 us
+  Run 6/10: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=418.085 us, snapshot=1628821.2 us
+  Run 7/10: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=180.851 us, snapshot=1242502.4 us
+  Run 8/10: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=271.261 us, snapshot=2248882.2 us
+  Run 9/10: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=810.053 us, snapshot=1968880.1 us
+  Run 10/10: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=1293.733 us, snapshot=2022324.5 us
+
+=== Results: WITH snapshot ===
+  First-call latencies (us): ['993.3', '447.7', '726.0', '352.5', '421.3', '418.1', '180.9', '271.3', '810.1', '1293.7']
+  Average first-call latency: 591.5 us
+  Snapshot creation latencies (us): ['1932788.6', '1958938.1', '1876488.9', '1574482.2', '1294826.7', '1628821.2', '1242502.4', '2248882.2', '1968880.1', '2022324.5']
+  Average snapshot creation latency: 1774893.5 us
+
+============================================================
+  Phase 3: WITHOUT snapshot optimization (10 runs)
+============================================================
+  Run 1/10: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=992761.845 us
+  Run 2/10: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=1372224.463 us
+  Run 3/10: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=932313.975 us
+  Run 4/10: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=1153134.523 us
+  Run 5/10: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=1026017.258 us
+  Run 6/10: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=1277614.729 us
+  Run 7/10: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=895953.443 us
+  Run 8/10: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=1267688.295 us
+  Run 9/10: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=739592.544 us
+  Run 10/10: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=1109424.488 us
+
+=== Results: WITHOUT snapshot ===
+  First-call latencies (us): ['992761.8', '1372224.5', '932314.0', '1153134.5', '1026017.3', '1277614.7', '895953.4', '1267688.3', '739592.5', '1109424.5']
+  Average first-call latency: 1076672.6 us
+
+============================================================
+  Summary
+============================================================
+  Avg first-call latency WITH snapshot:    591.5 us
+  Avg first-call latency WITHOUT snapshot: 1076672.6 us
+  Avg snapshot creation latency:           1774893.5 us
+  Speedup from snapshot:                   1820.3x
