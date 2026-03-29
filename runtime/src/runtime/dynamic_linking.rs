@@ -1181,7 +1181,7 @@ fn register_interface_exports(
                 ))
             })?;
 
-        #[cfg(feature = "microbench_call_latency")]
+        #[cfg(any(feature = "microbench_call_latency", feature = "microbench_snapshot"))]
         if func_name == "echo" && store.data().benchmark_target_func.is_none() {
             store.data_mut().benchmark_target_func = Some(func);
         }
