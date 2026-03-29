@@ -76,3 +76,4 @@ ipc-channel = "0.19"
 
 [features]
 microbench_call_latency = []
+microbench_snapshot = []
