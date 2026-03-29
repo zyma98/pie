@@ -1,0 +1,12 @@
+[package]
+name = "inferlib-debug-r2p-echo-callee"
+version = "0.1.0"
+authors = ["Pie Team"]
+
+[runtime]
+core = "^0.2.0"
+mcp = "^0.2.0"
+python-runtime = "^0.2.0"
+
+[dependencies]
+inferlib-inference = "0.1.0"
