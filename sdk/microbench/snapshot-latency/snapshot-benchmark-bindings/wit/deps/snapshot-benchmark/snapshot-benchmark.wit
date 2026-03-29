@@ -1,0 +1,5 @@
+package microbench:snapshot-benchmark;
+
+interface snapshot-benchmark {
+    run-benchmark: func(warmup: u64, iterations: u64) -> string;
+}
