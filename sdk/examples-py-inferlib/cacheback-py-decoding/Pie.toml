@@ -1,12 +1,13 @@
 [package]
-name = "cacheback-decoding"
+name = "cacheback-py-decoding"
 version = "0.1.0"
-description = "Speculative decoding with cache-based drafter using n-gram matching"
+description = "Speculative decoding with a Python cache-table component via n-gram matching (Python)"
 authors = ["Pie Team"]
 
 [runtime]
 core = "^0.2.0"
 mcp = "^0.2.0"
+python-runtime = "^0.2.0"
 
 [parameters]
 prompt = {type = "string", optional = true, description = "The prompt to send to the model (default: 'Keep printing hello, world! 100 times.')"}
@@ -14,4 +15,4 @@ max_tokens = {type = "int", optional = true, description = "Maximum number of ne
 
 [dependencies]
 inferlib-inference = "0.1.0"
-inferlib-cacheback = "0.1.0"
+inferlib-cacheback-py = "0.1.0"

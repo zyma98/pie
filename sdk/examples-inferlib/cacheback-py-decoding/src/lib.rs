@@ -1,19 +1,19 @@
 //! Demonstrates speculative decoding with a cache-based drafter (Cacheback Decoding).
 //!
-//! This example uses the `inferlib-cacheback` Rust library component for the
+//! This variant uses the `inferlib-cacheback-py` Python library component for the
 //! two-level LRU cache table, while keeping the Trie-based draft organization
 //! logic locally.  The main model verifies speculated tokens via
 //! `Context::verify_draft` in a single batched forward pass with tree attention.
 
-use inferlib_cacheback_bindings::CacheTable;
+use inferlib_cacheback_py_bindings::CacheTable;
 use inferlib_inference_bindings::{Context, Model};
 use inferlib_run_bindings::{Args, Result};
 use std::time::Instant;
 
 const HELP: &str = "\
-Usage: cacheback-decoding [OPTIONS]
+Usage: cacheback-py-decoding [OPTIONS]
 
-Demonstrates cacheback decoding with a cache-based drafter.
+Demonstrates cacheback decoding with a Python cache-table component.
 
 Options:
   -p, --prompt <STRING>    The prompt to send to the model
