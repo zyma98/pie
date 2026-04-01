@@ -1,0 +1,5 @@
+package inferlib:cacheback-py;
+
+world cacheback-py-provider {
+    export cacheback;
+}

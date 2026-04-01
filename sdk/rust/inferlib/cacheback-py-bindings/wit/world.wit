@@ -1,0 +1,5 @@
+package inferlib:cacheback-py-bindings;
+
+world importer {
+    import inferlib:cacheback-py/cacheback;
+}

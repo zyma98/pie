@@ -1,5 +1,5 @@
 [package]
-name = "cacheback-decoding"
+name = "cacheback-py-decoding"
 version = "0.1.0"
 edition = "2024"
 
@@ -8,6 +8,6 @@ crate-type = ["cdylib"]
 
 [dependencies]
 inferlib-inference-bindings = { path = "../../rust/inferlib/inference-bindings" }
-inferlib-cacheback-bindings = { path = "../../rust/inferlib/cacheback-bindings" }
+inferlib-cacheback-py-bindings = { path = "../../rust/inferlib/cacheback-py-bindings" }
 inferlib-run-bindings = { path = "../../rust/inferlib/run-bindings" }
 inferlib-macros = { path = "../../rust/inferlib-macros" }

@@ -1,7 +1,7 @@
 [package]
-name = "cacheback-decoding"
+name = "cacheback-py-decoding"
 version = "0.1.0"
-description = "Speculative decoding with cache-based drafter using n-gram matching"
+description = "Speculative decoding with a Python cache-table component via n-gram matching"
 authors = ["Pie Team"]
 
 [runtime]
@@ -14,4 +14,4 @@ max_tokens = {type = "int", optional = true, description = "Maximum number of ne
 
 [dependencies]
 inferlib-inference = "0.1.0"
-inferlib-cacheback = "0.1.0"
+inferlib-cacheback-py = "0.1.0"

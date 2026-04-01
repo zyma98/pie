@@ -1,15 +1,15 @@
 """Cacheback decoding example using inferlib (Python).
 
 Demonstrates speculative decoding with a cache-based drafter using n-gram
-matching.  The cache table is provided by the inferlib-cacheback Rust library
-component which manages the two-level LRU cache, Trie-based draft
+matching.  The cache table is provided by the inferlib-cacheback-py Python
+library component which manages the two-level LRU cache, Trie-based draft
 organization, and sliding-window state internally.
 The main model verifies speculated tokens via Context.verify_draft(),
 accepting matches and rejecting mismatches in a single batched forward pass
 with tree attention.
 """
 
-from cacheback_bindings import CacheTable
+from cacheback_py_bindings import CacheTable
 from inference_bindings import (
     Context,
     Model,
@@ -25,8 +25,8 @@ FOLLOWER_LEN = 2
 
 def main() -> None:
     args = get_arguments()
-    prompt = args.get("prompt", args.get("p", "Keep printing 'hello, world!' 100 times."))
-    max_tokens = int(args.get("max-tokens", args.get("n", "256")))
+    prompt = args.get("prompt", "Keep printing 'hello, world!' 100 times.")
+    max_tokens = int(args.get("max_tokens", "256"))
 
     model = Model.get_auto()
     eos_tokens = model.eos_tokens()
