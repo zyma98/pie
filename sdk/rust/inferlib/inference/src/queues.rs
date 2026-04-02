@@ -1,5 +1,6 @@
-use crate::exports::inferlib::inference::queues::{GuestQueue, Priority};
+use crate::exports::inferlib::inference::queues::{GuestQueue, Priority as WitPriority};
 use crate::forward::ForwardPassImpl;
+use crate::schema::Priority;
 
 use inferlib_engine_bindings::inferlet::core::common::{Model as HostModel, Queue as HostQueue};
 use inferlib_engine_bindings::inferlet::core::runtime::get_model;
@@ -86,8 +87,9 @@ impl GuestQueue for QueueImpl {
         block_on(async move { inner_clone.synchronize().await })
     }
 
-    fn set_priority(&self, priority: Priority) {
+    fn set_priority(&self, priority: WitPriority) {
         use inferlib_engine_bindings::inferlet::core::common::Priority as HostPriority;
+        let priority: Priority = priority.into();
         let host_priority = match priority {
             Priority::Low => HostPriority::Low,
             Priority::Normal => HostPriority::Normal,

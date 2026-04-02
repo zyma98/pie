@@ -1,7 +1,8 @@
 use crate::exports::inferlib::inference::queues::{
-    Distribution, ForwardPassResult, GuestForwardPass, ResourceType,
+    Distribution, ForwardPassResult, GuestForwardPass,
 };
 use crate::queues::Queue;
+use crate::schema::ResourceType;
 
 use inferlib_engine_bindings::inferlet::core::common::{
     allocate_resources, deallocate_resources, export_resources, get_all_exported_resources,
