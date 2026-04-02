@@ -9,6 +9,7 @@ name = "inferlib_inference"
 
 [dependencies]
 inferlib-engine-bindings = { path = "../engine-bindings" }
+inferlib-macros = { path = "../../inferlib-macros" }
 wit-bindgen = { workspace = true }
 wasip2 = "1.0.1"
 wstd = "0.5.6"
