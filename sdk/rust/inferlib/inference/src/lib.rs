@@ -10,6 +10,7 @@ mod messaging;
 mod models;
 mod queues;
 mod runtime;
+mod schema;
 mod zo;
 
 wit_bindgen::generate!({
