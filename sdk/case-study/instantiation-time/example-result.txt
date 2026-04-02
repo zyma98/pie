@@ -1,0 +1,118 @@
+=== Building runtime with case_study_instantiation_time feature ===
+=== Building inferlib dependencies ===
+=== Building std/text-completion ===
+=== Building sdk/examples-inferlib cases ===
+
+============================================================
+  text-completion (0 inferlib deps, 10 runs)
+============================================================
+  Run 1/10: starting engine... installing... submitting... store+linker=1950.2 us, deps=1.3 us, app=1172.9 us, total=3125.7 us
+  Run 2/10: starting engine... installing... submitting... store+linker=768.5 us, deps=1.2 us, app=514.5 us, total=1285.3 us
+  Run 3/10: starting engine... installing... submitting... store+linker=431.4 us, deps=0.7 us, app=296.0 us, total=728.7 us
+  Run 4/10: starting engine... installing... submitting... store+linker=1077.1 us, deps=1.2 us, app=525.9 us, total=1605.4 us
+  Run 5/10: starting engine... installing... submitting... store+linker=348.0 us, deps=0.7 us, app=281.3 us, total=630.6 us
+  Run 6/10: starting engine... installing... submitting... store+linker=1100.2 us, deps=1.1 us, app=590.6 us, total=1693.3 us
+  Run 7/10: starting engine... installing... submitting... store+linker=1105.3 us, deps=1.3 us, app=563.1 us, total=1671.0 us
+  Run 8/10: starting engine... installing... submitting... store+linker=444.5 us, deps=0.6 us, app=338.5 us, total=784.3 us
+  Run 9/10: starting engine... installing... submitting... store+linker=337.4 us, deps=0.7 us, app=233.3 us, total=571.9 us
+  Run 10/10: starting engine... installing... submitting... store+linker=813.6 us, deps=1.6 us, app=561.7 us, total=1378.1 us
+
+  --- Average ---
+  Store + Linker creation:       837.6 us
+  Dependency instantiation:      1.0 us
+  App component instantiation:   507.8 us
+  Total:                         1347.4 us
+
+============================================================
+  text-completion-inferlib (1 inferlib deps, 10 runs)
+============================================================
+  Run 1/10: starting engine... installing... submitting... store+linker=980.0 us, deps=1363.2 us, app=232.8 us, total=2577.6 us
+  Run 2/10: starting engine... installing... submitting... store+linker=981.1 us, deps=1460.6 us, app=317.3 us, total=2760.4 us
+  Run 3/10: starting engine... installing... submitting... store+linker=1069.0 us, deps=1478.5 us, app=230.4 us, total=2779.2 us
+  Run 4/10: starting engine... installing... submitting... store+linker=828.3 us, deps=1479.0 us, app=236.7 us, total=2545.4 us
+  Run 5/10: starting engine... installing... submitting... store+linker=1096.5 us, deps=1510.6 us, app=279.2 us, total=2887.6 us
+  Run 6/10: starting engine... installing... submitting... store+linker=415.7 us, deps=592.8 us, app=82.9 us, total=1091.9 us
+  Run 7/10: starting engine... installing... submitting... store+linker=319.1 us, deps=491.6 us, app=74.9 us, total=886.2 us
+  Run 8/10: starting engine... installing... submitting... store+linker=394.5 us, deps=776.3 us, app=142.7 us, total=1314.2 us
+  Run 9/10: starting engine... installing... submitting... store+linker=351.0 us, deps=535.8 us, app=77.9 us, total=965.0 us
+  Run 10/10: starting engine... installing... submitting... store+linker=502.4 us, deps=821.9 us, app=159.5 us, total=1484.6 us
+
+  --- Average ---
+  Store + Linker creation:       693.8 us
+  Dependency instantiation:      1051.0 us
+  App component instantiation:   183.4 us
+  Total:                         1929.2 us
+
+============================================================
+  constrained-decoding (2 inferlib deps, 10 runs)
+============================================================
+  Run 1/10: starting engine... installing... submitting... store+linker=444.8 us, deps=1071.9 us, app=103.9 us, total=1621.2 us
+  Run 2/10: starting engine... installing... submitting... store+linker=369.1 us, deps=835.0 us, app=91.5 us, total=1296.2 us
+  Run 3/10: starting engine... installing... submitting... store+linker=519.2 us, deps=1210.2 us, app=138.6 us, total=1868.6 us
+  Run 4/10: starting engine... installing... submitting... store+linker=921.6 us, deps=2107.3 us, app=224.1 us, total=3254.5 us
+  Run 5/10: starting engine... installing... submitting... store+linker=1060.5 us, deps=2137.4 us, app=236.2 us, total=3435.4 us
+  Run 6/10: starting engine... installing... submitting... store+linker=974.8 us, deps=2191.1 us, app=225.2 us, total=3392.5 us
+  Run 7/10: starting engine... installing... submitting... store+linker=1356.6 us, deps=2180.4 us, app=236.4 us, total=3774.9 us
+  Run 8/10: starting engine... installing... submitting... store+linker=1047.0 us, deps=2145.0 us, app=241.0 us, total=3434.2 us
+  Run 9/10: starting engine... installing... submitting... store+linker=448.4 us, deps=1331.4 us, app=142.9 us, total=1923.3 us
+  Run 10/10: starting engine... installing... submitting... store+linker=952.4 us, deps=2301.9 us, app=243.6 us, total=3499.2 us
+
+  --- Average ---
+  Store + Linker creation:       809.4 us
+  Dependency instantiation:      1751.2 us
+  App component instantiation:   188.3 us
+  Total:                         2750.0 us
+
+============================================================
+  json-schema-validation (3 inferlib deps, 10 runs)
+============================================================
+  Run 1/10: starting engine... installing... submitting... store+linker=1027.3 us, deps=2950.6 us, app=243.5 us, total=4222.7 us
+  Run 2/10: starting engine... installing... submitting... store+linker=1078.0 us, deps=2959.7 us, app=235.0 us, total=4273.9 us
+  Run 3/10: starting engine... installing... submitting... store+linker=372.5 us, deps=1166.9 us, app=90.2 us, total=1630.1 us
+  Run 4/10: starting engine... installing... submitting... store+linker=1005.4 us, deps=2878.8 us, app=235.5 us, total=4121.1 us
+  Run 5/10: starting engine... installing... submitting... store+linker=1062.1 us, deps=3105.9 us, app=249.4 us, total=4419.0 us
+  Run 6/10: starting engine... installing... submitting... store+linker=1161.9 us, deps=3039.8 us, app=250.3 us, total=4453.2 us
+  Run 7/10: starting engine... installing... submitting... store+linker=427.8 us, deps=1383.9 us, app=94.1 us, total=1906.4 us
+  Run 8/10: starting engine... installing... submitting... store+linker=1093.1 us, deps=3169.0 us, app=238.1 us, total=4501.3 us
+  Run 9/10: starting engine... installing... submitting... store+linker=647.4 us, deps=2618.8 us, app=229.4 us, total=3496.4 us
+  Run 10/10: starting engine... installing... submitting... store+linker=826.6 us, deps=3109.4 us, app=310.0 us, total=4247.5 us
+
+  --- Average ---
+  Store + Linker creation:       870.2 us
+  Dependency instantiation:      2638.3 us
+  App component instantiation:   217.6 us
+  Total:                         3727.2 us
+
+============================================================
+  template-generation (4 inferlib deps, 10 runs)
+============================================================
+  Run 1/10: starting engine... installing... submitting... store+linker=515.5 us, deps=2008.9 us, app=145.3 us, total=2670.2 us
+  Run 2/10: starting engine... installing... submitting... store+linker=785.5 us, deps=3348.1 us, app=237.6 us, total=4372.5 us
+  Run 3/10: starting engine... installing... submitting... store+linker=987.7 us, deps=3541.9 us, app=224.5 us, total=4755.6 us
+  Run 4/10: starting engine... installing... submitting... store+linker=1152.5 us, deps=3138.8 us, app=218.6 us, total=4511.2 us
+  Run 5/10: starting engine... installing... submitting... store+linker=786.6 us, deps=3411.9 us, app=225.7 us, total=4425.5 us
+  Run 6/10: starting engine... installing... submitting... store+linker=802.8 us, deps=3193.1 us, app=199.9 us, total=4197.1 us
+  Run 7/10: starting engine... installing... submitting... store+linker=546.6 us, deps=1711.0 us, app=104.3 us, total=2362.9 us
+  Run 8/10: starting engine... installing... submitting... store+linker=409.6 us, deps=1423.9 us, app=103.0 us, total=1937.2 us
+  Run 9/10: starting engine... installing... submitting... store+linker=455.1 us, deps=1803.4 us, app=130.6 us, total=2389.8 us
+  Run 10/10: starting engine... installing... submitting... store+linker=958.0 us, deps=3669.5 us, app=271.1 us, total=4899.8 us
+
+  --- Average ---
+  Store + Linker creation:       740.0 us
+  Dependency instantiation:      2725.1 us
+  App component instantiation:   186.1 us
+  Total:                         3652.2 us
+
+============================================================
+  Overall Summary (10 runs each)
+============================================================
+  text-completion (0 deps):
+    store+linker=837.6  deps=1.0  app=507.8  total=1347.4 us
+  text-completion-inferlib (1 deps):
+    store+linker=693.8  deps=1051.0  app=183.4  total=1929.2 us
+  constrained-decoding (2 deps):
+    store+linker=809.4  deps=1751.2  app=188.3  total=2750.0 us
+  json-schema-validation (3 deps):
+    store+linker=870.2  deps=2638.3  app=217.6  total=3727.2 us
+  template-generation (4 deps):
+    store+linker=740.0  deps=2725.1  app=186.1  total=3652.2 us

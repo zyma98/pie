@@ -1431,9 +1431,18 @@ impl Runtime {
         // Wrap everything in a closure returning a Result,
         // so we can capture errors more systematically if desired:
         let result = async {
+            #[cfg(feature = "case_study_instantiation_time")]
+            let inst_total_start = std::time::Instant::now();
+
             let mut store = Store::new(&engine, inst_state);
 
             let mut linker = create_linker(&engine, &shared_modules);
+
+            #[cfg(feature = "case_study_instantiation_time")]
+            let store_linker_us = inst_total_start.elapsed().as_nanos() as f64 / 1000.0;
+
+            #[cfg(feature = "case_study_instantiation_time")]
+            let dep_start = std::time::Instant::now();
 
             // Instantiate dependencies and register their exports in the linker
             dynamic_linking::instantiate_libraries(
@@ -1444,10 +1453,27 @@ impl Runtime {
             )
             .await?;
 
+            #[cfg(feature = "case_study_instantiation_time")]
+            let dep_us = dep_start.elapsed().as_nanos() as f64 / 1000.0;
+
+            #[cfg(feature = "case_study_instantiation_time")]
+            let app_start = std::time::Instant::now();
+
             let instance = linker
                 .instantiate_async(&mut store, &component)
                 .await
                 .map_err(|e| RuntimeError::Other(format!("Instantiation error: {e}")))?;
+
+            #[cfg(feature = "case_study_instantiation_time")]
+            {
+                let app_us = app_start.elapsed().as_nanos() as f64 / 1000.0;
+                let total_us = inst_total_start.elapsed().as_nanos() as f64 / 1000.0;
+                println!("[case-study] Instantiation time breakdown:");
+                println!("[case-study]   Store + Linker creation: {store_linker_us:.1} us");
+                println!("[case-study]   Dependency instantiation: {dep_us:.1} us");
+                println!("[case-study]   App component instantiation: {app_us:.1} us");
+                println!("[case-study]   Total: {total_us:.1} us");
+            }
 
             // Attempt to call "run"
             let run_interface = format!("pie:{}/run", program_name);
