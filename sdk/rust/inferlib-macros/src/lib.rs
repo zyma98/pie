@@ -2,7 +2,9 @@ use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
-use syn::{braced, parse_macro_input, Error, Ident, ItemFn, Path, Result, Token, Type};
+use syn::{
+    braced, parse_macro_input, Error, Ident, ItemEnum, ItemFn, Path, Result, Token, Type,
+};
 
 fn manifest_dir() -> std::result::Result<std::path::PathBuf, String> {
     std::env::var("CARGO_MANIFEST_DIR")
@@ -146,6 +148,43 @@ fn infer_component_bindings_from_wit() -> std::result::Result<Vec<InterfaceBindi
     Ok(interfaces)
 }
 
+struct WitEnumInput {
+    interface: String,
+    name: Option<String>,
+}
+
+impl Parse for WitEnumInput {
+    fn parse(input: ParseStream<'_>) -> Result<Self> {
+        let mut interface = None;
+        let mut name = None;
+
+        while !input.is_empty() {
+            let key: Ident = input.parse()?;
+            input.parse::<Token![=]>()?;
+            let value: syn::LitStr = input.parse()?;
+            match key.to_string().as_str() {
+                "interface" => interface = Some(value.value()),
+                "name" => name = Some(value.value()),
+                other => {
+                    return Err(Error::new(
+                        key.span(),
+                        format!("unsupported wit_enum argument `{other}`"),
+                    ));
+                }
+            }
+
+            if input.peek(Token![,]) {
+                input.parse::<Token![,]>()?;
+            }
+        }
+
+        let interface =
+            interface.ok_or_else(|| Error::new(Span::call_site(), "missing `interface = \"...\"`"))?;
+
+        Ok(Self { interface, name })
+    }
+}
+
 #[proc_macro_attribute]
 pub fn main(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut input_fn = parse_macro_input!(item as ItemFn);
@@ -235,6 +274,71 @@ world inferlet {{
     };
 
     expanded.into()
+}
+
+#[proc_macro_attribute]
+pub fn wit_enum(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(attr as WitEnumInput);
+    let item_enum = parse_macro_input!(item as ItemEnum);
+
+    if item_enum
+        .variants
+        .iter()
+        .any(|variant| !matches!(variant.fields, syn::Fields::Unit))
+    {
+        return Error::new_spanned(
+            &item_enum.ident,
+            "#[inferlib_macros::wit_enum] currently supports only unit enums",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    let exports = match read_wit_exports_path() {
+        Ok(path) => path,
+        Err(message) => {
+            return Error::new(Span::call_site(), message)
+                .to_compile_error()
+                .into();
+        }
+    };
+
+    let enum_ident = item_enum.ident.clone();
+    let interface_ident = to_rust_ident(&args.interface);
+    let wit_type_ident = Ident::new(
+        &args
+            .name
+            .as_deref()
+            .map(to_upper_camel)
+            .unwrap_or_else(|| enum_ident.to_string()),
+        Span::call_site(),
+    );
+    let variants = item_enum
+        .variants
+        .iter()
+        .map(|variant| variant.ident.clone())
+        .collect::<Vec<_>>();
+
+    quote! {
+        #item_enum
+
+        impl ::core::convert::From<#enum_ident> for #exports::#interface_ident::#wit_type_ident {
+            fn from(value: #enum_ident) -> Self {
+                match value {
+                    #( #enum_ident::#variants => Self::#variants, )*
+                }
+            }
+        }
+
+        impl ::core::convert::From<#exports::#interface_ident::#wit_type_ident> for #enum_ident {
+            fn from(value: #exports::#interface_ident::#wit_type_ident) -> Self {
+                match value {
+                    #( #exports::#interface_ident::#wit_type_ident::#variants => Self::#variants, )*
+                }
+            }
+        }
+    }
+    .into()
 }
 
 struct ComponentBindingsInput {

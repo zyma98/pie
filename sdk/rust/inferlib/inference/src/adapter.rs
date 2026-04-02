@@ -1,13 +1,12 @@
 use crate::forward::ForwardPass;
 use crate::queues::Queue;
+use crate::schema::ResourceType;
 
 use inferlib_engine_bindings::inferlet::adapter::common::set_adapter;
 use inferlib_engine_bindings::inferlet::core::common::{
     allocate_resources, deallocate_resources, export_resources, get_all_exported_resources,
     import_resources, release_exported_resources,
 };
-
-use crate::exports::inferlib::inference::queues::ResourceType;
 
 impl Queue {
     pub(crate) fn allocate_adapter(&self) -> u32 {
