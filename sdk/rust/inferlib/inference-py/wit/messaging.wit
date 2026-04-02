@@ -1,0 +1,22 @@
+package inferlib:inference;
+
+/// Interface for messaging between inferlet and remote user client
+interface messaging {
+    /// Sends a message to the remote user client
+    send: func(message: string);
+
+    /// Receives an incoming message from the remote user client (blocking)
+    receive: func() -> string;
+
+    /// Sends a binary blob to the remote user client
+    send-blob: func(data: list<u8>);
+
+    /// Receives a binary blob from the remote user client (blocking)
+    receive-blob: func() -> list<u8>;
+
+    /// Publishes a message to a topic, broadcasting it to all subscribers
+    broadcast: func(topic: string, message: string);
+
+    /// Subscribes to a topic and waits for a message (blocking)
+    subscribe: func(topic: string) -> string;
+}
