@@ -52,8 +52,18 @@ const MERGE_PROMPT: &str =
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
+/// Strips a `<think>...</think>` block from the start of a model response, if present.
+fn strip_thinking(response: &str) -> &str {
+    if let Some(end) = response.find("</think>") {
+        &response[end + "</think>".len()..]
+    } else {
+        response
+    }
+}
+
 /// Parses the model's response to extract either a leaf answer or two branch subtasks.
 fn parse_response(response: &str) -> Result<(Option<String>, Option<(String, String)>), String> {
+    let response = strip_thinking(response);
     if let Some(start) = response.find("<leaf>") {
         if let Some(end) = response.find("</leaf>") {
             let answer = response[start + 6..end].trim().to_string();

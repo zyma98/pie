@@ -1,5 +1,5 @@
 [package]
-name = "cacheback-decoding"
+name = "text-completion-greedy"
 version = "0.1.0"
 edition = "2024"
 
@@ -9,4 +9,3 @@ crate-type = ["cdylib"]
 [dependencies]
 inferlet.workspace = true
 inferlet-macros.workspace = true
-indexmap = "2"

@@ -58,6 +58,10 @@ const TEMPLATE: &str = r#"
 {{ product_name | upper }}
 "{{ tagline }}"
 
+TARGET AUDIENCE
+---------------
+{{ target_audience }}
+
 OVERVIEW
 --------
 {{ description }}
@@ -68,6 +72,31 @@ KEY FEATURES
   * {{ feature }}
 {% endfor %}
 
+TECHNICAL SPECIFICATIONS
+------------------------
+{% for spec in technical_specs %}
+  * {{ spec }}
+{% endfor %}
+
+USE CASES
+---------
+{% for use_case in use_cases %}
+  * {{ use_case }}
+{% endfor %}
+
+COMPETITIVE ADVANTAGES
+----------------------
+{% for advantage in competitive_advantages %}
+  * {{ advantage }}
+{% endfor %}
+
+FAQ
+---
+{% for item in faq %}
+Q: {{ item.question }}
+A: {{ item.answer }}
+
+{% endfor %}
 PRICING & AVAILABILITY
 ----------------------
   Price: ${{ price }}
@@ -94,10 +123,41 @@ const PRODUCT_SCHEMA: &str = r#"{
             "type": "string",
             "minLength": 1
         },
+        "target_audience": {
+            "type": "string",
+            "minLength": 1
+        },
         "features": {
             "type": "array",
             "items": { "type": "string" },
-            "minItems": 1
+            "minItems": 5
+        },
+        "technical_specs": {
+            "type": "array",
+            "items": { "type": "string" },
+            "minItems": 5
+        },
+        "use_cases": {
+            "type": "array",
+            "items": { "type": "string" },
+            "minItems": 4
+        },
+        "competitive_advantages": {
+            "type": "array",
+            "items": { "type": "string" },
+            "minItems": 4
+        },
+        "faq": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "question": { "type": "string" },
+                    "answer":   { "type": "string" }
+                },
+                "required": ["question", "answer"]
+            },
+            "minItems": 4
         },
         "price": {
             "type": "string"
@@ -109,13 +169,20 @@ const PRODUCT_SCHEMA: &str = r#"{
             "type": ["integer", "null"]
         }
     },
-    "required": ["product_name", "tagline", "description", "features", "price", "release_date"]
+    "required": [
+        "product_name", "tagline", "description", "target_audience",
+        "features", "technical_specs", "use_cases", "competitive_advantages",
+        "faq", "price", "release_date"
+    ]
 }"#;
 
 const SYSTEM_PROMPT: &str = "\
 You are a helpful assistant that generates structured product data. \
 Output ONLY a raw JSON object with no additional text, markdown fences, or explanation. \
 The JSON must conform to the JSON Schema provided in the user message. \
+Be as detailed and verbose as possible: write long, richly descriptive strings for every \
+field, populate every array with at least the required minimum number of items, and include \
+all optional fields. \
 If you receive validation or rendering errors, fix the JSON to address the issues \
 and output only the corrected JSON object.";
 
@@ -174,9 +241,9 @@ async fn main(mut args: Args) -> Result<()> {
 
     let prompt: String = args
         .value_from_str(["-p", "--prompt"])
-        .unwrap_or_else(|_| "an AI-powered code editor".to_string());
+        .unwrap_or_else(|_| "a comprehensive enterprise cloud computing platform with integrated AI, security, and analytics services".to_string());
     let max_retries: u32 = args.value_from_str(["-r", "--max-retries"]).unwrap_or(3);
-    let max_tokens: usize = args.value_from_str(["-t", "--max-tokens"]).unwrap_or(1024);
+    let max_tokens: usize = args.value_from_str(["-t", "--max-tokens"]).unwrap_or(4096);
 
     let validator = SchemaValidator::new(PRODUCT_SCHEMA);
     let renderer = TemplateRenderer::new("announcement", TEMPLATE);
@@ -212,19 +279,19 @@ async fn main(mut args: Args) -> Result<()> {
         ctx.fill("\n</think>\n\n");
     }
 
+    let constrained_sampler = ConstrainedSampler::new(
+        tokenizer.get_vocabs(),
+        tokenizer.get_special_tokens(),
+        tokenizer.get_split_regex(),
+        JSON_GRAMMAR.to_string(),
+        eot_token_id,
+        escape_non_printable,
+    );
+
     let mut rendered_result = None;
 
     for attempt in 1..=max_retries {
         println!("--- Attempt {}/{} ---", attempt, max_retries);
-
-        let constrained_sampler = ConstrainedSampler::new(
-            tokenizer.get_vocabs(),
-            tokenizer.get_special_tokens(),
-            tokenizer.get_split_regex(),
-            JSON_GRAMMAR.to_string(),
-            eot_token_id,
-            escape_non_printable,
-        );
 
         let output = generate_json(
             &mut ctx,

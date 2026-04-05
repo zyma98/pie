@@ -23,6 +23,7 @@ members = [
     "recursion-of-thought",
     "skeleton-of-thought",
     "template-generation",
+    "text-completion-greedy",
     "tree-of-thought",
     "watermarking",
     "windowed-attention",
