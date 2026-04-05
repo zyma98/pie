@@ -55,14 +55,14 @@ GROUPS = [
     ("rot", "Recursion\nof Thought*"),
     ("cacheback", "Cacheback\nDecoding\u2020"),
     ("codeact", "Agent\nCodeAct\u2020"),
-    ("template-gen", "Templated\nGeneration\u2021"),
+    ("template-gen", "Template\nGeneration\u2021"),
 ]
 
 VARIANTS = [
     ("monolithic", "Rust Monolithic"),
     ("rust-inferlib-static", "Rust Static Composition"),
     ("rust-inferlib", "Rust Dynamic Composition"),
-    ("python-inferlib", "Python+Rust Dynamic Composition"),
+    ("python-inferlib", "Python and Rust Dynamic Composition"),
 ]
 
 COLORS = ["#7BAFD4", "#8FCA8F", "#E8D0A0", "#D9A8A8"]
@@ -102,7 +102,7 @@ def plot_row(ax: plt.Axes, results: dict[str, float], show_legend: bool) -> None
         bars = ax.bar(
             offsets, heights, bar_width,
             label=variant_label if show_legend else None,
-            color=COLORS[vi], edgecolor="dimgray", linewidth=0.3,
+            color=COLORS[vi], edgecolor="gray", linewidth=0.3,
             hatch=HATCHES[vi],
         )
 
@@ -149,7 +149,7 @@ def plot(all_results: list[dict[str, float]], out_path: Path) -> None:
         fontsize=9, ncol=len(VARIANTS), framealpha=0.9,
     )
     for txt in leg.get_texts():
-        if txt.get_text() == "Python+Rust Dynamic Composition":
+        if txt.get_text() == "Python and Rust Dynamic Composition":
             txt.set_fontweight("bold")
 
     fig.tight_layout(h_pad=0.75)
