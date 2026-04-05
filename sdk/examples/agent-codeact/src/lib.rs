@@ -5,7 +5,8 @@
 //! The agent iteratively writes code, receives execution results, and
 //! continues until it arrives at the final answer.
 
-use boa_engine::{Context, Source};
+mod js_engine;
+
 use inferlet::stop_condition::{self, StopCondition};
 use inferlet::{Args, Result, Sampler};
 
@@ -131,7 +132,7 @@ async fn main(mut args: Args) -> Result<()> {
 /// Parses the assistant's response for JavaScript code blocks and executes them.
 fn parse_and_execute_code(text: &str) -> CodeResult {
     if let Some(js_code) = extract_js_code(text) {
-        let result = execute_js_code(&js_code);
+        let result = js_engine::execute_js_code(&js_code);
         CodeResult::Code(result)
     } else {
         CodeResult::FinalAnswer
@@ -173,17 +174,4 @@ fn extract_final_answer(text: &str) -> String {
         .unwrap_or("Unknown")
         .trim()
         .to_string()
-}
-
-/// Executes the given JavaScript code using the Boa engine.
-fn execute_js_code(code: &str) -> String {
-    let mut context = Context::default();
-    match context.eval(Source::from_bytes(code)) {
-        Ok(res) => res
-            .to_string(&mut context)
-            .unwrap_or_else(|_| "undefined".into())
-            .to_std_string()
-            .unwrap(),
-        Err(e) => format!("Execution Error: {}", e),
-    }
 }
