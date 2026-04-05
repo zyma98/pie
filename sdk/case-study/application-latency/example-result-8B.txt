@@ -1,0 +1,541 @@
+=== Building sdk/examples ===
+=== Building sdk/examples-inferlib ===
+=== Building Python prefix-tree ===
+🏗️  Building Python inferlib...
+   Input: /home/acciente/work/pie/sdk/examples-py-inferlib/prefix-tree
+   Output: /home/acciente/work/pie/sdk/case-study/application-latency/build/prefix-tree-py.wasm
+   Package: prefix-tree
+   Mode: inferlib
+   Type: Package
+╭─────────────────────────────────────────────────────────────────── ✅ Build successful! ───────────────────────────────────────────────────────────────────╮
+│ Output: /home/acciente/work/pie/sdk/case-study/application-latency/build/prefix-tree-py.wasm (0.8 MB)                                                      │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+=== Building Python recursion-of-thought ===
+🏗️  Building Python inferlib...
+   Input: /home/acciente/work/pie/sdk/examples-py-inferlib/recursion-of-thought
+   Output: /home/acciente/work/pie/sdk/case-study/application-latency/build/recursion-of-thought-py.wasm
+   Package: recursion-of-thought
+   Mode: inferlib
+   Type: Package
+╭─────────────────────────────────────────────────────────────────── ✅ Build successful! ───────────────────────────────────────────────────────────────────╮
+│ Output: /home/acciente/work/pie/sdk/case-study/application-latency/build/recursion-of-thought-py.wasm (0.8 MB)                                             │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+=== Building Python template-generation ===
+🏗️  Building Python inferlib...
+   Input: /home/acciente/work/pie/sdk/examples-py-inferlib/template-generation
+   Output: /home/acciente/work/pie/sdk/case-study/application-latency/build/template-generation-py.wasm
+   Package: template-generation
+   Mode: inferlib
+   Type: Package
+╭─────────────────────────────────────────────────────────────────── ✅ Build successful! ───────────────────────────────────────────────────────────────────╮
+│ Output: /home/acciente/work/pie/sdk/case-study/application-latency/build/template-generation-py.wasm (0.9 MB)                                              │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+=== Building Python cacheback-decoding ===
+🏗️  Building Python inferlib...
+   Input: /home/acciente/work/pie/sdk/examples-py-inferlib/cacheback-decoding
+   Output: /home/acciente/work/pie/sdk/case-study/application-latency/build/cacheback-decoding-py.wasm
+   Package: cacheback-decoding
+   Mode: inferlib
+   Type: Package
+╭─────────────────────────────────────────────────────────────────── ✅ Build successful! ───────────────────────────────────────────────────────────────────╮
+│ Output: /home/acciente/work/pie/sdk/case-study/application-latency/build/cacheback-decoding-py.wasm (0.9 MB)                                               │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+=== Building Python agent-codeact ===
+🏗️  Building Python inferlib...
+   Input: /home/acciente/work/pie/sdk/examples-py-inferlib/agent-codeact
+   Output: /home/acciente/work/pie/sdk/case-study/application-latency/build/agent-codeact-py.wasm
+   Package: agent-codeact
+   Mode: inferlib
+   Type: Package
+╭─────────────────────────────────────────────────────────────────── ✅ Build successful! ───────────────────────────────────────────────────────────────────╮
+│ Output: /home/acciente/work/pie/sdk/case-study/application-latency/build/agent-codeact-py.wasm (0.8 MB)                                                    │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+=== Building Python text-completion-greedy ===
+🏗️  Building Python inferlib...
+   Input: /home/acciente/work/pie/sdk/examples-py-inferlib/text-completion-greedy
+   Output: /home/acciente/work/pie/sdk/case-study/application-latency/build/text-completion-greedy-py.wasm
+   Package: text-completion-greedy
+   Mode: inferlib
+   Type: Package
+╭─────────────────────────────────────────────────────────────────── ✅ Build successful! ───────────────────────────────────────────────────────────────────╮
+│ Output: /home/acciente/work/pie/sdk/case-study/application-latency/build/text-completion-greedy-py.wasm (0.8 MB)                                           │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+=== Pre-linking static binaries ===
+  prefix-tree... done.
+  rot... done.
+  template-gen... done.
+  cacheback... done.
+  codeact... done.
+  text-completion... done.
+
+============================================================
+  prefix-tree/monolithic  (10 runs + 1 warm-up)
+============================================================
+  Starting engine... ready.
+  Warm-up run... done.
+  Run 1/10 ... 2865 ms
+  Run 2/10 ... 2791 ms
+  Run 3/10 ... 2750 ms
+  Run 4/10 ... 2762 ms
+  Run 5/10 ... 2833 ms
+  Run 6/10 ... 2774 ms
+  Run 7/10 ... 2736 ms
+  Run 8/10 ... 2731 ms
+  Run 9/10 ... 2752 ms
+  Run 10/10 ... 2762 ms
+
+  Average: 2776 ms   min: 2731 ms   max: 2865 ms
+
+============================================================
+  prefix-tree/rust-inferlib  (10 runs + 1 warm-up)
+============================================================
+  Starting engine... ready.
+  Installing inferlib deps (inference)... done.
+  Warm-up run... done.
+  Run 1/10 ... 2813 ms
+  Run 2/10 ... 2786 ms
+  Run 3/10 ... 2785 ms
+  Run 4/10 ... 2829 ms
+  Run 5/10 ... 2855 ms
+  Run 6/10 ... 2771 ms
+  Run 7/10 ... 2725 ms
+  Run 8/10 ... 2812 ms
+  Run 9/10 ... 2796 ms
+  Run 10/10 ... 2742 ms
+
+  Average: 2791 ms   min: 2725 ms   max: 2855 ms
+
+============================================================
+  prefix-tree/rust-inferlib-static  (10 runs + 1 warm-up)
+============================================================
+  Starting engine... ready.
+  Warm-up run... done.
+  Run 1/10 ... 2930 ms
+  Run 2/10 ... 2821 ms
+  Run 3/10 ... 2750 ms
+  Run 4/10 ... 2825 ms
+  Run 5/10 ... 2829 ms
+  Run 6/10 ... 2822 ms
+  Run 7/10 ... 2826 ms
+  Run 8/10 ... 2823 ms
+  Run 9/10 ... 2865 ms
+  Run 10/10 ... 2790 ms
+
+  Average: 2828 ms   min: 2750 ms   max: 2930 ms
+
+============================================================
+  prefix-tree/python-inferlib  (10 runs + 1 warm-up)
+============================================================
+  Starting engine... ready.
+  Installing inferlib deps (inference)... done.
+  Warm-up run... done.
+  Run 1/10 ... 2825 ms
+  Run 2/10 ... 2730 ms
+  Run 3/10 ... 2757 ms
+  Run 4/10 ... 2781 ms
+  Run 5/10 ... 2773 ms
+  Run 6/10 ... 2742 ms
+  Run 7/10 ... 2724 ms
+  Run 8/10 ... 2817 ms
+  Run 9/10 ... 2777 ms
+  Run 10/10 ... 2861 ms
+
+  Average: 2779 ms   min: 2724 ms   max: 2861 ms
+
+============================================================
+  rot/monolithic  (10 runs + 1 warm-up)
+============================================================
+  Starting engine... ready.
+  Warm-up run... done.
+  Run 1/10 ... 10720 ms
+  Run 2/10 ... 10569 ms
+  Run 3/10 ... 10655 ms
+  Run 4/10 ... 10533 ms
+  Run 5/10 ... 10461 ms
+  Run 6/10 ... 10439 ms
+  Run 7/10 ... 10627 ms
+  Run 8/10 ... 10598 ms
+  Run 9/10 ... 10539 ms
+  Run 10/10 ... 10478 ms
+
+  Average: 10562 ms   min: 10439 ms   max: 10720 ms
+
+============================================================
+  rot/rust-inferlib  (10 runs + 1 warm-up)
+============================================================
+  Starting engine... ready.
+  Installing inferlib deps (inference)... done.
+  Warm-up run... done.
+  Run 1/10 ... 10625 ms
+  Run 2/10 ... 10512 ms
+  Run 3/10 ... 10530 ms
+  Run 4/10 ... 10587 ms
+  Run 5/10 ... 10520 ms
+  Run 6/10 ... 10456 ms
+  Run 7/10 ... 10460 ms
+  Run 8/10 ... 10516 ms
+  Run 9/10 ... 10454 ms
+  Run 10/10 ... 10536 ms
+
+  Average: 10520 ms   min: 10454 ms   max: 10625 ms
+
+============================================================
+  rot/rust-inferlib-static  (10 runs + 1 warm-up)
+============================================================
+  Starting engine... ready.
+  Warm-up run... done.
+  Run 1/10 ... 10538 ms
+  Run 2/10 ... 10995 ms
+  Run 3/10 ... 10831 ms
+  Run 4/10 ... 10807 ms
+  Run 5/10 ... 10592 ms
+  Run 6/10 ... 10534 ms
+  Run 7/10 ... 10518 ms
+  Run 8/10 ... 10532 ms
+  Run 9/10 ... 10572 ms
+  Run 10/10 ... 10664 ms
+
+  Average: 10658 ms   min: 10518 ms   max: 10995 ms
+
+============================================================
+  rot/python-inferlib  (10 runs + 1 warm-up)
+============================================================
+  Starting engine... ready.
+  Installing inferlib deps (inference)... done.
+  Warm-up run... done.
+  Run 1/10 ... 10828 ms
+  Run 2/10 ... 10740 ms
+  Run 3/10 ... 10616 ms
+  Run 4/10 ... 10708 ms
+  Run 5/10 ... 10827 ms
+  Run 6/10 ... 10841 ms
+  Run 7/10 ... 10737 ms
+  Run 8/10 ... 10615 ms
+  Run 9/10 ... 10661 ms
+  Run 10/10 ... 10610 ms
+
+  Average: 10718 ms   min: 10610 ms   max: 10841 ms
+
+============================================================
+  template-gen/monolithic  (10 runs + 1 warm-up)
+============================================================
+  Starting engine... ready.
+  Warm-up run... done.
+  Run 1/10 ... 9426 ms
+  Run 2/10 ... 9419 ms
+  Run 3/10 ... 9579 ms
+  Run 4/10 ... 9399 ms
+  Run 5/10 ... 9461 ms
+  Run 6/10 ... 9457 ms
+  Run 7/10 ... 9464 ms
+  Run 8/10 ... 9532 ms
+  Run 9/10 ... 9520 ms
+  Run 10/10 ... 9524 ms
+
+  Average: 9478 ms   min: 9399 ms   max: 9579 ms
+
+============================================================
+  template-gen/rust-inferlib  (10 runs + 1 warm-up)
+============================================================
+  Starting engine... ready.
+  Installing inferlib deps (inference, llguidance, schema, template)... done.
+  Warm-up run... done.
+  Run 1/10 ... 9792 ms
+  Run 2/10 ... 9849 ms
+  Run 3/10 ... 9799 ms
+  Run 4/10 ... 9790 ms
+  Run 5/10 ... 9869 ms
+  Run 6/10 ... 9842 ms
+  Run 7/10 ... 10085 ms
+  Run 8/10 ... 9777 ms
+  Run 9/10 ... 10078 ms
+  Run 10/10 ... 9686 ms
+
+  Average: 9857 ms   min: 9686 ms   max: 10085 ms
+
+============================================================
+  template-gen/rust-inferlib-static  (10 runs + 1 warm-up)
+============================================================
+  Starting engine... ready.
+  Warm-up run... done.
+  Run 1/10 ... 9390 ms
+  Run 2/10 ... 9455 ms
+  Run 3/10 ... 9825 ms
+  Run 4/10 ... 9897 ms
+  Run 5/10 ... 9697 ms
+  Run 6/10 ... 9581 ms
+  Run 7/10 ... 9452 ms
+  Run 8/10 ... 9659 ms
+  Run 9/10 ... 9641 ms
+  Run 10/10 ... 9691 ms
+
+  Average: 9629 ms   min: 9390 ms   max: 9897 ms
+
+============================================================
+  template-gen/python-inferlib  (10 runs + 1 warm-up)
+============================================================
+  Starting engine... ready.
+  Installing inferlib deps (inference, llguidance, schema, template)... done.
+  Warm-up run... done.
+  Run 1/10 ... 10427 ms
+  Run 2/10 ... 10231 ms
+  Run 3/10 ... 9869 ms
+  Run 4/10 ... 9881 ms
+  Run 5/10 ... 10149 ms
+  Run 6/10 ... 9820 ms
+  Run 7/10 ... 9888 ms
+  Run 8/10 ... 9843 ms
+  Run 9/10 ... 9863 ms
+  Run 10/10 ... 9883 ms
+
+  Average: 9985 ms   min: 9820 ms   max: 10427 ms
+
+============================================================
+  cacheback/monolithic  (10 runs + 1 warm-up)
+============================================================
+  Starting engine... ready.
+  Warm-up run... done.
+  Run 1/10 ... 5182 ms
+  Run 2/10 ... 5205 ms
+  Run 3/10 ... 5212 ms
+  Run 4/10 ... 5116 ms
+  Run 5/10 ... 5156 ms
+  Run 6/10 ... 5126 ms
+  Run 7/10 ... 5203 ms
+  Run 8/10 ... 5194 ms
+  Run 9/10 ... 5185 ms
+  Run 10/10 ... 5152 ms
+
+  Average: 5173 ms   min: 5116 ms   max: 5212 ms
+
+============================================================
+  cacheback/rust-inferlib  (10 runs + 1 warm-up)
+============================================================
+  Starting engine... ready.
+  Installing inferlib deps (inference, cacheback)... done.
+  Warm-up run... done.
+  Run 1/10 ... 5301 ms
+  Run 2/10 ... 5302 ms
+  Run 3/10 ... 5144 ms
+  Run 4/10 ... 5114 ms
+  Run 5/10 ... 5265 ms
+  Run 6/10 ... 5079 ms
+  Run 7/10 ... 5063 ms
+  Run 8/10 ... 5061 ms
+  Run 9/10 ... 5036 ms
+  Run 10/10 ... 5063 ms
+
+  Average: 5143 ms   min: 5036 ms   max: 5302 ms
+
+============================================================
+  cacheback/rust-inferlib-static  (10 runs + 1 warm-up)
+============================================================
+  Starting engine... ready.
+  Warm-up run... done.
+  Run 1/10 ... 5225 ms
+  Run 2/10 ... 5127 ms
+  Run 3/10 ... 5095 ms
+  Run 4/10 ... 5067 ms
+  Run 5/10 ... 5037 ms
+  Run 6/10 ... 5097 ms
+  Run 7/10 ... 5014 ms
+  Run 8/10 ... 5101 ms
+  Run 9/10 ... 5050 ms
+  Run 10/10 ... 5044 ms
+
+  Average: 5086 ms   min: 5014 ms   max: 5225 ms
+
+============================================================
+  cacheback/python-inferlib  (10 runs + 1 warm-up)
+============================================================
+  Starting engine... ready.
+  Installing inferlib deps (inference, cacheback)... done.
+  Warm-up run... done.
+  Run 1/10 ... 5219 ms
+  Run 2/10 ... 5221 ms
+  Run 3/10 ... 5140 ms
+  Run 4/10 ... 5237 ms
+  Run 5/10 ... 5149 ms
+  Run 6/10 ... 5158 ms
+  Run 7/10 ... 5223 ms
+  Run 8/10 ... 5212 ms
+  Run 9/10 ... 5143 ms
+  Run 10/10 ... 5189 ms
+
+  Average: 5189 ms   min: 5140 ms   max: 5237 ms
+
+============================================================
+  codeact/monolithic  (10 runs + 1 warm-up)
+============================================================
+  Starting engine... ready.
+  Warm-up run... done.
+  Run 1/10 ... 21659 ms
+  Run 2/10 ... 21606 ms
+  Run 3/10 ... 21499 ms
+  Run 4/10 ... 21377 ms
+  Run 5/10 ... 21256 ms
+  Run 6/10 ... 21226 ms
+  Run 7/10 ... 21755 ms
+  Run 8/10 ... 21389 ms
+  Run 9/10 ... 21468 ms
+  Run 10/10 ... 21368 ms
+
+  Average: 21460 ms   min: 21226 ms   max: 21755 ms
+
+============================================================
+  codeact/rust-inferlib  (10 runs + 1 warm-up)
+============================================================
+  Starting engine... ready.
+  Installing inferlib deps (inference, js-engine)... done.
+  Warm-up run... done.
+  Run 1/10 ... 20791 ms
+  Run 2/10 ... 20827 ms
+  Run 3/10 ... 20994 ms
+  Run 4/10 ... 20881 ms
+  Run 5/10 ... 20965 ms
+  Run 6/10 ... 20735 ms
+  Run 7/10 ... 20834 ms
+  Run 8/10 ... 20839 ms
+  Run 9/10 ... 20811 ms
+  Run 10/10 ... 20746 ms
+
+  Average: 20842 ms   min: 20735 ms   max: 20994 ms
+
+============================================================
+  codeact/rust-inferlib-static  (10 runs + 1 warm-up)
+============================================================
+  Starting engine... ready.
+  Warm-up run... done.
+  Run 1/10 ... 21063 ms
+  Run 2/10 ... 21257 ms
+  Run 3/10 ... 21107 ms
+  Run 4/10 ... 20961 ms
+  Run 5/10 ... 20929 ms
+  Run 6/10 ... 20938 ms
+  Run 7/10 ... 20884 ms
+  Run 8/10 ... 20874 ms
+  Run 9/10 ... 20905 ms
+  Run 10/10 ... 20867 ms
+
+  Average: 20978 ms   min: 20867 ms   max: 21257 ms
+
+============================================================
+  codeact/python-inferlib  (10 runs + 1 warm-up)
+============================================================
+  Starting engine... ready.
+  Installing inferlib deps (inference, js-engine)... done.
+  Warm-up run... done.
+  Run 1/10 ... 21027 ms
+  Run 2/10 ... 20885 ms
+  Run 3/10 ... 20846 ms
+  Run 4/10 ... 21033 ms
+  Run 5/10 ... 20893 ms
+  Run 6/10 ... 20875 ms
+  Run 7/10 ... 20823 ms
+  Run 8/10 ... 20845 ms
+  Run 9/10 ... 21007 ms
+  Run 10/10 ... 21316 ms
+
+  Average: 20955 ms   min: 20823 ms   max: 21316 ms
+
+============================================================
+  text-completion/monolithic  (10 runs + 1 warm-up)
+============================================================
+  Starting engine... ready.
+  Warm-up run... done.
+  Run 1/10 ... 3594 ms
+  Run 2/10 ... 3503 ms
+  Run 3/10 ... 3535 ms
+  Run 4/10 ... 3512 ms
+  Run 5/10 ... 3597 ms
+  Run 6/10 ... 3502 ms
+  Run 7/10 ... 3482 ms
+  Run 8/10 ... 3497 ms
+  Run 9/10 ... 3477 ms
+  Run 10/10 ... 3482 ms
+
+  Average: 3518 ms   min: 3477 ms   max: 3597 ms
+
+============================================================
+  text-completion/rust-inferlib  (10 runs + 1 warm-up)
+============================================================
+  Starting engine... ready.
+  Installing inferlib deps (inference)... done.
+  Warm-up run... done.
+  Run 1/10 ... 3472 ms
+  Run 2/10 ... 3493 ms
+  Run 3/10 ... 3493 ms
+  Run 4/10 ... 3495 ms
+  Run 5/10 ... 3528 ms
+  Run 6/10 ... 3491 ms
+  Run 7/10 ... 3481 ms
+  Run 8/10 ... 3481 ms
+  Run 9/10 ... 3485 ms
+  Run 10/10 ... 3491 ms
+
+  Average: 3491 ms   min: 3472 ms   max: 3528 ms
+
+============================================================
+  text-completion/rust-inferlib-static  (10 runs + 1 warm-up)
+============================================================
+  Starting engine... ready.
+  Warm-up run... done.
+  Run 1/10 ... 3579 ms
+  Run 2/10 ... 3578 ms
+  Run 3/10 ... 3499 ms
+  Run 4/10 ... 3547 ms
+  Run 5/10 ... 3534 ms
+  Run 6/10 ... 3546 ms
+  Run 7/10 ... 3485 ms
+  Run 8/10 ... 3536 ms
+  Run 9/10 ... 3542 ms
+  Run 10/10 ... 3489 ms
+
+  Average: 3534 ms   min: 3485 ms   max: 3579 ms
+
+============================================================
+  text-completion/python-inferlib  (10 runs + 1 warm-up)
+============================================================
+  Starting engine... ready.
+  Installing inferlib deps (inference)... done.
+  Warm-up run... done.
+  Run 1/10 ... 3477 ms
+  Run 2/10 ... 3474 ms
+  Run 3/10 ... 3473 ms
+  Run 4/10 ... 3478 ms
+  Run 5/10 ... 3476 ms
+  Run 6/10 ... 3467 ms
+  Run 7/10 ... 3471 ms
+  Run 8/10 ... 3470 ms
+  Run 9/10 ... 3469 ms
+  Run 10/10 ... 3525 ms
+
+  Average: 3478 ms   min: 3467 ms   max: 3525 ms
+
+============================================================
+  Summary (10 measured runs each, 1 warm-up excluded)
+============================================================
+  prefix-tree/monolithic                avg=  2776 ms   min=  2731 ms   max=  2865 ms   [2865  2791  2750  2762  2833  2774  2736  2731  2752  2762] ms
+  prefix-tree/rust-inferlib             avg=  2791 ms   min=  2725 ms   max=  2855 ms   [2813  2786  2785  2829  2855  2771  2725  2812  2796  2742] ms
+  prefix-tree/rust-inferlib-static      avg=  2828 ms   min=  2750 ms   max=  2930 ms   [2930  2821  2750  2825  2829  2822  2826  2823  2865  2790] ms
+  prefix-tree/python-inferlib           avg=  2779 ms   min=  2724 ms   max=  2861 ms   [2825  2730  2757  2781  2773  2742  2724  2817  2777  2861] ms
+  rot/monolithic                        avg= 10562 ms   min= 10439 ms   max= 10720 ms   [10720  10569  10655  10533  10461  10439  10627  10598  10539  10478] ms
+  rot/rust-inferlib                     avg= 10520 ms   min= 10454 ms   max= 10625 ms   [10625  10512  10530  10587  10520  10456  10460  10516  10454  10536] ms
+  rot/rust-inferlib-static              avg= 10658 ms   min= 10518 ms   max= 10995 ms   [10538  10995  10831  10807  10592  10534  10518  10532  10572  10664] ms
+  rot/python-inferlib                   avg= 10718 ms   min= 10610 ms   max= 10841 ms   [10828  10740  10616  10708  10827  10841  10737  10615  10661  10610] ms
+  template-gen/monolithic               avg=  9478 ms   min=  9399 ms   max=  9579 ms   [9426  9419  9579  9399  9461  9457  9464  9532  9520  9524] ms
+  template-gen/rust-inferlib            avg=  9857 ms   min=  9686 ms   max= 10085 ms   [9792  9849  9799  9790  9869  9842  10085  9777  10078  9686] ms
+  template-gen/rust-inferlib-static     avg=  9629 ms   min=  9390 ms   max=  9897 ms   [9390  9455  9825  9897  9697  9581  9452  9659  9641  9691] ms
+  template-gen/python-inferlib          avg=  9985 ms   min=  9820 ms   max= 10427 ms   [10427  10231  9869  9881  10149  9820  9888  9843  9863  9883] ms
+  cacheback/monolithic                  avg=  5173 ms   min=  5116 ms   max=  5212 ms   [5182  5205  5212  5116  5156  5126  5203  5194  5185  5152] ms
+  cacheback/rust-inferlib               avg=  5143 ms   min=  5036 ms   max=  5302 ms   [5301  5302  5144  5114  5265  5079  5063  5061  5036  5063] ms
+  cacheback/rust-inferlib-static        avg=  5086 ms   min=  5014 ms   max=  5225 ms   [5225  5127  5095  5067  5037  5097  5014  5101  5050  5044] ms
+  cacheback/python-inferlib             avg=  5189 ms   min=  5140 ms   max=  5237 ms   [5219  5221  5140  5237  5149  5158  5223  5212  5143  5189] ms
+  codeact/monolithic                    avg= 21460 ms   min= 21226 ms   max= 21755 ms   [21659  21606  21499  21377  21256  21226  21755  21389  21468  21368] ms
+  codeact/rust-inferlib                 avg= 20842 ms   min= 20735 ms   max= 20994 ms   [20791  20827  20994  20881  20965  20735  20834  20839  20811  20746] ms
+  codeact/rust-inferlib-static          avg= 20978 ms   min= 20867 ms   max= 21257 ms   [21063  21257  21107  20961  20929  20938  20884  20874  20905  20867] ms
+  codeact/python-inferlib               avg= 20955 ms   min= 20823 ms   max= 21316 ms   [21027  20885  20846  21033  20893  20875  20823  20845  21007  21316] ms
+  text-completion/monolithic            avg=  3518 ms   min=  3477 ms   max=  3597 ms   [3594  3503  3535  3512  3597  3502  3482  3497  3477  3482] ms
+  text-completion/rust-inferlib         avg=  3491 ms   min=  3472 ms   max=  3528 ms   [3472  3493  3493  3495  3528  3491  3481  3481  3485  3491] ms
+  text-completion/rust-inferlib-static  avg=  3534 ms   min=  3485 ms   max=  3579 ms   [3579  3578  3499  3547  3534  3546  3485  3536  3542  3489] ms
+  text-completion/python-inferlib       avg=  3478 ms   min=  3467 ms   max=  3525 ms   [3477  3474  3473  3478  3476  3467  3471  3470  3469  3525] ms
