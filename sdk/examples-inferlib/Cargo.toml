@@ -20,6 +20,7 @@ members = [
     "recursion-of-thought",
     "skeleton-of-thought",
     "template-generation",
+    "template-generation-herald",
     "text-completion-greedy",
     "text-completion-inferlib",
     "tree-of-thought",
