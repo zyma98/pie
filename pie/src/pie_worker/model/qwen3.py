@@ -166,6 +166,21 @@ class ModelConfig(ModelConfigBase):
             tie_word_embeddings=bool(spec.get("tie_word_embeddings", True)),
         )
 
+    @property
+    def internal_num_kv_heads(self) -> int:
+        """Number of KV heads used internally by the engine.
+
+        FlashInfer 0.6.x AOT batch_decode kernels only support power-of-2
+        GQA group sizes.  Qwen3-14B has 40 Q heads / 8 KV heads = group_size 5,
+        which triggers 'Unsupported group_size' at runtime.  Work around this
+        by expanding KV heads to match Q heads (MHA) so group_size becomes 1.
+        """
+        if self.num_kv_heads > 0 and self.num_q_heads % self.num_kv_heads == 0:
+            group_size = self.num_q_heads // self.num_kv_heads
+            if group_size > 0 and (group_size & (group_size - 1)) != 0:
+                return self.num_q_heads
+        return self.num_kv_heads
+
     def eval_max_num_kv_pages(self, runtime_config: RuntimeConfig) -> int:
         """Evaluate the maximum number of KV pages based on available memory."""
         available_bytes = get_available_memory(
@@ -179,7 +194,8 @@ class ModelConfig(ModelConfigBase):
 
         # In multi-GPU mode, KV cache is sharded across GPUs
         # Each GPU only stores num_kv_heads // tp_size heads
-        local_num_kv_heads = self.num_kv_heads // runtime_config.tensor_parallel_size
+        # Use internal_num_kv_heads to account for GQA expansion
+        local_num_kv_heads = self.internal_num_kv_heads // runtime_config.tensor_parallel_size
 
         total_bytes_per_page = (
             element_size_bytes
@@ -321,7 +337,7 @@ class ForwardPass:
 
         # Local head counts for planning
         local_num_query_heads = self.model_config.num_q_heads // self.tp_size
-        local_num_key_value_heads = self.model_config.num_kv_heads // self.tp_size
+        local_num_key_value_heads = self.model_config.internal_num_kv_heads // self.tp_size
         page_size = self.runtime_config.kv_page_size
 
         print(f"Warmup: Capturing CUDA graphs for bins {self.cuda_graph_bins}...")
@@ -661,7 +677,14 @@ class ForwardPass:
             eps=self.model_config.rms_norm_eps,
         )
 
-        # 6. Apply RoPE (in-place on local shards) - standard RoPE
+        # 6. Expand K/V heads for FlashInfer GQA compatibility if needed
+        local_kv_heads_internal = self.model_config.internal_num_kv_heads // self.tp_size
+        if local_kv_heads_internal != local_num_key_value_heads:
+            ratio = local_kv_heads_internal // local_num_key_value_heads
+            k = k.repeat_interleave(ratio, dim=1)
+            v = v.repeat_interleave(ratio, dim=1)
+
+        # 7. Apply RoPE (in-place on local shards) - standard RoPE
         ops.apply_rope_pos_ids_inplace(
             q=q,
             k=k,
@@ -669,7 +692,7 @@ class ForwardPass:
             rope_theta=self.model_config.rope_theta,
         )
 
-        # 7. Append K, V to cache (local shards to local cache)
+        # 8. Append K, V to cache (local shards to local cache)
         # kv_cache_layer is the LOCAL shard of the cache for this layer
         ops.append_paged_kv_cache(
             append_key=k,
@@ -683,7 +706,7 @@ class ForwardPass:
             kv_layout="NHD",
         )
 
-        # 8. Compute Attention (on local shards)
+        # 9. Compute Attention (on local shards)
         # wrapper was planned with local head counts
         attn_output = wrapper.run(q, kv_cache_layer)
         del q, k, v
@@ -692,7 +715,7 @@ class ForwardPass:
         # attn_output is a local shard
         attn_output = attn_output.reshape(n, -1)
 
-        # 9. Output Projection (Row Parallel)
+        # 10. Output Projection (Row Parallel)
         # Input is sharded, weight is sharded -> output is partial
         attn_proj = fun.linear(
             attn_output,
@@ -705,7 +728,7 @@ class ForwardPass:
         if self.tp_size > 1:
             dist.all_reduce(attn_proj, group=self.compute_process_group)
 
-        # 10. First Residual Connection
+        # 11. First Residual Connection
         # residual (replicated) + attn_proj (now replicated)
         return residual + attn_proj
 
@@ -751,7 +774,7 @@ class ForwardPass:
 
         # Wrapper Planning
         local_num_query_heads = self.model_config.num_q_heads // self.tp_size
-        local_num_key_value_heads = self.model_config.num_kv_heads // self.tp_size
+        local_num_key_value_heads = self.model_config.internal_num_kv_heads // self.tp_size
 
         if single_token_inference_mode:
             if self.use_cuda_graphs:
@@ -877,7 +900,7 @@ class ForwardPass:
                 last_page_len=kv_last_page_lens,
                 num_qo_heads=self.model_config.num_q_heads
                 // self.runtime_config.world_size,
-                num_kv_heads=self.model_config.num_kv_heads
+                num_kv_heads=self.model_config.internal_num_kv_heads
                 // self.runtime_config.world_size,
                 head_dim=self.model_config.dim_head,
                 page_size=page_size,
@@ -946,7 +969,7 @@ def create_kv_cache(
 ) -> list[torch.Tensor]:
     """Create KV cache tensors for all layers."""
     local_num_kv_heads = (
-        model_config.num_kv_heads // runtime_config.tensor_parallel_size
+        model_config.internal_num_kv_heads // runtime_config.tensor_parallel_size
     )
 
     return [
