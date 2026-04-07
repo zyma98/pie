@@ -852,6 +852,11 @@ impl Session {
                 };
 
                 self.send_response(corr_id, true, result.to_string()).await;
+
+                #[cfg(feature = "case_study_cold_start_latency")]
+                if !result {
+                    crate::runtime::record_cold_start_begin(program_name.name.clone());
+                }
             }
             message::QUERY_MODEL_STATUS => {
                 let runtime_stats = model::runtime_stats().await;
@@ -1070,6 +1075,9 @@ impl Session {
                 return;
             }
 
+            #[cfg(feature = "case_study_cold_start_latency")]
+            let cold_start_name = program_name.name.clone();
+
             // Update the server's uploaded_programs_in_disk map
             self.state.uploaded_programs_in_disk.insert(
                 program_name,
@@ -1083,6 +1091,10 @@ impl Session {
             );
 
             self.send_response(corr_id, true, final_hash).await;
+
+            #[cfg(feature = "case_study_cold_start_latency")]
+            crate::runtime::record_cold_start_upload_done(&cold_start_name);
+
             self.inflight_program_upload = None;
         }
     }

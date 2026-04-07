@@ -78,3 +78,4 @@ ipc-channel = "0.19"
 microbench_call_latency = []
 microbench_snapshot = []
 case_study_instantiation_time = []
+case_study_cold_start_latency = []

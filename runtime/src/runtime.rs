@@ -36,6 +36,23 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// handler task.
 static COMMAND_DISPATCHER: OnceLock<CommandDispatcher<Command>> = OnceLock::new();
 
+#[cfg(feature = "case_study_cold_start_latency")]
+static COLD_START_TIMERS: once_cell::sync::Lazy<
+    DashMap<String, (std::time::Instant, Option<std::time::Instant>)>,
+> = once_cell::sync::Lazy::new(DashMap::new);
+
+#[cfg(feature = "case_study_cold_start_latency")]
+pub fn record_cold_start_begin(program_name: String) {
+    COLD_START_TIMERS.insert(program_name, (std::time::Instant::now(), None));
+}
+
+#[cfg(feature = "case_study_cold_start_latency")]
+pub fn record_cold_start_upload_done(program_name: &str) {
+    if let Some(mut entry) = COLD_START_TIMERS.get_mut(program_name) {
+        entry.value_mut().1 = Some(std::time::Instant::now());
+    }
+}
+
 /// Starts the runtime service. A daemon task will be spawned to handle the
 /// commands dispatched from other services.
 pub fn start_service(engine: Engine, python_snapshot: bool) {
@@ -1490,6 +1507,23 @@ impl Runtime {
             let run_func = instance
                 .get_typed_func::<(), (Result<(), String>,)>(&mut store, &run_func_export)
                 .map_err(|e| RuntimeError::Other(format!("Failed to get 'run' function: {e}")))?;
+
+            #[cfg(feature = "case_study_cold_start_latency")]
+            if let Some((_, (cold_start_begin, upload_done))) =
+                COLD_START_TIMERS.remove(&program_name)
+            {
+                let now = std::time::Instant::now();
+                let total_us = now.duration_since(cold_start_begin).as_nanos() as f64 / 1000.0;
+                if let Some(upload_end) = upload_done {
+                    let upload_us =
+                        upload_end.duration_since(cold_start_begin).as_nanos() as f64 / 1000.0;
+                    let compile_us =
+                        now.duration_since(upload_end).as_nanos() as f64 / 1000.0;
+                    println!("[case-study] Cold-start upload: {upload_us:.1} us");
+                    println!("[case-study] Cold-start compile: {compile_us:.1} us");
+                }
+                println!("[case-study] Cold-start latency: {total_us:.1} us");
+            }
 
             return match run_func.call_async(&mut store, ()).await {
                 Ok((Ok(()),)) => {

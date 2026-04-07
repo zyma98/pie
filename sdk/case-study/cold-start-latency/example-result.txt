@@ -1,0 +1,280 @@
+=== Building runtime with case_study_cold_start_latency feature ===
+=== Building inferlib dependencies ===
+=== Building sdk/examples (monolithic + herald) ===
+=== Building sdk/examples-inferlib (rust-inferlib + herald) ===
+=== Building Python template-generation ===
+Component built successfully
+=== Building Python template-generation-herald ===
+Component built successfully
+=== Building Python template-generation-full ===
+Component built successfully
+=== Building Python watermarking-numpy ===
+Component built successfully
+=== Building Python watermarking-numpy-herald ===
+Component built successfully
+=== Building Python watermarking-numpy-full ===
+Component built successfully
+=== Pre-linking rust-inferlib-static ===
+=== Setting up toxiproxy ===
+
+############################################################
+  Network: slow (~10 Mbps, 1250 KB/s)
+############################################################
+
+============================================================
+  slow / rust-mono-template-generation (1 runs)
+============================================================
+  Run 1/1: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=4953900.3 us  compile=1071363.4 us  total=6025263.8 us
+
+  --- Average ---
+  Upload:              4.954 s
+  Compile+instantiate: 1.071 s
+  Cold-start latency:  6.025 s
+
+============================================================
+  slow / rust-dynamic-template-generation (1 runs)
+============================================================
+  Run 1/1: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=161656.9 us  compile=102028.6 us  total=263685.5 us
+
+  --- Average ---
+  Upload:              0.162 s
+  Compile+instantiate: 0.102 s
+  Cold-start latency:  0.264 s
+
+============================================================
+  slow / rust-static-template-generation (1 runs)
+============================================================
+  Run 1/1: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=7815446.0 us  compile=1703063.0 us  total=9518509.0 us
+
+  --- Average ---
+  Upload:              7.815 s
+  Compile+instantiate: 1.703 s
+  Cold-start latency:  9.519 s
+
+============================================================
+  slow / python-factored-dynamic-template-generation (1 runs)
+============================================================
+  Run 1/1: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=738389.8 us  compile=2193883.9 us  total=2932273.7 us
+
+  --- Average ---
+  Upload:              0.738 s
+  Compile+instantiate: 2.194 s
+  Cold-start latency:  2.932 s
+
+============================================================
+  slow / python-full-dynamic-template-generation (1 runs)
+============================================================
+  Run 1/1: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=34377331.9 us  compile=2165311.2 us  total=36542643.2 us
+
+  --- Average ---
+  Upload:              34.377 s
+  Compile+instantiate: 2.165 s
+  Cold-start latency:  36.543 s
+
+============================================================
+  slow / python-factored-dynamic-watermarking-numpy (1 runs)
+============================================================
+  Run 1/1: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=1636561.8 us  compile=4101043.0 us  total=5737604.8 us
+
+  --- Average ---
+  Upload:              1.637 s
+  Compile+instantiate: 4.101 s
+  Cold-start latency:  5.738 s
+
+============================================================
+  slow / python-full-dynamic-watermarking-numpy (1 runs)
+============================================================
+  Run 1/1: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=64877866.2 us  compile=3992348.9 us  total=68870215.1 us
+
+  --- Average ---
+  Upload:              64.878 s
+  Compile+instantiate: 3.992 s
+  Cold-start latency:  68.870 s
+
+############################################################
+  Network: medium (~100 Mbps, 12500 KB/s)
+############################################################
+
+============================================================
+  medium / rust-mono-template-generation (1 runs)
+============================================================
+  Run 1/1: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=531043.9 us  compile=1054605.6 us  total=1585649.5 us
+
+  --- Average ---
+  Upload:              0.531 s
+  Compile+instantiate: 1.055 s
+  Cold-start latency:  1.586 s
+
+============================================================
+  medium / rust-dynamic-template-generation (1 runs)
+============================================================
+  Run 1/1: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=20019.5 us  compile=83702.9 us  total=103722.4 us
+
+  --- Average ---
+  Upload:              0.020 s
+  Compile+instantiate: 0.084 s
+  Cold-start latency:  0.104 s
+
+============================================================
+  medium / rust-static-template-generation (1 runs)
+============================================================
+  Run 1/1: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=813274.4 us  compile=1652098.3 us  total=2465372.7 us
+
+  --- Average ---
+  Upload:              0.813 s
+  Compile+instantiate: 1.652 s
+  Cold-start latency:  2.465 s
+
+============================================================
+  medium / python-factored-dynamic-template-generation (1 runs)
+============================================================
+  Run 1/1: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=79543.7 us  compile=2182680.8 us  total=2262224.5 us
+
+  --- Average ---
+  Upload:              0.080 s
+  Compile+instantiate: 2.183 s
+  Cold-start latency:  2.262 s
+
+============================================================
+  medium / python-full-dynamic-template-generation (1 runs)
+============================================================
+  Run 1/1: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=3536670.3 us  compile=2152915.1 us  total=5689585.3 us
+
+  --- Average ---
+  Upload:              3.537 s
+  Compile+instantiate: 2.153 s
+  Cold-start latency:  5.690 s
+
+============================================================
+  medium / python-factored-dynamic-watermarking-numpy (1 runs)
+============================================================
+  Run 1/1: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=170749.0 us  compile=3718093.4 us  total=3888842.4 us
+
+  --- Average ---
+  Upload:              0.171 s
+  Compile+instantiate: 3.718 s
+  Cold-start latency:  3.889 s
+
+============================================================
+  medium / python-full-dynamic-watermarking-numpy (1 runs)
+============================================================
+  Run 1/1: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=6684969.5 us  compile=4064361.4 us  total=10749330.9 us
+
+  --- Average ---
+  Upload:              6.685 s
+  Compile+instantiate: 4.064 s
+  Cold-start latency:  10.749 s
+
+############################################################
+  Network: fast (~1000 Mbps, 125000 KB/s)
+############################################################
+
+============================================================
+  fast / rust-mono-template-generation (1 runs)
+============================================================
+  Run 1/1: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=84576.3 us  compile=1055229.4 us  total=1139805.7 us
+
+  --- Average ---
+  Upload:              0.085 s
+  Compile+instantiate: 1.055 s
+  Cold-start latency:  1.140 s
+
+============================================================
+  fast / rust-dynamic-template-generation (1 runs)
+============================================================
+  Run 1/1: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=6308.7 us  compile=85666.5 us  total=91975.2 us
+
+  --- Average ---
+  Upload:              0.006 s
+  Compile+instantiate: 0.086 s
+  Cold-start latency:  0.092 s
+
+============================================================
+  fast / rust-static-template-generation (1 runs)
+============================================================
+  Run 1/1: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=121546.5 us  compile=1655035.0 us  total=1776581.5 us
+
+  --- Average ---
+  Upload:              0.122 s
+  Compile+instantiate: 1.655 s
+  Cold-start latency:  1.777 s
+
+============================================================
+  fast / python-factored-dynamic-template-generation (1 runs)
+============================================================
+  Run 1/1: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=14117.6 us  compile=1995449.3 us  total=2009566.9 us
+
+  --- Average ---
+  Upload:              0.014 s
+  Compile+instantiate: 1.995 s
+  Cold-start latency:  2.010 s
+
+============================================================
+  fast / python-full-dynamic-template-generation (1 runs)
+============================================================
+  Run 1/1: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=592678.3 us  compile=2278511.8 us  total=2871190.0 us
+
+  --- Average ---
+  Upload:              0.593 s
+  Compile+instantiate: 2.279 s
+  Cold-start latency:  2.871 s
+
+============================================================
+  fast / python-factored-dynamic-watermarking-numpy (1 runs)
+============================================================
+  Run 1/1: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=30092.0 us  compile=3521873.9 us  total=3551965.9 us
+
+  --- Average ---
+  Upload:              0.030 s
+  Compile+instantiate: 3.522 s
+  Cold-start latency:  3.552 s
+
+============================================================
+  fast / python-full-dynamic-watermarking-numpy (1 runs)
+============================================================
+  Run 1/1: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=979597.4 us  compile=4465334.5 us  total=5444931.9 us
+
+  --- Average ---
+  Upload:              0.980 s
+  Compile+instantiate: 4.465 s
+  Cold-start latency:  5.445 s
+
+============================================================
+  Overall Summary (1 runs each)
+============================================================
+
+--- Wasm file sizes ---
+  rust-mono-template-generation:  5.86 MB
+  rust-dynamic-template-generation:  0.19 MB
+  rust-static-template-generation:  9.24 MB
+  python-factored-dynamic-template-generation:  0.87 MB
+  python-full-dynamic-template-generation:  40.67 MB
+  python-factored-dynamic-watermarking-numpy:  1.93 MB
+  python-full-dynamic-watermarking-numpy:  76.85 MB
+
+--- slow (~10 Mbps) ---
+  rust-mono-template-generation:  upload=4.954 s  compile=1.071 s  total=6.025 s
+  rust-dynamic-template-generation:  upload=0.162 s  compile=0.102 s  total=0.264 s
+  rust-static-template-generation:  upload=7.815 s  compile=1.703 s  total=9.519 s
+  python-factored-dynamic-template-generation:  upload=0.738 s  compile=2.194 s  total=2.932 s
+  python-full-dynamic-template-generation:  upload=34.377 s  compile=2.165 s  total=36.543 s
+  python-factored-dynamic-watermarking-numpy:  upload=1.637 s  compile=4.101 s  total=5.738 s
+  python-full-dynamic-watermarking-numpy:  upload=64.878 s  compile=3.992 s  total=68.870 s
+
+--- medium (~100 Mbps) ---
+  rust-mono-template-generation:  upload=0.531 s  compile=1.055 s  total=1.586 s
+  rust-dynamic-template-generation:  upload=0.020 s  compile=0.084 s  total=0.104 s
+  rust-static-template-generation:  upload=0.813 s  compile=1.652 s  total=2.465 s
+  python-factored-dynamic-template-generation:  upload=0.080 s  compile=2.183 s  total=2.262 s
+  python-full-dynamic-template-generation:  upload=3.537 s  compile=2.153 s  total=5.690 s
+  python-factored-dynamic-watermarking-numpy:  upload=0.171 s  compile=3.718 s  total=3.889 s
+  python-full-dynamic-watermarking-numpy:  upload=6.685 s  compile=4.064 s  total=10.749 s
+
+--- fast (~1000 Mbps) ---
+  rust-mono-template-generation:  upload=0.085 s  compile=1.055 s  total=1.140 s
+  rust-dynamic-template-generation:  upload=0.006 s  compile=0.086 s  total=0.092 s
+  rust-static-template-generation:  upload=0.122 s  compile=1.655 s  total=1.777 s
+  python-factored-dynamic-template-generation:  upload=0.014 s  compile=1.995 s  total=2.010 s
+  python-full-dynamic-template-generation:  upload=0.593 s  compile=2.279 s  total=2.871 s
+  python-factored-dynamic-watermarking-numpy:  upload=0.030 s  compile=3.522 s  total=3.552 s
+  python-full-dynamic-watermarking-numpy:  upload=0.980 s  compile=4.465 s  total=5.445 s
