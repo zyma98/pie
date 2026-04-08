@@ -24,6 +24,7 @@ members = [
     "skeleton-of-thought",
     "template-generation",
     "template-generation-herald",
+    "template-generation-sleep",
     "text-completion-greedy",
     "text-completion-inferlib-old",
     "tree-of-thought",
