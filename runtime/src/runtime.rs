@@ -461,6 +461,7 @@ impl Service for Runtime {
 
                 // Sort by elapsed time (most recent first) and limit to 50 for performance
                 instances.sort_by(|a, b| a.elapsed_secs.cmp(&b.elapsed_secs));
+                #[cfg(not(feature = "case_study_memory_consumption"))]
                 instances.truncate(50);
 
                 event.send(instances).unwrap();
