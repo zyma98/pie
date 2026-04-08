@@ -86,8 +86,21 @@ pub async fn run_server(
     let mut wasm_config = WasmConfig::default();
     wasm_config.async_support(true);
 
-    let pooling_config = PoolingAllocationConfig::default();
-    wasm_config.allocation_strategy(InstanceAllocationStrategy::Pooling(pooling_config));
+    #[cfg(feature = "case_study_memory_consumption")]
+    {
+        let mut pooling_config = PoolingAllocationConfig::default();
+        pooling_config.total_component_instances(10_000);
+        pooling_config.total_core_instances(100_000);
+        pooling_config.total_memories(10_000);
+        pooling_config.total_tables(10_000);
+        pooling_config.total_stacks(10_000);
+        wasm_config.allocation_strategy(InstanceAllocationStrategy::Pooling(pooling_config));
+    }
+    #[cfg(not(feature = "case_study_memory_consumption"))]
+    {
+        let pooling_config = PoolingAllocationConfig::default();
+        wasm_config.allocation_strategy(InstanceAllocationStrategy::Pooling(pooling_config));
+    }
 
     let wasm_engine = WasmEngine::new(&wasm_config).unwrap();
 

@@ -1,0 +1,141 @@
+=== Building runtime with case_study_memory_consumption feature ===
+=== Building inferlib dependencies ===
+=== Building sdk/examples (monolithic template-generation-sleep) ===
+=== Building sdk/examples-inferlib (dynamic template-generation-sleep) ===
+=== Pre-linking rust-static template-generation-sleep ===
+=== Building Python watermarking-numpy-full-sleep ===
+Component built successfully
+=== Building Python watermarking-numpy-sleep ===
+Component built successfully
+=== Generating 100 manifest copies (full) ===
+=== Generating 100 manifest copies (shared) ===
+=== Generating 100 manifest copies (rust monolithic) ===
+=== Generating 100 manifest copies (rust dynamic) ===
+=== Generating 100 manifest copies (rust static) ===
+
+============================================================
+  Case 1: Idle engine
+============================================================
+Clearing cache... starting engine... ready (PID 128406).
+
+--- Process tree ---
+  PID 128406    RSS  1079480 KB  /home/acciente/work/pie/pie/.venv/bin/python3 /home/acciente/work/pie/pie/.venv/bin/pie serve
+  PID 128513    RSS    10804 KB  /home/acciente/work/pie/pie/.venv/bin/python3 -c from multiprocessing.resource_tracker import main;main(31)
+  PID 128514    RSS   990172 KB  /home/acciente/work/pie/pie/.venv/bin/python3 -c from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=32, pipe_handle=34) --multiprocessing-fork
+
+=== Idle engine RSS: 2080456 KB (2031.70 MiB) ===
+
+============================================================
+  Case 2: 100 detached inferlets (python full)
+============================================================
+Clearing cache... starting engine... ready (PID 128724).
+--- Process tree (sanity check) ---
+  PID 128724    RSS  1077400 KB  /home/acciente/work/pie/pie/.venv/bin/python3 /home/acciente/work/pie/pie/.venv/bin/pie serve
+  PID 128847    RSS    10844 KB  /home/acciente/work/pie/pie/.venv/bin/python3 -c from multiprocessing.resource_tracker import main;main(31)
+  PID 128848    RSS   993528 KB  /home/acciente/work/pie/pie/.venv/bin/python3 -c from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=32, pipe_handle=34) --multiprocessing-fork
+Installing inferlib-inference dependency... done.
+Submitting 100 detached inferlets (full)...
+  submitted 10/100  RSS=3506752 KB
+  submitted 20/100  RSS=4546644 KB
+  submitted 30/100  RSS=5568860 KB
+  submitted 40/100  RSS=6682752 KB
+  submitted 50/100  RSS=7719784 KB
+  submitted 60/100  RSS=8571428 KB
+  submitted 70/100  RSS=9570712 KB
+  submitted 80/100  RSS=10542884 KB
+  submitted 90/100  RSS=11617504 KB
+  submitted 100/100  RSS=12635256 KB
+All 100 submissions complete.
+  Verified: 100 detached instances (expected 100)
+
+============================================================
+  Case 3: 100 detached inferlets (python shared)
+============================================================
+Clearing cache... starting engine... ready (PID 129441).
+--- Process tree (sanity check) ---
+  PID 129441    RSS  1077612 KB  /home/acciente/work/pie/pie/.venv/bin/python3 /home/acciente/work/pie/pie/.venv/bin/pie serve
+  PID 129569    RSS    10800 KB  /home/acciente/work/pie/pie/.venv/bin/python3 -c from multiprocessing.resource_tracker import main;main(31)
+  PID 129570    RSS   981608 KB  /home/acciente/work/pie/pie/.venv/bin/python3 -c from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=32, pipe_handle=34) --multiprocessing-fork
+Installing inferlib-inference dependency... done.
+Submitting 100 detached inferlets (shared)...
+  submitted 10/100  RSS=2700508 KB
+  submitted 20/100  RSS=3011792 KB
+  submitted 30/100  RSS=3453368 KB
+  submitted 40/100  RSS=3894832 KB
+  submitted 50/100  RSS=4288668 KB
+  submitted 60/100  RSS=4603880 KB
+  submitted 70/100  RSS=5023996 KB
+  submitted 80/100  RSS=5338420 KB
+  submitted 90/100  RSS=5724108 KB
+  submitted 100/100  RSS=6101268 KB
+All 100 submissions complete.
+  Verified: 100 detached instances (expected 100)
+
+============================================================
+  Case 4: 100 detached inferlets (rust monolithic)
+============================================================
+Clearing cache... starting engine... ready (PID 130122).
+--- Process tree (sanity check) ---
+  PID 130122    RSS  1077660 KB  /home/acciente/work/pie/pie/.venv/bin/python3 /home/acciente/work/pie/pie/.venv/bin/pie serve
+  PID 130244    RSS    10828 KB  /home/acciente/work/pie/pie/.venv/bin/python3 -c from multiprocessing.resource_tracker import main;main(31)
+  PID 130245    RSS   979292 KB  /home/acciente/work/pie/pie/.venv/bin/python3 -c from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=32, pipe_handle=34) --multiprocessing-fork
+Submitting 100 detached inferlets (rust monolithic)...
+  submitted 10/100  RSS=2421828 KB
+  submitted 20/100  RSS=2660676 KB
+  submitted 30/100  RSS=2891076 KB
+  submitted 40/100  RSS=3106116 KB
+  submitted 50/100  RSS=3342660 KB
+  submitted 60/100  RSS=3582276 KB
+  submitted 70/100  RSS=3793476 KB
+  submitted 80/100  RSS=4033092 KB
+  submitted 90/100  RSS=4246256 KB
+  submitted 100/100  RSS=4514000 KB
+All 100 submissions complete.
+  Verified: 100 detached instances (expected 100)
+
+============================================================
+  Case 5: 100 detached inferlets (rust dynamic)
+============================================================
+Clearing cache... starting engine... ready (PID 130744).
+--- Process tree (sanity check) ---
+  PID 130744    RSS  1110596 KB  /home/acciente/work/pie/pie/.venv/bin/python3 /home/acciente/work/pie/pie/.venv/bin/pie serve
+  PID 130847    RSS    10844 KB  /home/acciente/work/pie/pie/.venv/bin/python3 -c from multiprocessing.resource_tracker import main;main(31)
+  PID 130848    RSS   976320 KB  /home/acciente/work/pie/pie/.venv/bin/python3 -c from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=32, pipe_handle=34) --multiprocessing-fork
+Installing inferlib template dependencies... done.
+Submitting 100 detached inferlets (rust dynamic)...
+  submitted 10/100  RSS=2190688 KB
+  submitted 20/100  RSS=2198368 KB
+  submitted 30/100  RSS=2209888 KB
+  submitted 40/100  RSS=2224480 KB
+  submitted 50/100  RSS=2237536 KB
+  submitted 60/100  RSS=2253664 KB
+  submitted 70/100  RSS=2266720 KB
+  submitted 80/100  RSS=2274400 KB
+  submitted 90/100  RSS=2286688 KB
+  submitted 100/100  RSS=2299744 KB
+All 100 submissions complete.
+  Verified: 100 detached instances (expected 100)
+
+============================================================
+  Case 6: 100 detached inferlets (rust static)
+============================================================
+Clearing cache... starting engine... ready (PID 131298).
+--- Process tree (sanity check) ---
+  PID 131298    RSS  1121416 KB  /home/acciente/work/pie/pie/.venv/bin/python3 /home/acciente/work/pie/pie/.venv/bin/pie serve
+  PID 131401    RSS    10812 KB  /home/acciente/work/pie/pie/.venv/bin/python3 -c from multiprocessing.resource_tracker import main;main(31)
+  PID 131402    RSS   977428 KB  /home/acciente/work/pie/pie/.venv/bin/python3 -c from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=32, pipe_handle=34) --multiprocessing-fork
+Submitting 100 detached inferlets (rust static)...
+  submitted 10/100  RSS=2603628 KB
+  submitted 20/100  RSS=2984964 KB
+  submitted 30/100  RSS=3334272 KB
+  submitted 40/100  RSS=3738780 KB
+  submitted 50/100  RSS=4074396 KB
+  submitted 60/100  RSS=4480220 KB
+  submitted 70/100  RSS=4803160 KB
+  submitted 80/100  RSS=5131220 KB
+  submitted 90/100  RSS=5482256 KB
+  submitted 100/100  RSS=5828948 KB
+All 100 submissions complete.
+  Verified: 100 detached instances (expected 100)
+
+Done.
