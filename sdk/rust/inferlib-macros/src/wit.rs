@@ -1,8 +1,51 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use syn::Path;
 
 use super::{manifest_dir, to_upper_camel};
+
+fn read_pie_toml() -> std::result::Result<toml::Value, String> {
+    let manifest_dir = manifest_dir()?;
+    let pie_toml_path = manifest_dir.join("Pie.toml");
+    let pie_toml_content = std::fs::read_to_string(&pie_toml_path).map_err(|_| {
+        "Failed to read Pie.toml - make sure it exists next to Cargo.toml".to_string()
+    })?;
+
+    pie_toml_content
+        .parse()
+        .map_err(|e| format!("Failed to parse Pie.toml: {e}"))
+}
+
+pub(crate) fn read_package_name() -> std::result::Result<String, String> {
+    let pie_config = read_pie_toml()?;
+    pie_config["package"]["name"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| "Missing [package].name in Pie.toml".to_string())
+}
+
+pub(crate) fn read_pie_with_remaps() -> std::result::Result<BTreeMap<String, Path>, String> {
+    let pie_config = read_pie_toml()?;
+    let Some(table) = pie_config
+        .get("wit")
+        .and_then(|wit| wit.get("with"))
+        .and_then(toml::Value::as_table)
+    else {
+        return Ok(BTreeMap::new());
+    };
+
+    let mut remaps = BTreeMap::new();
+    for (import, value) in table {
+        let rust_path = value.as_str().ok_or_else(|| {
+            format!("Expected [wit.with].{import:?} in Pie.toml to be a string")
+        })?;
+        let path = syn::parse_str(rust_path).map_err(|e| {
+            format!("Failed to parse Rust path `{rust_path}` for [wit.with].{import:?}: {e}")
+        })?;
+        remaps.insert(import.clone(), path);
+    }
+    Ok(remaps)
+}
 
 pub(crate) fn read_wit_exports_path() -> std::result::Result<Path, String> {
     let manifest_dir = manifest_dir()?;
@@ -70,6 +113,15 @@ pub(crate) fn read_wit_world_imports() -> std::result::Result<Vec<String>, Strin
         .collect())
 }
 
+pub(crate) fn read_wit_world_with_entries() -> std::result::Result<Vec<(String, Path)>, String> {
+    let imports = read_wit_world_imports()?;
+    let remaps = read_pie_with_remaps()?;
+    Ok(imports
+        .into_iter()
+        .filter_map(|import| remaps.get(&import).cloned().map(|path| (import, path)))
+        .collect())
+}
+
 pub(crate) fn read_interface_wit(interface: &str) -> std::result::Result<String, String> {
     let manifest_dir = manifest_dir()?;
     let file_name = format!("{}.wit", interface.replace('_', "-"));
@@ -115,13 +167,6 @@ fn parse_wit_decl_name(line: &str, keyword: &str) -> Option<String> {
         .map(str::trim)
         .filter(|name| !name.is_empty())?;
     Some(name.to_string())
-}
-
-pub(crate) fn known_import_remap(import: &str) -> Option<Path> {
-    if import.starts_with("wasi:io/poll@") {
-        return syn::parse_str("wasip2::io::poll").ok();
-    }
-    None
 }
 
 pub(crate) fn parse_world_exports() -> std::result::Result<Vec<String>, String> {
