@@ -1,5 +1,0 @@
-package inferlib:cacheback;
-
-world cacheback-provider {
-    export cacheback;
-}
