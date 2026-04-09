@@ -8,9 +8,10 @@ mod models;
 mod queues;
 mod runtime;
 
+use inferlib_macros::component;
 use wstd::runtime::{AsyncPollable, block_on};
 
-inferlib_macros::component!(InferenceComponentImpl);
+component!(InferenceComponentImpl);
 
 fn wait_for_pollable(pollable: wasip2::io::poll::Pollable) {
     block_on(async {
