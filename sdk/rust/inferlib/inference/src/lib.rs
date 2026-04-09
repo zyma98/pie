@@ -8,10 +8,6 @@ mod models;
 mod queues;
 mod runtime;
 
-use crate::inference::{Context, DecodeStepFuture, FlushFuture, GenerateFuture};
-use crate::models::{Model, Tokenizer};
-use crate::queues::{ForwardPass, Queue};
-
 use wstd::runtime::{AsyncPollable, block_on};
 
 inferlib_macros::component!(InferenceComponentImpl);
