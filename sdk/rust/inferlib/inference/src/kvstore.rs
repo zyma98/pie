@@ -1,7 +1,5 @@
 use crate::InferenceComponentImpl;
 
-inferlib_macros::wit_interface!(kvstore);
-
 #[inferlib_macros::guest_interface]
 impl InferenceComponentImpl {
     /// Retrieves a value from the persistent store for a given key.

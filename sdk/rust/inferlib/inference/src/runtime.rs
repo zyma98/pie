@@ -1,7 +1,5 @@
 use crate::InferenceComponentImpl;
 
-inferlib_macros::wit_interface!(runtime);
-
 #[inferlib_macros::guest_interface]
 impl InferenceComponentImpl {
     /// Returns the runtime version string.

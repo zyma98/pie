@@ -1,7 +1,5 @@
 use crate::InferenceComponentImpl;
 
-inferlib_macros::wit_interface!(messaging);
-
 #[inferlib_macros::guest_interface]
 impl InferenceComponentImpl {
     /// Sends a message to the remote user client.
