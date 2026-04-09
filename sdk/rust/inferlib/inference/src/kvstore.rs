@@ -1,6 +1,9 @@
 use crate::InferenceComponentImpl;
 
-impl crate::exports::inferlib::inference::kvstore::Guest for InferenceComponentImpl {
+inferlib_macros::wit_interface!(kvstore);
+
+#[inferlib_macros::guest_interface]
+impl InferenceComponentImpl {
     /// Retrieves a value from the persistent store for a given key.
     ///
     /// Returns `Some(value)` if the key exists, or `None` if it does not.

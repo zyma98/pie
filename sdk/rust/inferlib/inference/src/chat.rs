@@ -3,7 +3,7 @@ use serde_json::Value;
 
 /// Represents a single tool call.
 #[derive(Serialize, Clone, Debug)]
-pub struct ToolCall {
+pub struct MessageToolCall {
     pub name: String,
     pub arguments: Value,
 }
@@ -18,7 +18,7 @@ pub(crate) struct Message {
     reasoning_content: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    tool_calls: Option<Vec<ToolCall>>,
+    tool_calls: Option<Vec<MessageToolCall>>,
 }
 
 #[derive(Debug)]
@@ -65,7 +65,7 @@ impl ChatFormatter {
         &mut self,
         content: T,
         reasoning: Option<R>,
-        tool_calls: Option<Vec<ToolCall>>,
+        tool_calls: Option<Vec<MessageToolCall>>,
     ) {
         self.messages.push(Message {
             role: "assistant".to_string(),

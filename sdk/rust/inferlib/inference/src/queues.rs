@@ -1,14 +1,34 @@
-use crate::exports::inferlib::inference::queues::{GuestQueue, Priority as WitPriority};
-use crate::forward::ForwardPassImpl;
-use crate::schema::Priority;
+use crate::forward::ForwardPass;
 
-use inferlib_engine_bindings::inferlet::core::common::{Model as HostModel, Queue as HostQueue};
+use inferlib_engine_bindings::inferlet::core::common::{
+    Model as HostModel, Queue as HostQueue, allocate_resources, deallocate_resources,
+    export_resources, get_all_exported_resources, import_resources, release_exported_resources,
+};
+use inferlib_engine_bindings::inferlet::core::forward::create_forward_pass;
 use inferlib_engine_bindings::inferlet::core::runtime::get_model;
 
-use std::cell::RefCell;
 use std::rc::Rc;
 use wstd::runtime::{AsyncPollable, block_on};
 
+inferlib_macros::wit_interface!(queues);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[inferlib_macros::wit_enum]
+pub(crate) enum Priority {
+    Low,
+    Normal,
+    High,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[inferlib_macros::wit_enum]
+pub(crate) enum ResourceType {
+    KvPage,
+    Embed,
+    Adapter,
+}
+
+#[derive(Clone)]
 pub(crate) struct Queue {
     pub(crate) inner: Rc<HostQueue>,
     service_id: u32,
@@ -23,171 +43,148 @@ impl Queue {
             service_id,
         }
     }
+}
 
-    /// Gets the service ID for the queue.
+#[inferlib_macros::guest_resource]
+impl Queue {
+    pub(crate) fn from_model_name(model_name: String) -> Queue {
+        let host_model = get_model(&model_name).expect("Failed to get model by name");
+        Queue::from_host_model(&host_model)
+    }
+
     pub(crate) fn get_service_id(&self) -> u32 {
         self.service_id
     }
 
-    /// Begins a synchronization process for the queue.
-    pub(crate) async fn synchronize(&self) -> bool {
+    pub(crate) fn synchronize(&self) -> bool {
         let future = self.inner.synchronize();
         let pollable = future.pollable();
-        AsyncPollable::new(pollable).wait_for().await;
+        block_on(async move {
+            AsyncPollable::new(pollable).wait_for().await;
+        });
         future.get().unwrap()
     }
 
-    /// Change the queue's priority.
-    pub(crate) fn set_priority(
-        &self,
-        priority: inferlib_engine_bindings::inferlet::core::common::Priority,
-    ) {
-        self.inner.set_priority(priority)
-    }
-
-    pub(crate) async fn debug_query(&self, query: &str) -> String {
-        let future = self.inner.debug_query(query);
-        let pollable = future.pollable();
-        AsyncPollable::new(pollable).wait_for().await;
-        future.get().unwrap()
-    }
-}
-
-impl Clone for Queue {
-    fn clone(&self) -> Self {
-        Queue {
-            inner: Rc::clone(&self.inner),
-            service_id: self.service_id,
-        }
-    }
-}
-
-pub(crate) struct QueueImpl {
-    inner: RefCell<Queue>,
-}
-
-impl GuestQueue for QueueImpl {
-    fn from_model_name(model_name: String) -> crate::exports::inferlib::inference::queues::Queue {
-        let host_model = get_model(&model_name).expect("Failed to get model by name");
-        let queue = Queue::from_host_model(&host_model);
-
-        crate::exports::inferlib::inference::queues::Queue::new(QueueImpl {
-            inner: RefCell::new(queue),
-        })
-    }
-
-    fn get_service_id(&self) -> u32 {
-        self.inner.borrow().get_service_id()
-    }
-
-    fn synchronize(&self) -> bool {
-        let inner = self.inner.borrow();
-        let inner_clone = inner.clone();
-        drop(inner);
-        block_on(async move { inner_clone.synchronize().await })
-    }
-
-    fn set_priority(&self, priority: WitPriority) {
+    pub(crate) fn set_priority(&self, priority: Priority) {
         use inferlib_engine_bindings::inferlet::core::common::Priority as HostPriority;
-        let priority: Priority = priority.into();
         let host_priority = match priority {
             Priority::Low => HostPriority::Low,
             Priority::Normal => HostPriority::Normal,
             Priority::High => HostPriority::High,
         };
-        self.inner.borrow().set_priority(host_priority)
+        self.inner.set_priority(host_priority)
     }
 
-    fn allocate_kv_pages(&self, count: u32) -> Vec<u32> {
-        self.inner.borrow().allocate_kv_pages(count)
+    pub(crate) fn allocate_kv_pages(&self, count: u32) -> Vec<u32> {
+        allocate_resources(&self.inner, ResourceType::KvPage as u32, count)
     }
 
-    fn deallocate_kv_pages(&self, ptrs: Vec<u32>) {
-        self.inner.borrow().deallocate_kv_pages(&ptrs)
+    pub(crate) fn deallocate_kv_pages(&self, ptrs: Vec<u32>) {
+        deallocate_resources(&self.inner, ResourceType::KvPage as u32, &ptrs)
     }
 
-    fn export_kv_pages(&self, ptrs: Vec<u32>, name: String) {
-        self.inner.borrow().export_kv_pages(&ptrs, &name)
+    pub(crate) fn export_kv_pages(&self, ptrs: Vec<u32>, name: String) {
+        export_resources(&self.inner, ResourceType::KvPage as u32, &ptrs, &name)
     }
 
-    fn import_kv_pages(&self, name: String) -> Vec<u32> {
-        self.inner.borrow().import_kv_pages(&name)
+    pub(crate) fn import_kv_pages(&self, name: String) -> Vec<u32> {
+        import_resources(&self.inner, ResourceType::KvPage as u32, &name)
     }
 
-    fn get_all_exported_kv_pages(&self) -> Vec<(String, u32)> {
-        self.inner.borrow().get_all_exported_kv_pages()
+    pub(crate) fn get_all_exported_kv_pages(&self) -> Vec<(String, u32)> {
+        get_all_exported_resources(&self.inner, ResourceType::KvPage as u32)
     }
 
-    fn release_exported_kv_pages(&self, name: String) {
-        self.inner.borrow().release_exported_kv_pages(&name)
+    pub(crate) fn release_exported_kv_pages(&self, name: String) {
+        release_exported_resources(&self.inner, ResourceType::KvPage as u32, &name)
     }
 
-    fn allocate_embeds(&self, count: u32) -> Vec<u32> {
-        self.inner.borrow().allocate_embeds(count)
+    pub(crate) fn allocate_embeds(&self, count: u32) -> Vec<u32> {
+        allocate_resources(&self.inner, ResourceType::Embed as u32, count)
     }
 
-    fn deallocate_embeds(&self, ptrs: Vec<u32>) {
-        self.inner.borrow().deallocate_embeds(&ptrs)
+    pub(crate) fn deallocate_embeds(&self, ptrs: Vec<u32>) {
+        deallocate_resources(&self.inner, ResourceType::Embed as u32, &ptrs)
     }
 
-    fn debug_query(&self, query: String) -> String {
-        let inner = self.inner.borrow();
-        let inner_clone = inner.clone();
-        drop(inner);
-        block_on(async move { inner_clone.debug_query(&query).await })
+    pub(crate) fn debug_query(&self, query: String) -> String {
+        let future = self.inner.debug_query(&query);
+        let pollable = future.pollable();
+        block_on(async move {
+            AsyncPollable::new(pollable).wait_for().await;
+        });
+        future.get().unwrap()
     }
 
-    fn export_embeds(&self, ptrs: Vec<u32>, name: String) {
-        self.inner.borrow().export_embeds(&ptrs, &name)
+    pub(crate) fn export_embeds(&self, ptrs: Vec<u32>, name: String) {
+        export_resources(&self.inner, ResourceType::Embed as u32, &ptrs, &name)
     }
 
-    fn import_embeds(&self, name: String) -> Vec<u32> {
-        self.inner.borrow().import_embeds(&name)
+    pub(crate) fn import_embeds(&self, name: String) -> Vec<u32> {
+        import_resources(&self.inner, ResourceType::Embed as u32, &name)
     }
 
-    fn get_all_exported_embeds(&self) -> Vec<(String, u32)> {
-        self.inner.borrow().get_all_exported_embeds()
+    pub(crate) fn get_all_exported_embeds(&self) -> Vec<(String, u32)> {
+        get_all_exported_resources(&self.inner, ResourceType::Embed as u32)
     }
 
-    fn release_exported_embeds(&self, name: String) {
-        self.inner.borrow().release_exported_embeds(&name)
+    pub(crate) fn release_exported_embeds(&self, name: String) {
+        release_exported_resources(&self.inner, ResourceType::Embed as u32, &name)
     }
 
-    fn allocate_adapter(&self) -> u32 {
-        self.inner.borrow().allocate_adapter()
+    pub(crate) fn allocate_adapter(&self) -> u32 {
+        allocate_resources(&self.inner, ResourceType::Adapter as u32, 1)
+            .into_iter()
+            .next()
+            .unwrap()
     }
 
-    fn deallocate_adapter(&self, ptr: u32) {
-        self.inner.borrow().deallocate_adapter(ptr)
+    pub(crate) fn deallocate_adapter(&self, ptr: u32) {
+        deallocate_resources(&self.inner, ResourceType::Adapter as u32, &[ptr])
     }
 
-    fn export_adapter(&self, ptr: u32, name: String) {
-        self.inner.borrow().export_adapter(ptr, &name)
+    pub(crate) fn export_adapter(&self, ptr: u32, name: String) {
+        export_resources(&self.inner, ResourceType::Adapter as u32, &[ptr], &name)
     }
 
-    fn import_adapter(&self, name: String) -> u32 {
-        self.inner.borrow().import_adapter(&name)
+    pub(crate) fn import_adapter(&self, name: String) -> u32 {
+        import_resources(&self.inner, ResourceType::Adapter as u32, &name)
+            .into_iter()
+            .next()
+            .unwrap()
     }
 
-    fn get_all_exported_adapters(&self) -> Vec<String> {
-        self.inner.borrow().get_all_exported_adapters()
+    pub(crate) fn get_all_exported_adapters(&self) -> Vec<String> {
+        get_all_exported_resources(&self.inner, ResourceType::Adapter as u32)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect()
     }
 
-    fn release_exported_adapter(&self, name: String) {
-        self.inner.borrow().release_exported_adapter(&name)
+    pub(crate) fn release_exported_adapter(&self, name: String) {
+        release_exported_resources(&self.inner, ResourceType::Adapter as u32, &name)
     }
 
-    fn upload_adapter(&self, adapter_ptr: u32, name: String, data: Vec<u8>) {
-        self.inner
-            .borrow()
-            .upload_adapter(adapter_ptr, &name, &data)
+    pub(crate) fn upload_adapter(&self, adapter_ptr: u32, name: String, data: Vec<u8>) {
+        use inferlib_engine_bindings::inferlet::core::common::Blob;
+        let blob = Blob::new(&data);
+        inferlib_engine_bindings::inferlet::adapter::common::upload_adapter(
+            &self.inner,
+            adapter_ptr,
+            &name,
+            blob,
+        );
     }
 
-    fn download_adapter(&self, adapter_ptr: u32, name: String) {
-        self.inner.borrow().download_adapter(adapter_ptr, &name)
+    pub(crate) fn download_adapter(&self, adapter_ptr: u32, name: String) {
+        inferlib_engine_bindings::inferlet::adapter::common::download_adapter(
+            &self.inner,
+            adapter_ptr,
+            &name,
+        );
     }
 
-    fn initialize_adapter(
+    pub(crate) fn initialize_adapter(
         &self,
         adapter_ptr: u32,
         rank: u32,
@@ -196,7 +193,8 @@ impl GuestQueue for QueueImpl {
         mu_fraction: f32,
         initial_sigma: f32,
     ) {
-        self.inner.borrow().initialize_adapter(
+        inferlib_engine_bindings::inferlet::zo::evolve::initialize_adapter(
+            &self.inner,
             adapter_ptr,
             rank,
             alpha,
@@ -206,26 +204,45 @@ impl GuestQueue for QueueImpl {
         )
     }
 
-    fn update_adapter(&self, adapter_ptr: u32, scores: Vec<f32>, seeds: Vec<i64>, max_sigma: f32) {
-        self.inner
-            .borrow()
-            .update_adapter(adapter_ptr, &scores, &seeds, max_sigma)
+    pub(crate) fn update_adapter(
+        &self,
+        adapter_ptr: u32,
+        scores: Vec<f32>,
+        seeds: Vec<i64>,
+        max_sigma: f32,
+    ) {
+        inferlib_engine_bindings::inferlet::zo::evolve::update_adapter(
+            &self.inner,
+            adapter_ptr,
+            &scores,
+            &seeds,
+            max_sigma,
+        )
     }
 
-    fn embed_image(&self, embed_ptrs: Vec<u32>, image_data: Vec<u8>, position_offset: u32) {
-        self.inner
-            .borrow()
-            .embed_image(&embed_ptrs, &image_data, position_offset)
+    pub(crate) fn embed_image(
+        &self,
+        embed_ptrs: Vec<u32>,
+        image_data: Vec<u8>,
+        position_offset: u32,
+    ) {
+        inferlib_engine_bindings::inferlet::image::image::embed_image(
+            &self.inner,
+            &embed_ptrs,
+            &image_data,
+            position_offset,
+        )
     }
 
-    fn calculate_embed_size(&self, image_width: u32, image_height: u32) -> u32 {
-        self.inner
-            .borrow()
-            .calculate_embed_size(image_width, image_height)
+    pub(crate) fn calculate_embed_size(&self, image_width: u32, image_height: u32) -> u32 {
+        inferlib_engine_bindings::inferlet::image::image::calculate_embed_size(
+            &self.inner,
+            image_width,
+            image_height,
+        )
     }
 
-    fn create_forward_pass(&self) -> crate::exports::inferlib::inference::queues::ForwardPass {
-        let fp = self.inner.borrow().create_forward_pass();
-        crate::exports::inferlib::inference::queues::ForwardPass::new(ForwardPassImpl::new(fp))
+    pub(crate) fn create_forward_pass(&self) -> ForwardPass {
+        ForwardPass::new(create_forward_pass(&self.inner))
     }
 }
