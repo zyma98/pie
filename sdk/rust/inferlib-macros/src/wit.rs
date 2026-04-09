@@ -1,6 +1,8 @@
+use std::collections::BTreeSet;
+
 use syn::Path;
 
-use super::manifest_dir;
+use super::{manifest_dir, to_upper_camel};
 
 pub(crate) fn read_wit_exports_path() -> std::result::Result<Path, String> {
     let manifest_dir = manifest_dir()?;
@@ -205,4 +207,118 @@ pub(crate) fn parse_resource_method_names(
     }
 
     Ok(methods)
+}
+
+pub(crate) fn find_interface_for_symbol(
+    symbol_name: &str,
+) -> std::result::Result<Option<String>, String> {
+    let mut matches = Vec::new();
+
+    for interface in parse_world_exports()? {
+        let symbols = parse_wit_interface_symbols(&interface)?;
+        let resource_match = symbols
+            .resources
+            .iter()
+            .any(|resource| to_upper_camel(resource) == symbol_name);
+        let type_match = symbols
+            .named_types
+            .iter()
+            .any(|name| to_upper_camel(name) == symbol_name);
+
+        if resource_match || type_match {
+            matches.push(interface);
+        }
+    }
+
+    if matches.len() > 1 {
+        return Err(format!(
+            "symbol `{symbol_name}` matches multiple exported interfaces; specify `interface = ...` explicitly"
+        ));
+    }
+
+    Ok(matches.pop())
+}
+
+pub(crate) fn parse_interface_function_names(
+    interface: &str,
+) -> std::result::Result<BTreeSet<String>, String> {
+    let wit = read_interface_wit(interface)?;
+    let mut functions = BTreeSet::new();
+    let mut in_interface = false;
+    let mut depth = 0usize;
+
+    for raw_line in wit.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with("//") {
+            continue;
+        }
+
+        if !in_interface {
+            if line.starts_with("interface ") && line.ends_with('{') {
+                in_interface = true;
+                depth = 1;
+            }
+            continue;
+        }
+
+        if depth == 1 {
+            if let Some(rest) = line
+                .strip_prefix("resource ")
+                .or_else(|| line.strip_prefix("record "))
+                .or_else(|| line.strip_prefix("enum "))
+                .or_else(|| line.strip_prefix("variant "))
+                .or_else(|| line.strip_prefix("flags "))
+                .or_else(|| line.strip_prefix("type "))
+            {
+                let open = rest.matches('{').count();
+                let close = rest.matches('}').count();
+                depth = depth + open - close;
+                continue;
+            }
+
+            if let Some((name, _)) = line.split_once(':') {
+                let name = name.trim();
+                if !name.is_empty() {
+                    functions.insert(name.replace('-', "_"));
+                }
+            }
+        }
+
+        depth += line.matches('{').count();
+        depth = depth.saturating_sub(line.matches('}').count());
+        if depth == 0 {
+            break;
+        }
+    }
+
+    Ok(functions)
+}
+
+pub(crate) fn find_interface_for_functions<'a>(
+    function_names: impl IntoIterator<Item = &'a str>,
+) -> std::result::Result<Option<String>, String> {
+    let names = function_names
+        .into_iter()
+        .filter(|name| !name.is_empty())
+        .collect::<BTreeSet<_>>();
+    if names.is_empty() {
+        return Ok(None);
+    }
+
+    let mut matches = Vec::new();
+    for interface in parse_world_exports()? {
+        let functions = parse_interface_function_names(&interface)?;
+        if names.iter().all(|name| functions.contains(*name)) {
+            matches.push(interface);
+        }
+    }
+
+    if matches.len() > 1 {
+        return Err(format!(
+            "function set `{}` matches multiple exported interfaces; specify `interface = ...` explicitly",
+            names.into_iter().collect::<Vec<_>>().join(", ")
+        ));
+    }
+
+    Ok(matches.pop())
 }

@@ -1,13 +1,16 @@
 mod brle;
 mod chat;
-mod context;
 mod formatter;
-mod forward;
+mod inference;
 mod kvstore;
 mod messaging;
 mod models;
 mod queues;
 mod runtime;
+
+use crate::inference::{Context, DecodeStepFuture, FlushFuture, GenerateFuture};
+use crate::models::{Model, Tokenizer};
+use crate::queues::{ForwardPass, Queue};
 
 use wstd::runtime::{AsyncPollable, block_on};
 
