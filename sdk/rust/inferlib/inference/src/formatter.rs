@@ -1,7 +1,5 @@
 use crate::chat::{self, ChatFormatter as TemplateChatFormatter};
 
-inferlib_macros::wit_interface!(formatter);
-
 #[derive(Clone, Debug)]
 #[inferlib_macros::wit_record]
 pub(crate) struct ToolCall {

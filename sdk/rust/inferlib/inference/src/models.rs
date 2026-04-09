@@ -7,8 +7,6 @@ use inferlib_engine_bindings::inferlet::core::tokenize::{
 use std::collections::HashSet;
 use std::rc::Rc;
 
-inferlib_macros::wit_interface!(models);
-
 /// Represents a specific model instance, providing access to its metadata and functionality.
 #[derive(Clone)]
 pub(crate) struct Model {

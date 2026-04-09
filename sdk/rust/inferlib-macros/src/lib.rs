@@ -11,9 +11,9 @@ use syn::{
 mod wit;
 
 use self::wit::{
-    known_import_remap, parse_interface_resources, parse_resource_method_names,
-    parse_wit_interface_symbols, parse_world_exports, read_wit_exports_path,
-    read_wit_world_imports, read_wit_world_name,
+    find_interface_for_functions, find_interface_for_symbol, known_import_remap,
+    parse_interface_resources, parse_resource_method_names, parse_wit_interface_symbols,
+    parse_world_exports, read_wit_exports_path, read_wit_world_imports, read_wit_world_name,
 };
 
 fn manifest_dir() -> std::result::Result<std::path::PathBuf, String> {
@@ -440,7 +440,17 @@ fn wit_type_path(
     explicit_name: Option<&str>,
     fallback_ident: &Ident,
 ) -> std::result::Result<Path, Error> {
-    if let Some(interface) = interface {
+    let resolved_interface = if let Some(interface) = interface {
+        Some(interface.to_string())
+    } else {
+        let symbol_name = explicit_name
+            .map(to_upper_camel)
+            .unwrap_or_else(|| fallback_ident.to_string());
+        find_interface_for_symbol(&symbol_name)
+            .map_err(|message| Error::new(Span::call_site(), message))?
+    };
+
+    if let Some(interface) = resolved_interface.as_deref() {
         let exports =
             read_wit_exports_path().map_err(|message| Error::new(Span::call_site(), message))?;
         let interface_ident = to_rust_ident(interface);
@@ -551,6 +561,38 @@ fn convert_expr(
     Ok(quote! { (#value).into() })
 }
 
+fn exported_type_path_for_ident(
+    ident: &Ident,
+    arguments: &PathArguments,
+) -> syn::Result<Option<Path>> {
+    let ident_str = ident.to_string();
+    let lookup_name = if let Some(stripped) = ident_str.strip_prefix("Wit") {
+        stripped
+    } else {
+        &ident_str
+    };
+    let symbol_name = lookup_name
+        .strip_suffix("Borrow")
+        .unwrap_or(lookup_name)
+        .to_string();
+
+    let Some(interface) = find_interface_for_symbol(&symbol_name)
+        .map_err(|message| Error::new(Span::call_site(), message))?
+    else {
+        return Ok(None);
+    };
+
+    let exports =
+        read_wit_exports_path().map_err(|message| Error::new(Span::call_site(), message))?;
+    let interface_ident = to_rust_ident(&interface);
+    let target_ident = Ident::new(lookup_name, ident.span());
+    let mut path: Path = syn::parse_quote!(#exports::#interface_ident::#target_ident);
+    if let Some(last) = path.segments.last_mut() {
+        last.arguments = arguments.clone();
+    }
+    Ok(Some(path))
+}
+
 fn rewrite_wit_type(ty: &Type) -> syn::Result<Type> {
     match ty {
         Type::Path(type_path) if type_path.qself.is_none() => {
@@ -569,12 +611,18 @@ fn rewrite_wit_type(ty: &Type) -> syn::Result<Type> {
                 let segment = rewritten.path.segments.last_mut().expect("segment");
                 let ident = segment.ident.to_string();
                 if ident != "Self"
-                    && !ident.starts_with("Wit")
-                    && !ident.ends_with("Borrow")
                     && !matches!(ident.as_str(), "Option" | "Vec" | "Result")
                     && !is_identity_type(ty)
                 {
-                    segment.ident = Ident::new(&format!("Wit{ident}"), segment.ident.span());
+                    if let Some(path) =
+                        exported_type_path_for_ident(&segment.ident, &segment.arguments)?
+                    {
+                        return Ok(Type::Path(TypePath { qself: None, path }));
+                    }
+
+                    if !ident.starts_with("Wit") && !ident.ends_with("Borrow") {
+                        segment.ident = Ident::new(&format!("Wit{ident}"), segment.ident.span());
+                    }
                 }
             }
 
@@ -660,8 +708,44 @@ fn expand_guest_impl(
     }
 
     let self_ty = item_impl.self_ty.clone();
+    let inferred_interface = if resource_impl {
+        match &*item_impl.self_ty {
+            Type::Path(type_path) => {
+                let self_ident = type_path
+                    .path
+                    .segments
+                    .last()
+                    .expect("segment")
+                    .ident
+                    .clone();
+                match resolve_shared_resource_binding(
+                    args.interface.as_deref(),
+                    args.resource.as_deref(),
+                    &self_ident,
+                ) {
+                    Ok((interface, _)) => Some(interface),
+                    Err(_) => None,
+                }
+            }
+            _ => None,
+        }
+    } else if args.interface.is_none() {
+        let method_names = item_impl
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                ImplItem::Fn(method) => Some(method.sig.ident.to_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        find_interface_for_functions(method_names.iter().map(String::as_str))
+            .map_err(|message| Error::new(Span::call_site(), message))?
+    } else {
+        None
+    };
+    let resolved_interface = args.interface.clone().or(inferred_interface);
     let trait_path = derive_guest_trait_path(
-        args.interface.as_deref(),
+        resolved_interface.as_deref(),
         &self_ty,
         resource_impl,
         args.resource.as_deref(),
@@ -672,7 +756,7 @@ fn expand_guest_impl(
             .clone()
             .unwrap_or(resource_name_from_type(&self_ty)?);
         let wit_resource_path = wit_type_path(
-            args.interface.as_deref(),
+            resolved_interface.as_deref(),
             Some(&resource_name),
             &Ident::new(&resource_name, Span::call_site()),
         )?;
