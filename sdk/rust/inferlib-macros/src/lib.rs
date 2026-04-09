@@ -11,32 +11,15 @@ use syn::{
 mod wit;
 
 use self::wit::{
-    find_interface_for_functions, find_interface_for_symbol, known_import_remap,
-    parse_interface_resources, parse_resource_method_names, parse_wit_interface_symbols,
-    parse_world_exports, read_wit_exports_path, read_wit_world_imports, read_wit_world_name,
+    find_interface_for_functions, find_interface_for_symbol, parse_interface_resources,
+    parse_resource_method_names, parse_wit_interface_symbols, parse_world_exports,
+    read_package_name, read_wit_exports_path, read_wit_world_name, read_wit_world_with_entries,
 };
 
 fn manifest_dir() -> std::result::Result<std::path::PathBuf, String> {
     std::env::var("CARGO_MANIFEST_DIR")
         .map(std::path::PathBuf::from)
         .map_err(|_| "CARGO_MANIFEST_DIR not set".to_string())
-}
-
-fn read_package_name() -> std::result::Result<String, String> {
-    let manifest_dir = manifest_dir()?;
-    let pie_toml_path = manifest_dir.join("Pie.toml");
-    let pie_toml_content = std::fs::read_to_string(&pie_toml_path).map_err(|_| {
-        "Failed to read Pie.toml - make sure it exists next to Cargo.toml".to_string()
-    })?;
-
-    let pie_config: toml::Value = pie_toml_content
-        .parse()
-        .map_err(|e| format!("Failed to parse Pie.toml: {e}"))?;
-
-    pie_config["package"]["name"]
-        .as_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| "Missing [package].name in Pie.toml".to_string())
 }
 
 fn to_rust_ident(name: &str) -> syn::Ident {
@@ -1920,11 +1903,8 @@ pub fn component(item: TokenStream) -> TokenStream {
         }
     };
 
-    let with_entries = match read_wit_world_imports() {
-        Ok(imports) => imports
-            .into_iter()
-            .filter_map(|import| known_import_remap(&import).map(|path| (import, path)))
-            .collect::<Vec<_>>(),
+    let with_entries = match read_wit_world_with_entries() {
+        Ok(entries) => entries,
         Err(message) => {
             return Error::new(Span::call_site(), message)
                 .to_compile_error()
