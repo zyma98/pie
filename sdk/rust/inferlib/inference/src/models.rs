@@ -3,7 +3,6 @@ use inferlib_engine_bindings::inferlet::core::runtime::{get_all_models, get_mode
 use inferlib_engine_bindings::inferlet::core::tokenize::{
     Tokenizer as HostTokenizer, get_tokenizer,
 };
-use inferlib_macros::guest_resource;
 
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -27,7 +26,6 @@ pub(crate) struct Tokenizer {
     inner: Rc<HostTokenizer>,
 }
 
-#[guest_resource]
 impl Model {
     pub(crate) fn get_by_name(name: String) -> Option<Model> {
         get_model(&name).map(Model::from_host)
@@ -93,7 +91,6 @@ impl Model {
     }
 }
 
-#[guest_resource]
 impl Tokenizer {
     pub(crate) fn tokenize(&self, text: String) -> Vec<u32> {
         self.inner.tokenize(&text)
