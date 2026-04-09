@@ -11,13 +11,11 @@ use inferlib_engine_bindings::inferlet::core::forward::{
 };
 use inferlib_engine_bindings::inferlet::core::runtime::get_model;
 use inferlib_engine_bindings::inferlet::zo::evolve::set_adapter_seed;
-use inferlib_macros::{guest_resource, wit_enum, wit_record};
 
 use std::rc::Rc;
 use wstd::runtime::{AsyncPollable, block_on};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[wit_enum]
 pub(crate) enum Priority {
     Low,
     Normal,
@@ -25,7 +23,6 @@ pub(crate) enum Priority {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[wit_enum]
 pub(crate) enum ResourceType {
     KvPage,
     Embed,
@@ -33,14 +30,12 @@ pub(crate) enum ResourceType {
 }
 
 #[derive(Clone, Debug)]
-#[wit_record]
 pub(crate) struct Distribution {
     pub(crate) ids: Vec<u32>,
     pub(crate) probs: Vec<f32>,
 }
 
 #[derive(Clone, Debug)]
-#[wit_record]
 pub(crate) struct ForwardPassResult {
     pub(crate) distributions: Option<Vec<Distribution>>,
     pub(crate) tokens: Option<Vec<u32>>,
@@ -112,7 +107,6 @@ impl ForwardPass {
     }
 }
 
-#[guest_resource]
 impl Queue {
     pub(crate) fn from_model_name(model_name: String) -> Queue {
         let host_model = get_model(&model_name).expect("Failed to get model by name");
@@ -314,7 +308,6 @@ impl Queue {
     }
 }
 
-#[guest_resource]
 impl ForwardPass {
     pub(crate) fn input_tokens(&self, tokens: Vec<u32>, positions: Vec<u32>) {
         input_tokens(&self.inner, &tokens, &positions);

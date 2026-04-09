@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::quote;
@@ -12,7 +14,8 @@ mod wit;
 
 use self::wit::{
     find_interface_for_functions, find_interface_for_symbol, parse_interface_resources,
-    parse_resource_method_names, parse_wit_interface_symbols, parse_world_exports,
+    parse_interface_function_names, parse_resource_method_names, parse_wit_interface_symbols,
+    parse_world_exports,
     read_package_name, read_wit_exports_path, read_wit_world_name, read_wit_world_with_entries,
 };
 
@@ -140,6 +143,53 @@ fn module_path_for_source(
     }
 
     Ok(segments)
+}
+
+fn source_interface_for_file(file: &std::path::Path) -> std::result::Result<Option<String>, String> {
+    let src_dir = manifest_dir()?.join("src");
+    let module_path = module_path_for_source(&src_dir, file)?;
+    let Some(interface) = module_path.last() else {
+        return Ok(None);
+    };
+    let exports = parse_world_exports()?;
+    Ok(exports.into_iter().find(|export| export == interface))
+}
+
+fn current_wit_resource_name_for_ident(
+    interface: &str,
+    ident: &Ident,
+) -> std::result::Result<Option<String>, String> {
+    let target = ident.to_string();
+    let resources = parse_interface_resources(interface)?;
+    let mut matches = resources
+        .into_iter()
+        .filter(|resource| to_upper_camel(resource) == target)
+        .collect::<Vec<_>>();
+    if matches.len() > 1 {
+        return Err(format!(
+            "resource type `{target}` matches multiple resources in interface `{interface}`"
+        ));
+    }
+    Ok(matches.pop())
+}
+
+fn current_wit_named_type_for_ident(
+    interface: &str,
+    ident: &Ident,
+) -> std::result::Result<Option<String>, String> {
+    let target = ident.to_string();
+    let symbols = parse_wit_interface_symbols(interface)?;
+    let mut matches = symbols
+        .named_types
+        .into_iter()
+        .filter(|name| to_upper_camel(name) == target)
+        .collect::<Vec<_>>();
+    if matches.len() > 1 {
+        return Err(format!(
+            "type `{target}` matches multiple named WIT types in interface `{interface}`"
+        ));
+    }
+    Ok(matches.pop())
 }
 
 fn shared_resource_wrapper_type(name: &Ident) -> std::result::Result<Option<Type>, String> {
@@ -679,18 +729,12 @@ fn derive_guest_trait_path(
     Ok(syn::parse_quote!(#trait_ident))
 }
 
-fn expand_guest_impl(
-    args: GuestBindingInput,
-    item_impl: ItemImpl,
+fn generate_guest_binding_tokens(
+    args: &GuestBindingInput,
+    item_impl: &ItemImpl,
     resource_impl: bool,
+    allowed_method_names: Option<&BTreeSet<String>>,
 ) -> syn::Result<proc_macro2::TokenStream> {
-    if item_impl.trait_.is_some() {
-        return Err(Error::new_spanned(
-            &item_impl.self_ty,
-            "guest binding attributes must be attached to inherent impl blocks",
-        ));
-    }
-
     let self_ty = item_impl.self_ty.clone();
     let inferred_interface = if resource_impl {
         match &*item_impl.self_ty {
@@ -742,7 +786,7 @@ fn expand_guest_impl(
         let wit_resource_path = wit_type_path(
             resolved_interface.as_deref(),
             Some(&resource_name),
-            &Ident::new(&resource_name, Span::call_site()),
+            &Ident::new(&to_upper_camel(&resource_name), Span::call_site()),
         )?;
         Some(quote! {
             impl ::core::convert::From<#self_ty> for #wit_resource_path {
@@ -761,6 +805,11 @@ fn expand_guest_impl(
         .filter_map(|item| match item {
             ImplItem::Fn(method) => Some(method),
             _ => None,
+        })
+        .filter(|method| {
+            allowed_method_names
+                .map(|names| names.contains(&method.sig.ident.to_string()))
+                .unwrap_or(true)
         })
         .map(|method| {
             let mut trait_sig = method.sig.clone();
@@ -842,13 +891,32 @@ fn expand_guest_impl(
     let (impl_generics, _, where_clause) = item_impl.generics.split_for_impl();
 
     Ok(quote! {
-        #item_impl
-
         #resource_conversion
 
         impl #impl_generics #trait_path for #self_ty #where_clause {
             #(#trait_methods)*
         }
+    })
+}
+
+fn expand_guest_impl(
+    args: GuestBindingInput,
+    item_impl: ItemImpl,
+    resource_impl: bool,
+) -> syn::Result<proc_macro2::TokenStream> {
+    if item_impl.trait_.is_some() {
+        return Err(Error::new_spanned(
+            &item_impl.self_ty,
+            "guest binding attributes must be attached to inherent impl blocks",
+        ));
+    }
+
+    let binding_tokens = generate_guest_binding_tokens(&args, &item_impl, resource_impl, None)?;
+
+    Ok(quote! {
+        #item_impl
+
+        #binding_tokens
     })
 }
 
@@ -1413,39 +1481,31 @@ world inferlet {{
     expanded.into()
 }
 
-#[proc_macro_attribute]
-pub fn wit_enum(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let args = parse_macro_input!(attr as WitEnumInput);
-    let item_enum = parse_macro_input!(item as ItemEnum);
-
+fn generate_wit_enum_impls(
+    item_enum: &ItemEnum,
+    interface: Option<&str>,
+    name: Option<&str>,
+) -> syn::Result<proc_macro2::TokenStream> {
     if item_enum
         .variants
         .iter()
         .any(|variant| !matches!(variant.fields, syn::Fields::Unit))
     {
-        return Error::new_spanned(
+        return Err(Error::new_spanned(
             &item_enum.ident,
             "#[inferlib_macros::wit_enum] currently supports only unit enums",
-        )
-        .to_compile_error()
-        .into();
+        ));
     }
 
     let enum_ident = item_enum.ident.clone();
-    let wit_type_path =
-        match wit_type_path(args.interface.as_deref(), args.name.as_deref(), &enum_ident) {
-            Ok(path) => path,
-            Err(error) => return error.to_compile_error().into(),
-        };
+    let wit_type_path = wit_type_path(interface, name, &enum_ident)?;
     let variants = item_enum
         .variants
         .iter()
         .map(|variant| variant.ident.clone())
         .collect::<Vec<_>>();
 
-    quote! {
-        #item_enum
-
+    Ok(quote! {
         impl ::core::convert::From<#enum_ident> for #wit_type_path {
             fn from(value: #enum_ident) -> Self {
                 match value {
@@ -1461,33 +1521,23 @@ pub fn wit_enum(attr: TokenStream, item: TokenStream) -> TokenStream {
                 }
             }
         }
-    }
-    .into()
+    })
 }
 
-#[proc_macro_attribute]
-pub fn wit_record(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let args = parse_macro_input!(attr as WitEnumInput);
-    let item_struct = parse_macro_input!(item as ItemStruct);
-
+fn generate_wit_record_impls(
+    item_struct: &ItemStruct,
+    interface: Option<&str>,
+    name: Option<&str>,
+) -> syn::Result<proc_macro2::TokenStream> {
     let Fields::Named(fields) = &item_struct.fields else {
-        return Error::new_spanned(
+        return Err(Error::new_spanned(
             &item_struct.ident,
             "#[inferlib_macros::wit_record] requires a struct with named fields",
-        )
-        .to_compile_error()
-        .into();
+        ));
     };
 
     let struct_ident = item_struct.ident.clone();
-    let wit_type_path = match wit_type_path(
-        args.interface.as_deref(),
-        args.name.as_deref(),
-        &struct_ident,
-    ) {
-        Ok(path) => path,
-        Err(error) => return error.to_compile_error().into(),
-    };
+    let wit_type_path = wit_type_path(interface, name, &struct_ident)?;
 
     let field_idents = fields
         .named
@@ -1499,22 +1549,15 @@ pub fn wit_record(attr: TokenStream, item: TokenStream) -> TokenStream {
         .iter()
         .zip(field_idents.iter())
         .map(|(field, ident)| convert_expr(&field.ty, quote! { value.#ident }))
-        .collect::<syn::Result<Vec<_>>>();
+        .collect::<syn::Result<Vec<_>>>()?;
     let from_wit_fields = fields
         .named
         .iter()
         .zip(field_idents.iter())
         .map(|(field, ident)| convert_expr(&field.ty, quote! { value.#ident }))
-        .collect::<syn::Result<Vec<_>>>();
+        .collect::<syn::Result<Vec<_>>>()?;
 
-    let (to_wit_fields, from_wit_fields) = match (to_wit_fields, from_wit_fields) {
-        (Ok(to_wit_fields), Ok(from_wit_fields)) => (to_wit_fields, from_wit_fields),
-        (Err(error), _) | (_, Err(error)) => return error.to_compile_error().into(),
-    };
-
-    quote! {
-        #item_struct
-
+    Ok(quote! {
         impl ::core::convert::From<#struct_ident> for #wit_type_path {
             fn from(value: #struct_ident) -> Self {
                 Self {
@@ -1530,20 +1573,16 @@ pub fn wit_record(attr: TokenStream, item: TokenStream) -> TokenStream {
                 }
             }
         }
-    }
-    .into()
+    })
 }
 
-#[proc_macro_attribute]
-pub fn wit_variant(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let args = parse_macro_input!(attr as WitEnumInput);
-    let item_enum = parse_macro_input!(item as ItemEnum);
+fn generate_wit_variant_impls(
+    item_enum: &ItemEnum,
+    interface: Option<&str>,
+    name: Option<&str>,
+) -> syn::Result<proc_macro2::TokenStream> {
     let enum_ident = item_enum.ident.clone();
-    let wit_type_path =
-        match wit_type_path(args.interface.as_deref(), args.name.as_deref(), &enum_ident) {
-            Ok(path) => path,
-            Err(error) => return error.to_compile_error().into(),
-        };
+    let wit_type_path = wit_type_path(interface, name, &enum_ident)?;
 
     let mut to_wit_arms = Vec::new();
     let mut from_wit_arms = Vec::new();
@@ -1559,14 +1598,8 @@ pub fn wit_variant(attr: TokenStream, item: TokenStream) -> TokenStream {
             Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
                 let binding = quote::format_ident!("value");
                 let field_ty = &fields.unnamed.first().expect("field").ty;
-                let to_wit = match convert_expr(field_ty, quote! { #binding }) {
-                    Ok(expr) => expr,
-                    Err(error) => return error.to_compile_error().into(),
-                };
-                let from_wit = match convert_expr(field_ty, quote! { value }) {
-                    Ok(expr) => expr,
-                    Err(error) => return error.to_compile_error().into(),
-                };
+                let to_wit = convert_expr(field_ty, quote! { #binding })?;
+                let from_wit = convert_expr(field_ty, quote! { value })?;
                 to_wit_arms.push(
                     quote! { #enum_ident::#variant_ident(#binding) => Self::#variant_ident(#to_wit), },
                 );
@@ -1588,14 +1621,8 @@ pub fn wit_variant(attr: TokenStream, item: TokenStream) -> TokenStream {
                     .collect::<Vec<_>>();
                 let tuple_ty: Type = syn::parse_quote!((#(#field_types),*));
                 let tuple_value = quote!((#(#bindings),*));
-                let to_wit = match convert_expr(&tuple_ty, tuple_value) {
-                    Ok(expr) => expr,
-                    Err(error) => return error.to_compile_error().into(),
-                };
-                let from_wit = match convert_expr(&tuple_ty, quote! { value }) {
-                    Ok(expr) => expr,
-                    Err(error) => return error.to_compile_error().into(),
-                };
+                let to_wit = convert_expr(&tuple_ty, tuple_value)?;
+                let from_wit = convert_expr(&tuple_ty, quote! { value })?;
                 to_wit_arms.push(quote! {
                     #enum_ident::#variant_ident(#(#bindings),*) => Self::#variant_ident(#to_wit),
                 });
@@ -1608,19 +1635,15 @@ pub fn wit_variant(attr: TokenStream, item: TokenStream) -> TokenStream {
                 });
             }
             Fields::Named(_) => {
-                return Error::new_spanned(
+                return Err(Error::new_spanned(
                     variant,
                     "#[inferlib_macros::wit_variant] does not support named-field variants",
-                )
-                .to_compile_error()
-                .into();
+                ));
             }
         }
     }
 
-    quote! {
-        #item_enum
-
+    Ok(quote! {
         impl ::core::convert::From<#enum_ident> for #wit_type_path {
             fn from(value: #enum_ident) -> Self {
                 match value {
@@ -1636,6 +1659,63 @@ pub fn wit_variant(attr: TokenStream, item: TokenStream) -> TokenStream {
                 }
             }
         }
+    })
+}
+
+#[proc_macro_attribute]
+pub fn wit_enum(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(attr as WitEnumInput);
+    let item_enum = parse_macro_input!(item as ItemEnum);
+    let impls =
+        match generate_wit_enum_impls(&item_enum, args.interface.as_deref(), args.name.as_deref())
+        {
+            Ok(tokens) => tokens,
+            Err(error) => return error.to_compile_error().into(),
+        };
+
+    quote! {
+        #item_enum
+        #impls
+    }
+    .into()
+}
+
+#[proc_macro_attribute]
+pub fn wit_record(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(attr as WitEnumInput);
+    let item_struct = parse_macro_input!(item as ItemStruct);
+    let impls = match generate_wit_record_impls(
+        &item_struct,
+        args.interface.as_deref(),
+        args.name.as_deref(),
+    ) {
+        Ok(tokens) => tokens,
+        Err(error) => return error.to_compile_error().into(),
+    };
+
+    quote! {
+        #item_struct
+        #impls
+    }
+    .into()
+}
+
+#[proc_macro_attribute]
+pub fn wit_variant(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(attr as WitEnumInput);
+    let item_enum = parse_macro_input!(item as ItemEnum);
+    let impls = match generate_wit_variant_impls(
+        &item_enum,
+        args.interface.as_deref(),
+        args.name.as_deref(),
+    ) {
+        Ok(tokens) => tokens,
+        Err(error) => return error.to_compile_error().into(),
+    };
+
+    quote! {
+        #item_enum
+        #impls
     }
     .into()
 }
@@ -1856,6 +1936,162 @@ fn parse_associated_type_binding(input: ParseStream<'_>) -> Result<AssociatedTyp
     })
 }
 
+fn infer_auto_component_tokens(
+    component: &Ident,
+) -> std::result::Result<(Vec<proc_macro2::TokenStream>, Vec<proc_macro2::TokenStream>), String>
+{
+    let src_dir = manifest_dir()?.join("src");
+    let mut files = Vec::new();
+    collect_rust_files(&src_dir, &mut files);
+
+    let mut type_impls = Vec::new();
+    let mut guest_impls = Vec::new();
+
+    for file in files {
+        let Some(interface) = source_interface_for_file(&file)? else {
+            continue;
+        };
+
+        let source = std::fs::read_to_string(&file)
+            .map_err(|e| format!("Failed to read `{}`: {e}", file.display()))?;
+        let syntax = syn::parse_file(&source)
+            .map_err(|e| format!("Failed to parse `{}`: {e}", file.display()))?;
+
+        let interface_function_names = parse_interface_function_names(&interface)?
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+
+        for item in syntax.items {
+            match item {
+                Item::Struct(item_struct) => {
+                    if has_attr_named(&item_struct.attrs, "wit_record")
+                        || has_attr_named(&item_struct.attrs, "shared_resource")
+                    {
+                        continue;
+                    }
+                    if current_wit_resource_name_for_ident(&interface, &item_struct.ident)?.is_some()
+                    {
+                        continue;
+                    }
+                    if current_wit_named_type_for_ident(&interface, &item_struct.ident)?.is_none() {
+                        continue;
+                    }
+                    if !matches!(item_struct.fields, Fields::Named(_)) {
+                        continue;
+                    }
+                    if let Ok(tokens) =
+                        generate_wit_record_impls(&item_struct, Some(&interface), None)
+                    {
+                        type_impls.push(tokens);
+                    }
+                }
+                Item::Enum(item_enum) => {
+                    if has_attr_named(&item_enum.attrs, "wit_enum")
+                        || has_attr_named(&item_enum.attrs, "wit_variant")
+                    {
+                        continue;
+                    }
+                    if current_wit_named_type_for_ident(&interface, &item_enum.ident)?.is_none() {
+                        continue;
+                    }
+                    let tokens = if item_enum
+                        .variants
+                        .iter()
+                        .all(|variant| matches!(variant.fields, Fields::Unit))
+                    {
+                        generate_wit_enum_impls(&item_enum, Some(&interface), None)
+                    } else {
+                        generate_wit_variant_impls(&item_enum, Some(&interface), None)
+                    };
+                    if let Ok(tokens) = tokens {
+                        type_impls.push(tokens);
+                    }
+                }
+                Item::Impl(item_impl) => {
+                    if item_impl.trait_.is_some()
+                        || has_attr_named(&item_impl.attrs, "guest_interface")
+                        || has_attr_named(&item_impl.attrs, "guest_resource")
+                        || has_attr_named(&item_impl.attrs, "shared_resource")
+                    {
+                        continue;
+                    }
+
+                    let Type::Path(type_path) = &*item_impl.self_ty else {
+                        continue;
+                    };
+                    let Some(self_ident) = type_path.path.segments.last().map(|segment| &segment.ident)
+                    else {
+                        continue;
+                    };
+
+                    if self_ident == component {
+                        if interface_function_names.is_empty() {
+                            continue;
+                        }
+                        let has_matching_methods = item_impl.items.iter().any(|item| {
+                            matches!(
+                                item,
+                                ImplItem::Fn(method)
+                                    if interface_function_names.contains(&method.sig.ident.to_string())
+                            )
+                        });
+                        if !has_matching_methods {
+                            continue;
+                        }
+                        let args = GuestBindingInput {
+                            interface: Some(interface.clone()),
+                            resource: None,
+                        };
+                        let tokens = generate_guest_binding_tokens(
+                            &args,
+                            &item_impl,
+                            false,
+                            Some(&interface_function_names),
+                        )
+                        .map_err(|e| e.to_string())?;
+                        guest_impls.push(tokens);
+                        continue;
+                    }
+
+                    let Some(resource_name) =
+                        current_wit_resource_name_for_ident(&interface, self_ident)?
+                    else {
+                        continue;
+                    };
+                    let exported_method_names = parse_resource_method_names(&interface, &resource_name)?
+                        .into_iter()
+                        .collect::<BTreeSet<_>>();
+                    let has_matching_methods = item_impl.items.iter().any(|item| {
+                        matches!(
+                            item,
+                            ImplItem::Fn(method)
+                                if exported_method_names.contains(&method.sig.ident.to_string())
+                        )
+                    });
+                    if !has_matching_methods {
+                        continue;
+                    }
+                    let args = GuestBindingInput {
+                        interface: Some(interface.clone()),
+                        resource: Some(resource_name),
+                    };
+                    let tokens = generate_guest_binding_tokens(
+                        &args,
+                        &item_impl,
+                        true,
+                        Some(&exported_method_names),
+                    )
+                    .map_err(|e| e.to_string())?;
+                    guest_impls.push(tokens);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok((type_impls, guest_impls))
+}
+
 #[proc_macro]
 pub fn component_bindings(item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as ComponentBindingsInput);
@@ -1931,6 +2167,29 @@ pub fn component(item: TokenStream) -> TokenStream {
         }
     };
 
+    let (auto_type_impls, auto_guest_impls) = match infer_auto_component_tokens(&component) {
+        Ok(tokens) => tokens,
+        Err(message) => {
+            return Error::new(Span::call_site(), message)
+                .to_compile_error()
+                .into();
+        }
+    };
+    let auto_imports = match parse_world_exports() {
+        Ok(exports) => exports
+            .into_iter()
+            .map(|interface| {
+                let module_ident = to_rust_ident(&interface);
+                quote! { use crate::#module_ident::*; }
+            })
+            .collect::<Vec<_>>(),
+        Err(message) => {
+            return Error::new(Span::call_site(), message)
+                .to_compile_error()
+                .into();
+        }
+    };
+
     let interface_impls = interfaces.into_iter().map(|interface| {
         let interface_name = interface.interface;
         let bindings = interface.bindings.into_iter().map(|binding| {
@@ -1999,10 +2258,14 @@ pub fn component(item: TokenStream) -> TokenStream {
         }
 
         pub(crate) use __wit::exports;
+        #(#auto_imports)*
+
+        #(#auto_type_impls)*
 
         struct #component;
 
         #(#interface_impls)*
+        #(#auto_guest_impls)*
 
         __wit::export!(#component with_types_in __wit);
     }

@@ -1,7 +1,5 @@
 use crate::InferenceComponentImpl;
-use inferlib_macros::guest_interface;
 
-#[guest_interface]
 impl InferenceComponentImpl {
     /// Returns the runtime version string.
     fn get_version() -> String {

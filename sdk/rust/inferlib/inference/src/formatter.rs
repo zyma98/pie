@@ -1,8 +1,7 @@
 use crate::chat::{self, ChatFormatter as TemplateChatFormatter};
-use inferlib_macros::{shared_resource, wit_record};
+use inferlib_macros::shared_resource;
 
 #[derive(Clone, Debug)]
-#[wit_record]
 pub(crate) struct ToolCall {
     pub(crate) name: String,
     pub(crate) arguments: String,
