@@ -1,6 +1,9 @@
 use crate::InferenceComponentImpl;
 
-impl crate::exports::inferlib::inference::messaging::Guest for InferenceComponentImpl {
+inferlib_macros::wit_interface!(messaging);
+
+#[inferlib_macros::guest_interface]
+impl InferenceComponentImpl {
     /// Sends a message to the remote user client.
     fn send(message: String) {
         inferlib_engine_bindings::inferlet::core::message::send(&message);

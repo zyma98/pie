@@ -1,6 +1,9 @@
 use crate::InferenceComponentImpl;
 
-impl crate::exports::inferlib::inference::runtime::Guest for InferenceComponentImpl {
+inferlib_macros::wit_interface!(runtime);
+
+#[inferlib_macros::guest_interface]
+impl InferenceComponentImpl {
     /// Returns the runtime version string.
     fn get_version() -> String {
         inferlib_engine_bindings::inferlet::core::runtime::get_version()
