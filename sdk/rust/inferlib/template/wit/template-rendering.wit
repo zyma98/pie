@@ -1,8 +1,0 @@
-package inferlib:template;
-
-interface template-rendering {
-    resource template-renderer {
-        constructor(name: string, template-str: string);
-        render: func(json-data: string) -> result<string, string>;
-    }
-}

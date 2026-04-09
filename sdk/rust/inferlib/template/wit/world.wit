@@ -1,5 +1,0 @@
-package inferlib:template;
-
-world template-provider {
-    export template-rendering;
-}
