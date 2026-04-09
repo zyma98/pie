@@ -1,7 +1,8 @@
 use crate::chat::{self, ChatFormatter as TemplateChatFormatter};
+use inferlib_macros::{shared_resource, wit_record};
 
 #[derive(Clone, Debug)]
-#[inferlib_macros::wit_record]
+#[wit_record]
 pub(crate) struct ToolCall {
     pub(crate) name: String,
     pub(crate) arguments: String,
@@ -11,7 +12,7 @@ pub(crate) struct ChatFormatter {
     formatter: TemplateChatFormatter,
 }
 
-#[inferlib_macros::shared_resource]
+#[shared_resource]
 impl ChatFormatter {
     pub(crate) fn new(template: String) -> Self {
         let formatter = TemplateChatFormatter::new(template)

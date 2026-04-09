@@ -7,6 +7,7 @@ use crate::exports::inferlib::inference::models::ModelBorrow;
 
 use inferlib_engine_bindings::inferlet::core::forward::ForwardPassResult as HostForwardPassResult;
 use inferlib_engine_bindings::inferlet::core::runtime::get_model;
+use inferlib_macros::{guest_resource, shared_resource, wit_record, wit_variant};
 
 use std::cell::RefCell;
 use std::cmp::Ordering;
@@ -14,7 +15,7 @@ use std::mem;
 use wstd::runtime::block_on;
 
 #[derive(Clone, Debug)]
-#[inferlib_macros::wit_variant]
+#[wit_variant]
 pub(crate) enum SamplerConfig {
     Greedy,
     Multinomial(f32),
@@ -25,7 +26,7 @@ pub(crate) enum SamplerConfig {
 }
 
 #[derive(Clone, Debug)]
-#[inferlib_macros::wit_record]
+#[wit_record]
 pub(crate) struct StopConfig {
     pub(crate) max_tokens: u32,
     pub(crate) eos_sequences: Vec<Vec<u32>>,
@@ -44,7 +45,7 @@ fn greedy_argmax(ids: &[u32], probs: &[f32]) -> u32 {
     ids[max_idx]
 }
 
-#[inferlib_macros::shared_resource]
+#[shared_resource]
 pub(crate) struct Context {
     model: Model,
     queue: Queue,
@@ -69,7 +70,7 @@ pub(crate) struct Context {
     begin_of_sequence: bool,
 }
 
-#[inferlib_macros::shared_resource(resource = "context")]
+#[shared_resource]
 impl Context {
     pub(crate) fn new(wit_model: ModelBorrow<'_>) -> Self {
         let model: &Model = wit_model.get();
@@ -981,7 +982,7 @@ pub(crate) struct DecodeStepFuture {
     pending_position_ids: Vec<u32>,
 }
 
-#[inferlib_macros::guest_resource]
+#[guest_resource]
 impl DecodeStepFuture {
     fn pollable(&self) -> wasip2::io::poll::Pollable {
         self.host_result
@@ -1008,7 +1009,7 @@ pub(crate) struct FlushFuture {
     host_result: RefCell<Option<HostForwardPassResult>>,
 }
 
-#[inferlib_macros::guest_resource]
+#[guest_resource]
 impl FlushFuture {
     fn pollable(&self) -> wasip2::io::poll::Pollable {
         self.host_result
@@ -1049,7 +1050,7 @@ pub(crate) struct GenerateFuture {
     state: RefCell<GenerateFutureState>,
 }
 
-#[inferlib_macros::guest_resource]
+#[guest_resource]
 impl GenerateFuture {
     fn pollable(&self) -> wasip2::io::poll::Pollable {
         let mut state = self.state.borrow_mut();
