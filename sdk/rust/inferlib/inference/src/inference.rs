@@ -7,7 +7,7 @@ use crate::exports::inferlib::inference::models::ModelBorrow;
 
 use inferlib_engine_bindings::inferlet::core::forward::ForwardPassResult as HostForwardPassResult;
 use inferlib_engine_bindings::inferlet::core::runtime::get_model;
-use inferlib_macros::{guest_resource, shared_resource, wit_record, wit_variant};
+use inferlib_macros::shared_resource;
 
 use std::cell::RefCell;
 use std::cmp::Ordering;
@@ -15,7 +15,6 @@ use std::mem;
 use wstd::runtime::block_on;
 
 #[derive(Clone, Debug)]
-#[wit_variant]
 pub(crate) enum SamplerConfig {
     Greedy,
     Multinomial(f32),
@@ -26,7 +25,6 @@ pub(crate) enum SamplerConfig {
 }
 
 #[derive(Clone, Debug)]
-#[wit_record]
 pub(crate) struct StopConfig {
     pub(crate) max_tokens: u32,
     pub(crate) eos_sequences: Vec<Vec<u32>>,
@@ -982,7 +980,6 @@ pub(crate) struct DecodeStepFuture {
     pending_position_ids: Vec<u32>,
 }
 
-#[guest_resource]
 impl DecodeStepFuture {
     fn pollable(&self) -> wasip2::io::poll::Pollable {
         self.host_result
@@ -1009,7 +1006,6 @@ pub(crate) struct FlushFuture {
     host_result: RefCell<Option<HostForwardPassResult>>,
 }
 
-#[guest_resource]
 impl FlushFuture {
     fn pollable(&self) -> wasip2::io::poll::Pollable {
         self.host_result
@@ -1050,7 +1046,6 @@ pub(crate) struct GenerateFuture {
     state: RefCell<GenerateFutureState>,
 }
 
-#[guest_resource]
 impl GenerateFuture {
     fn pollable(&self) -> wasip2::io::poll::Pollable {
         let mut state = self.state.borrow_mut();

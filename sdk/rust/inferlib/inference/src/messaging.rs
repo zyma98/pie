@@ -1,7 +1,5 @@
 use crate::InferenceComponentImpl;
-use inferlib_macros::guest_interface;
 
-#[guest_interface]
 impl InferenceComponentImpl {
     /// Sends a message to the remote user client.
     fn send(message: String) {
