@@ -288,11 +288,12 @@ fn infer_component_bindings_from_wit() -> std::result::Result<Vec<InterfaceBindi
             continue;
         }
 
+        let interface_module = interface.replace('-', "_");
         let bindings = resources
             .into_iter()
             .map(|resource| {
                 let assoc_name = to_upper_camel(&resource);
-                let impl_name = assoc_name.clone();
+                let impl_name = format!("crate::{interface_module}::{assoc_name}");
                 let name = Ident::new(&assoc_name, Span::call_site());
                 let ty = syn::parse_str::<Type>(&impl_name)
                     .map_err(|e| format!("Failed to build inferred type `{impl_name}`: {e}"))?;
@@ -301,7 +302,7 @@ fn infer_component_bindings_from_wit() -> std::result::Result<Vec<InterfaceBindi
             .collect::<std::result::Result<Vec<_>, String>>()?;
 
         interfaces.push(InterfaceBindings {
-            interface: Ident::new(&interface, Span::call_site()),
+            interface: to_rust_ident(&interface),
             bindings,
         });
     }
