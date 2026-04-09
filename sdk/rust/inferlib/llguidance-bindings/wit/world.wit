@@ -1,5 +1,0 @@
-package inferlib:llguidance-bindings;
-
-world importer {
-    import inferlib:llguidance/constrained-sampling;
-}
