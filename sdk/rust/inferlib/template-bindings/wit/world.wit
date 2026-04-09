@@ -1,5 +1,0 @@
-package inferlib:template-bindings;
-
-world importer {
-    import inferlib:template/template-rendering;
-}
