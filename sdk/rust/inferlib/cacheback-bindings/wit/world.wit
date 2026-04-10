@@ -1,5 +1,0 @@
-package inferlib:cacheback-bindings;
-
-world importer {
-    import inferlib:cacheback/cacheback;
-}

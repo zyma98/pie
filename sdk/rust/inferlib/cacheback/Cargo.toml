@@ -8,5 +8,6 @@ crate-type = ["cdylib"]
 name = "inferlib_cacheback"
 
 [dependencies]
+inferlib-macros = { path = "../../inferlib-macros" }
 wit-bindgen = { workspace = true }
 indexmap = "2"
