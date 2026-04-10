@@ -45,6 +45,10 @@ fn to_upper_camel(name: &str) -> String {
     result
 }
 
+fn default_component_ident() -> Ident {
+    Ident::new("__InferlibComponent", Span::call_site())
+}
+
 fn resource_name_from_ident(ident: &Ident) -> String {
     let ident_str = ident.to_string();
     ident_str
@@ -367,6 +371,13 @@ struct ComponentInput {
 
 impl Parse for ComponentInput {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
+        if input.is_empty() {
+            return Ok(Self {
+                component: default_component_ident(),
+                overrides: Vec::new(),
+            });
+        }
+
         let component = input.parse()?;
         let mut overrides = Vec::new();
         if input.peek(Token![,]) {
@@ -384,6 +395,87 @@ impl Parse for ComponentInput {
             overrides,
         })
     }
+}
+
+fn module_function_path_tokens(
+    module_path: &[String],
+    function_name: &Ident,
+) -> proc_macro2::TokenStream {
+    let segments = module_path
+        .iter()
+        .map(|segment| Ident::new(&segment.replace('-', "_"), Span::call_site()))
+        .collect::<Vec<_>>();
+    if segments.is_empty() {
+        quote!(crate::#function_name)
+    } else {
+        quote!(crate::#(#segments::)*#function_name)
+    }
+}
+
+fn generate_guest_function_method_tokens(
+    item_fn: &ItemFn,
+    module_path: &[String],
+) -> syn::Result<proc_macro2::TokenStream> {
+    let mut trait_sig = item_fn.sig.clone();
+    let mut rewritten_inputs = syn::punctuated::Punctuated::new();
+    let mut local_bindings = Vec::new();
+    let mut call_args = Vec::new();
+
+    for arg in &item_fn.sig.inputs {
+        let FnArg::Typed(pat_ty) = arg else {
+            return Err(Error::new_spanned(
+                arg,
+                "interface-level free functions must not have a receiver",
+            ));
+        };
+        let Pat::Ident(pat_ident) = &*pat_ty.pat else {
+            return Err(Error::new_spanned(
+                &pat_ty.pat,
+                "guest binding functions require simple identifier arguments",
+            ));
+        };
+        let ident = pat_ident.ident.clone();
+        let local_ty = (*pat_ty.ty).clone();
+        let wit_ty = rewrite_wit_type(&local_ty)?;
+        let mut rewritten = pat_ty.clone();
+        rewritten.ty = Box::new(wit_ty);
+        rewritten_inputs.push(FnArg::Typed(rewritten));
+
+        let local_value = convert_expr(&local_ty, quote! { #ident })?;
+        local_bindings.push(quote! {
+            let #ident: #local_ty = #local_value;
+        });
+        call_args.push(quote! { #ident });
+    }
+
+    trait_sig.inputs = rewritten_inputs;
+    trait_sig.output = match &item_fn.sig.output {
+        ReturnType::Default => ReturnType::Default,
+        ReturnType::Type(token, ty) => ReturnType::Type(*token, Box::new(rewrite_wit_type(ty)?)),
+    };
+
+    let function_name = &item_fn.sig.ident;
+    let attrs = &item_fn.attrs;
+    let call_path = module_function_path_tokens(module_path, function_name);
+    let body = match &item_fn.sig.output {
+        ReturnType::Default => quote! {{
+            #(#local_bindings)*
+            #call_path(#(#call_args),*);
+        }},
+        ReturnType::Type(_, ty) => {
+            let converted = convert_expr(ty, quote! { result })?;
+            quote! {{
+                #(#local_bindings)*
+                let result = #call_path(#(#call_args),*);
+                #converted
+            }}
+        }
+    };
+
+    Ok(quote! {
+        #(#attrs)*
+        #trait_sig #body
+    })
 }
 
 struct WitInterfaceInput {
@@ -1946,11 +2038,17 @@ fn infer_auto_component_tokens(
 
     let mut type_impls = Vec::new();
     let mut guest_impls = Vec::new();
+    let mut free_function_methods_by_interface: std::collections::BTreeMap<
+        String,
+        Vec<proc_macro2::TokenStream>,
+    > = std::collections::BTreeMap::new();
+    let exports = read_wit_exports_path()?;
 
     for file in files {
         let Some(interface) = source_interface_for_file(&file)? else {
             continue;
         };
+        let module_path = module_path_for_source(&src_dir, &file)?;
 
         let source = std::fs::read_to_string(&file)
             .map_err(|e| format!("Failed to read `{}`: {e}", file.display()))?;
@@ -1963,6 +2061,19 @@ fn infer_auto_component_tokens(
 
         for item in syntax.items {
             match item {
+                Item::Fn(item_fn) => {
+                    if matches!(item_fn.vis, syn::Visibility::Inherited)
+                        || !interface_function_names.contains(&item_fn.sig.ident.to_string())
+                    {
+                        continue;
+                    }
+                    let tokens = generate_guest_function_method_tokens(&item_fn, &module_path)
+                        .map_err(|e| e.to_string())?;
+                    free_function_methods_by_interface
+                        .entry(interface.clone())
+                        .or_default()
+                        .push(tokens);
+                }
                 Item::Struct(item_struct) => {
                     if has_attr_named(&item_struct.attrs, "wit_record")
                         || has_attr_named(&item_struct.attrs, "shared_resource")
@@ -2087,6 +2198,18 @@ fn infer_auto_component_tokens(
                 _ => {}
             }
         }
+    }
+
+    for (interface, methods) in free_function_methods_by_interface {
+        if methods.is_empty() {
+            continue;
+        }
+        let interface_ident = to_rust_ident(&interface);
+        guest_impls.push(quote! {
+            impl #exports::#interface_ident::Guest for #component {
+                #(#methods)*
+            }
+        });
     }
 
     Ok((type_impls, guest_impls))
