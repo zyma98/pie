@@ -1,5 +1,3 @@
 mod cacheback;
 
-use inferlib_macros::component;
-
-component!(Component);
+inferlib_macros::component!();
