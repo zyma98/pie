@@ -1,32 +1,21 @@
-wit_bindgen::generate!({
-    path: "wit",
-    world: "schema-provider",
-    generate_all,
-});
+use inferlib_macros::rc_resource;
 
-use exports::inferlib::schema::json_schema::{Guest, GuestSchemaValidator};
+inferlib_macros::component!();
 
-struct Component;
-
-export!(Component);
-
-impl Guest for Component {
-    type SchemaValidator = SchemaValidatorImpl;
-}
-
-pub struct SchemaValidatorImpl {
+pub(crate) struct SchemaValidator {
     validator: jsonschema::Validator,
 }
 
-impl GuestSchemaValidator for SchemaValidatorImpl {
-    fn new(schema_str: String) -> Self {
+#[rc_resource]
+impl SchemaValidator {
+    pub(crate) fn new(schema_str: String) -> Self {
         let schema: serde_json::Value =
             serde_json::from_str(&schema_str).expect("invalid schema JSON");
         let validator = jsonschema::validator_for(&schema).expect("invalid JSON Schema");
-        SchemaValidatorImpl { validator }
+        SchemaValidator { validator }
     }
 
-    fn validate(&self, json_str: String) -> Result<String, String> {
+    pub(crate) fn validate(&self, json_str: String) -> Result<String, String> {
         let value: serde_json::Value =
             serde_json::from_str(&json_str).map_err(|e| format!("JSON parse error: {}", e))?;
 

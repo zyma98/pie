@@ -1,14 +1,5 @@
-wit_bindgen::generate!({
-    path: "wit",
-    world: "llguidance-provider",
-    generate_all,
-});
-
-use exports::inferlib::llguidance::constrained_sampling::{
-    Guest, GuestConstrainedSampler, GuestGrammarMatcher, GuestTokenMask, TokenMask,
-};
-
 use fancy_regex::Regex;
+use inferlib_macros::rc_resource;
 use llguidance::api::TopLevelGrammar;
 use llguidance::toktrie::{SimpleVob, TokEnv, TokRxInfo, TokTrie, TokenId, TokenizerEnv};
 use llguidance::{Matcher, ParserFactory};
@@ -16,26 +7,19 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-struct Component;
+inferlib_macros::component!();
 
-export!(Component);
-
-impl Guest for Component {
-    type GrammarMatcher = GrammarMatcherImpl;
-    type TokenMask = TokenMaskImpl;
-    type ConstrainedSampler = ConstrainedSamplerImpl;
-}
-
-pub struct GrammarMatcherImpl {
+pub(crate) struct GrammarMatcher {
     inner: RefCell<Matcher>,
 }
 
-pub struct TokenMaskImpl {
+pub(crate) struct TokenMask {
     vob: SimpleVob,
 }
 
-impl GuestGrammarMatcher for GrammarMatcherImpl {
-    fn new(
+#[rc_resource]
+impl GrammarMatcher {
+    pub(crate) fn new(
         vocab_ids: Vec<u32>,
         vocab_bytes: Vec<Vec<u8>>,
         special_token_ids: Vec<u32>,
@@ -68,46 +52,48 @@ impl GuestGrammarMatcher for GrammarMatcherImpl {
         let parser = factory.create_parser(grammar);
         let constraint = Matcher::new(parser);
 
-        GrammarMatcherImpl {
+        GrammarMatcher {
             inner: RefCell::new(constraint),
         }
     }
 
-    fn compute_mask(&self) -> Option<TokenMask> {
+    pub(crate) fn compute_mask(&self) -> Option<TokenMask> {
         let mut inner = self.inner.borrow_mut();
         match inner.compute_mask() {
-            Ok(vob) => Some(TokenMask::new(TokenMaskImpl { vob })),
+            Ok(vob) => Some(TokenMask { vob }),
             Err(_) => None,
         }
     }
 
-    fn consume_token(&self, token_id: u32) {
+    pub(crate) fn consume_token(&self, token_id: u32) {
         let mut inner = self.inner.borrow_mut();
         let _ = inner.consume_token(token_id);
     }
 }
 
-impl GuestTokenMask for TokenMaskImpl {
-    fn is_empty(&self) -> bool {
+#[rc_resource]
+impl TokenMask {
+    pub(crate) fn is_empty(&self) -> bool {
         self.vob.is_empty()
     }
 
-    fn is_allowed(&self, token_id: u32) -> bool {
+    pub(crate) fn is_allowed(&self, token_id: u32) -> bool {
         self.vob.is_allowed(token_id)
     }
 
-    fn first_bit_set(&self) -> Option<u32> {
+    pub(crate) fn first_bit_set(&self) -> Option<u32> {
         self.vob.first_bit_set().map(|v| v as u32)
     }
 }
 
-pub struct ConstrainedSamplerImpl {
+pub(crate) struct ConstrainedSampler {
     matcher: RefCell<Matcher>,
     eos_token_id: u32,
 }
 
-impl GuestConstrainedSampler for ConstrainedSamplerImpl {
-    fn new(
+#[rc_resource]
+impl ConstrainedSampler {
+    pub(crate) fn new(
         vocab_ids: Vec<u32>,
         vocab_bytes: Vec<Vec<u8>>,
         special_token_ids: Vec<u32>,
@@ -140,13 +126,13 @@ impl GuestConstrainedSampler for ConstrainedSamplerImpl {
         let parser = factory.create_parser(grammar);
         let constraint = Matcher::new(parser);
 
-        ConstrainedSamplerImpl {
+        ConstrainedSampler {
             matcher: RefCell::new(constraint),
             eos_token_id,
         }
     }
 
-    fn sample(&self, token_ids: Vec<u32>, probs: Vec<f32>) -> u32 {
+    pub(crate) fn sample(&self, token_ids: Vec<u32>, probs: Vec<f32>) -> u32 {
         let mut inner = self.matcher.borrow_mut();
 
         let vob = match inner.compute_mask() {

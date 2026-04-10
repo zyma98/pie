@@ -1,34 +1,23 @@
-wit_bindgen::generate!({
-    path: "wit",
-    world: "template-provider",
-    generate_all,
-});
-
-use exports::inferlib::template::template_rendering::{Guest, GuestTemplateRenderer};
+use inferlib_macros::rc_resource;
 use minijinja::Environment;
 
-struct Component;
+inferlib_macros::component!();
 
-export!(Component);
-
-impl Guest for Component {
-    type TemplateRenderer = TemplateRendererImpl;
-}
-
-pub struct TemplateRendererImpl {
+pub(crate) struct TemplateRenderer {
     env: Environment<'static>,
     name: String,
 }
 
-impl GuestTemplateRenderer for TemplateRendererImpl {
-    fn new(name: String, template_str: String) -> Self {
+#[rc_resource]
+impl TemplateRenderer {
+    pub(crate) fn new(name: String, template_str: String) -> Self {
         let mut env = Environment::new();
         env.add_template_owned(name.clone(), template_str)
             .expect("invalid template");
-        TemplateRendererImpl { env, name }
+        TemplateRenderer { env, name }
     }
 
-    fn render(&self, json_data: String) -> Result<String, String> {
+    pub(crate) fn render(&self, json_data: String) -> Result<String, String> {
         let data: serde_json::Value =
             serde_json::from_str(&json_data).map_err(|e| format!("JSON parse error: {}", e))?;
 
