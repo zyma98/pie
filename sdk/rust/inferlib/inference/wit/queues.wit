@@ -1,0 +1,80 @@
+package inferlib:inference;
+
+interface queues {
+    record distribution {
+        ids: list<u32>,
+        probs: list<f32>,
+    }
+
+    resource forward-pass {
+        attention-mask: func(mask: list<list<u32>>);
+        execute: func() -> forward-pass-result;
+        input-embed-ptrs: func(embed-ptrs: list<u32>, positions: list<u32>);
+        input-tokens: func(tokens: list<u32>, positions: list<u32>);
+        kv-cache: func(kv-page-ptrs: list<u32>, last-kv-page-len: u32);
+        output-distributions: func(indices: list<u32>, temperature: f32, top-k: option<u32>);
+        output-embed-ptrs: func(embed-ptrs: list<u32>, indices: list<u32>);
+        output-tokens: func(indices: list<u32>, temperature: f32);
+        output-tokens-min-p: func(indices: list<u32>, temperature: f32, min-p: f32);
+        output-tokens-top-k: func(indices: list<u32>, temperature: f32, top-k: u32);
+        output-tokens-top-k-top-p: func(indices: list<u32>, temperature: f32, top-k: u32, top-p: f32);
+        output-tokens-top-p: func(indices: list<u32>, temperature: f32, top-p: f32);
+        set-adapter: func(adapter-ptr: u32);
+        set-adapter-seed: func(seed: s64);
+    }
+
+    record forward-pass-result {
+        distributions: option<list<distribution>>,
+        tokens: option<list<u32>>,
+    }
+
+    resource kv-page {
+        ptr: func() -> u32;
+    }
+
+    enum priority {
+        low,
+        normal,
+        high,
+    }
+
+    resource queue {
+        allocate-adapter: func() -> u32;
+        allocate-embeds: func(count: u32) -> list<u32>;
+        allocate-kv-pages: func(count: u32) -> list<u32>;
+        calculate-embed-size: func(image-width: u32, image-height: u32) -> u32;
+        create-forward-pass: func() -> forward-pass;
+        deallocate-adapter: func(ptr: u32);
+        deallocate-embeds: func(ptrs: list<u32>);
+        deallocate-kv-pages: func(ptrs: list<u32>);
+        debug-query: func(query: string) -> string;
+        download-adapter: func(adapter-ptr: u32, name: string);
+        embed-image: func(embed-ptrs: list<u32>, image-data: list<u8>, position-offset: u32);
+        export-adapter: func(ptr: u32, name: string);
+        export-embeds: func(ptrs: list<u32>, name: string);
+        export-kv-pages: func(ptrs: list<u32>, name: string);
+        from-model-name: static func(model-name: string) -> queue;
+        get-all-exported-adapters: func() -> list<string>;
+        get-all-exported-embeds: func() -> list<tuple<string, u32>>;
+        get-all-exported-kv-pages: func() -> list<tuple<string, u32>>;
+        get-service-id: func() -> u32;
+        import-adapter: func(name: string) -> u32;
+        import-embeds: func(name: string) -> list<u32>;
+        import-kv-pages: func(name: string) -> list<u32>;
+        initialize-adapter: func(adapter-ptr: u32, rank: u32, alpha: f32, population-size: u32, mu-fraction: f32, initial-sigma: f32);
+        release-exported-adapter: func(name: string);
+        release-exported-embeds: func(name: string);
+        release-exported-kv-pages: func(name: string);
+        set-priority: func(priority: priority);
+        synchronize: func() -> bool;
+        update-adapter: func(adapter-ptr: u32, scores: list<f32>, seeds: list<s64>, max-sigma: f32);
+        upload-adapter: func(adapter-ptr: u32, name: string, data: list<u8>);
+    }
+
+    enum resource-type {
+        kv-page,
+        embed,
+        adapter,
+    }
+
+}

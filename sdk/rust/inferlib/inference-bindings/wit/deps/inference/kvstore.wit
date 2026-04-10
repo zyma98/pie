@@ -1,0 +1,9 @@
+package inferlib:inference;
+
+interface kvstore {
+    store-delete: func(key: string);
+    store-exists: func(key: string) -> bool;
+    store-get: func(key: string) -> option<string>;
+    store-list-keys: func() -> list<string>;
+    store-set: func(key: string, value: string);
+}

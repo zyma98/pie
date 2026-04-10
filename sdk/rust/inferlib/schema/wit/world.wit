@@ -1,0 +1,5 @@
+package inferlib:schema;
+
+world schema-provider {
+    export json-schema;
+}

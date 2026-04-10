@@ -1,0 +1,72 @@
+package inferlib:inference;
+
+interface inference {
+    use models.{model};
+    use queues.{distribution};
+    use wasi:io/poll@0.2.0.{pollable};
+
+    resource context {
+        decode-step: func(sampler: sampler-config) -> u32;
+        decode-step-async: func(sampler: sampler-config) -> decode-step-future;
+        decode-step-dist: func(temperature: f32, top-k: option<u32>) -> distribution;
+        detokenize: func(token-ids: list<u32>) -> string;
+        drop-masked-kv-pages: func();
+        fill: func(text: string);
+        fill-assistant: func(text: string);
+        fill-system: func(text: string);
+        fill-token: func(new-token-id: u32);
+        fill-tokens: func(new-token-ids: list<u32>);
+        fill-user: func(text: string);
+        fill-user-only: func(text: string);
+        flush: func();
+        flush-async: func() -> option<flush-future>;
+        flush-chat-messages: func(add-generation-prompt: bool);
+        fork: func() -> context;
+        from-imported-state: static func(wit-model: borrow<model>, kv-page-ptrs: list<u32>, prefix-tokens: list<u32>, kv-page-last-len: u32) -> context;
+        generate: func(sampler: sampler-config, stop-config: stop-config) -> string;
+        generate-async: func(sampler: sampler-config, stop-config: stop-config) -> generate-future;
+        generate-with-beam: func(stop-config: stop-config, beam-size: u32) -> string;
+        get-kv-page-last-len: func() -> u32;
+        get-kv-page-ptrs: func() -> list<u32>;
+        get-text: func() -> string;
+        get-token-ids: func() -> list<u32>;
+        mask-token: func(index: u32, mask: bool);
+        mask-token-range: func(start: u32, end: u32, mask: bool);
+        mask-tokens: func(indices: list<u32>, mask: bool);
+        constructor(wit-model: borrow<model>);
+        remove-adapter: func();
+        set-adapter: func(adapter-ptr: u32);
+        set-adapter-random-seed: func(seed: s64);
+        verify-draft: func(draft-tokens: list<u32>, draft-pos-ids: list<u32>) -> list<u32>;
+    }
+
+    resource decode-step-future {
+        get: func() -> option<u32>;
+        pollable: func() -> pollable;
+    }
+
+    resource flush-future {
+        is-ready: func() -> bool;
+        pollable: func() -> pollable;
+    }
+
+    resource generate-future {
+        get: func() -> option<string>;
+        pollable: func() -> pollable;
+    }
+
+    variant sampler-config {
+        greedy,
+        multinomial(f32),
+        top-p(tuple<f32, f32>),
+        top-k(tuple<f32, u32>),
+        min-p(tuple<f32, f32>),
+        top-k-top-p(tuple<f32, u32, f32>),
+    }
+
+    record stop-config {
+        max-tokens: u32,
+        eos-sequences: list<list<u32>>,
+    }
+
+}

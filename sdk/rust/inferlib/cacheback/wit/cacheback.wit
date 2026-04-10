@@ -1,0 +1,16 @@
+package inferlib:cacheback;
+
+interface cacheback {
+    resource cache-table {
+        clear: func();
+        draft: func() -> draft-result;
+        constructor(leader-capacity: u32, follower-capacity: u32, leader-len: u32, follower-len: u32);
+        update: func(context: list<u32>);
+    }
+
+    record draft-result {
+        tokens: list<u32>,
+        positions: list<u32>,
+    }
+
+}

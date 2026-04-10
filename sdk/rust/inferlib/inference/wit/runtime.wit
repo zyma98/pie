@@ -1,0 +1,10 @@
+package inferlib:inference;
+
+interface runtime {
+    debug-query: func(query: string) -> string;
+    get-all-models-with-traits: func(traits: list<string>) -> list<string>;
+    get-arguments: func() -> list<string>;
+    get-instance-id: func() -> string;
+    get-version: func() -> string;
+    set-return: func(value: string);
+}

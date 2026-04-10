@@ -1,0 +1,10 @@
+package inferlib:inference;
+
+interface messaging {
+    broadcast: func(topic: string, message: string);
+    receive: func() -> string;
+    receive-blob: func() -> list<u8>;
+    send: func(message: string);
+    send-blob: func(data: list<u8>);
+    subscribe: func(topic: string) -> string;
+}
