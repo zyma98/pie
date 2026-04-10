@@ -1,5 +1,5 @@
 use indexmap::IndexMap;
-use inferlib_macros::shared_resource;
+use inferlib_macros::rc_resource;
 
 #[derive(Clone, Debug)]
 pub(crate) struct DraftResult {
@@ -166,7 +166,7 @@ impl TrieForest {
     }
 }
 
-#[shared_resource]
+#[rc_resource]
 impl CacheTable {
     pub(crate) fn new(
         leader_capacity: u32,

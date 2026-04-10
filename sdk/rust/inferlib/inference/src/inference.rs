@@ -7,7 +7,7 @@ use crate::exports::inferlib::inference::models::ModelBorrow;
 
 use inferlib_engine_bindings::inferlet::core::forward::ForwardPassResult as HostForwardPassResult;
 use inferlib_engine_bindings::inferlet::core::runtime::get_model;
-use inferlib_macros::shared_resource;
+use inferlib_macros::rc_resource;
 
 use std::cell::RefCell;
 use std::cmp::Ordering;
@@ -43,7 +43,7 @@ fn greedy_argmax(ids: &[u32], probs: &[f32]) -> u32 {
     ids[max_idx]
 }
 
-#[shared_resource]
+#[rc_resource]
 pub(crate) struct Context {
     model: Model,
     queue: Queue,
@@ -68,7 +68,7 @@ pub(crate) struct Context {
     begin_of_sequence: bool,
 }
 
-#[shared_resource]
+#[rc_resource]
 impl Context {
     pub(crate) fn new(wit_model: ModelBorrow<'_>) -> Self {
         let model: &Model = wit_model.get();
