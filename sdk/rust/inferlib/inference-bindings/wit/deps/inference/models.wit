@@ -1,0 +1,27 @@
+package inferlib:inference;
+
+interface models {
+    resource model {
+        eos-tokens: func() -> list<list<u32>>;
+        get-all-names: static func() -> list<string>;
+        get-auto: static func() -> model;
+        get-by-name: static func(name: string) -> option<model>;
+        get-description: func() -> string;
+        get-kv-page-size: func() -> u32;
+        get-name: func() -> string;
+        get-prompt-template: func() -> string;
+        get-service-id: func() -> u32;
+        get-tokenizer: func() -> tokenizer;
+        get-traits: func() -> list<string>;
+        has-traits: func(required-traits: list<string>) -> bool;
+    }
+
+    resource tokenizer {
+        detokenize: func(tokens: list<u32>) -> string;
+        get-special-tokens: func() -> tuple<list<u32>, list<list<u8>>>;
+        get-split-regex: func() -> string;
+        get-vocabs: func() -> tuple<list<u32>, list<list<u8>>>;
+        tokenize: func(text: string) -> list<u32>;
+    }
+
+}

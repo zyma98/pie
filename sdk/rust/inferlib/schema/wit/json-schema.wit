@@ -1,0 +1,9 @@
+package inferlib:schema;
+
+interface json-schema {
+    resource schema-validator {
+        constructor(schema-str: string);
+        validate: func(json-str: string) -> result<string, string>;
+    }
+
+}

@@ -1,0 +1,21 @@
+package inferlib:llguidance;
+
+interface constrained-sampling {
+    resource constrained-sampler {
+        constructor(vocab-ids: list<u32>, vocab-bytes: list<list<u8>>, special-token-ids: list<u32>, special-token-bytes: list<list<u8>>, split-regex: string, grammar: string, eos-token-id: u32, escape-non-printable: bool);
+        sample: func(token-ids: list<u32>, probs: list<f32>) -> u32;
+    }
+
+    resource grammar-matcher {
+        compute-mask: func() -> option<token-mask>;
+        consume-token: func(token-id: u32);
+        constructor(vocab-ids: list<u32>, vocab-bytes: list<list<u8>>, special-token-ids: list<u32>, special-token-bytes: list<list<u8>>, split-regex: string, grammar: string, eos-token-id: u32, escape-non-printable: bool);
+    }
+
+    resource token-mask {
+        first-bit-set: func() -> option<u32>;
+        is-allowed: func(token-id: u32) -> bool;
+        is-empty: func() -> bool;
+    }
+
+}

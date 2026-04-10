@@ -1,0 +1,21 @@
+package inferlib:inference;
+
+interface formatter {
+    resource chat-formatter {
+        add-assistant: func(content: string);
+        add-assistant-response: func(content: string, reasoning: option<string>, tool-calls: option<list<tool-call>>);
+        add-system: func(content: string);
+        add-tool: func(content: string);
+        add-user: func(content: string);
+        clear: func();
+        has-messages: func() -> bool;
+        constructor(template: string);
+        render: func(add-generation-prompt: bool, begin-of-sequence: bool) -> string;
+    }
+
+    record tool-call {
+        name: string,
+        arguments: string,
+    }
+
+}

@@ -1,0 +1,12 @@
+package inferlib:inference-bindings;
+
+world importer {
+    import wasi:io/poll@0.2.0;
+    import inferlib:inference/formatter;
+    import inferlib:inference/inference;
+    import inferlib:inference/kvstore;
+    import inferlib:inference/messaging;
+    import inferlib:inference/models;
+    import inferlib:inference/queues;
+    import inferlib:inference/runtime;
+}

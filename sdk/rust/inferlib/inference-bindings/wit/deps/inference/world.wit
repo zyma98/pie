@@ -1,0 +1,13 @@
+package inferlib:inference;
+
+world inference-provider {
+    import wasi:io/poll@0.2.0;
+
+    export formatter;
+    export inference;
+    export kvstore;
+    export messaging;
+    export models;
+    export queues;
+    export runtime;
+}
