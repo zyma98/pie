@@ -1,5 +1,5 @@
 use crate::chat::{self, ChatFormatter as TemplateChatFormatter};
-use inferlib_macros::shared_resource;
+use inferlib_macros::rc_resource;
 
 #[derive(Clone, Debug)]
 pub(crate) struct ToolCall {
@@ -11,7 +11,7 @@ pub(crate) struct ChatFormatter {
     formatter: TemplateChatFormatter,
 }
 
-#[shared_resource]
+#[rc_resource]
 impl ChatFormatter {
     pub(crate) fn new(template: String) -> Self {
         let formatter = TemplateChatFormatter::new(template)

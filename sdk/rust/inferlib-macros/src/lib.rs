@@ -78,6 +78,10 @@ fn has_attr_named(attrs: &[syn::Attribute], name: &str) -> bool {
     })
 }
 
+fn has_rc_resource_attr(attrs: &[syn::Attribute]) -> bool {
+    has_attr_named(attrs, "rc_resource")
+}
+
 fn hidden_shared_wrapper_ident(name: &Ident) -> Ident {
     Ident::new(&format!("__Shared{}", name), Span::call_site())
 }
@@ -86,7 +90,7 @@ fn hidden_shared_state_ident(name: &Ident) -> Ident {
     Ident::new(&format!("__SharedState{}", name), Span::call_site())
 }
 
-fn has_shared_resource_struct(name: &Ident) -> std::result::Result<bool, String> {
+fn has_rc_resource_struct(name: &Ident) -> std::result::Result<bool, String> {
     let src_dir = manifest_dir()?.join("src");
     let mut files = Vec::new();
     collect_rust_files(&src_dir, &mut files);
@@ -101,7 +105,7 @@ fn has_shared_resource_struct(name: &Ident) -> std::result::Result<bool, String>
             matches!(
                 item,
                 Item::Struct(item_struct)
-                    if item_struct.ident == *name && has_attr_named(&item_struct.attrs, "shared_resource")
+                    if item_struct.ident == *name && has_rc_resource_attr(&item_struct.attrs)
             )
         }) {
             return Ok(true);
@@ -196,7 +200,7 @@ fn current_wit_named_type_for_ident(
     Ok(matches.pop())
 }
 
-fn shared_resource_wrapper_type(name: &Ident) -> std::result::Result<Option<Type>, String> {
+fn rc_resource_wrapper_type(name: &Ident) -> std::result::Result<Option<Type>, String> {
     let src_dir = manifest_dir()?.join("src");
     let mut files = Vec::new();
     collect_rust_files(&src_dir, &mut files);
@@ -211,7 +215,7 @@ fn shared_resource_wrapper_type(name: &Ident) -> std::result::Result<Option<Type
             matches!(
                 item,
                 Item::Struct(item_struct)
-                    if item_struct.ident == *name && has_attr_named(&item_struct.attrs, "shared_resource")
+                    if item_struct.ident == *name && has_rc_resource_attr(&item_struct.attrs)
             )
         }) {
             return Ok(None);
@@ -221,7 +225,7 @@ fn shared_resource_wrapper_type(name: &Ident) -> std::result::Result<Option<Type
             let syn::Item::Impl(item_impl) = item else {
                 continue;
             };
-            if !has_attr_named(&item_impl.attrs, "shared_resource") {
+            if !has_rc_resource_attr(&item_impl.attrs) {
                 continue;
             }
             let Type::Path(type_path) = &*item_impl.self_ty else {
@@ -273,7 +277,7 @@ fn find_interface_for_resource(resource_name: &str) -> std::result::Result<Optio
     Ok(matches.pop())
 }
 
-fn resolve_shared_resource_binding(
+fn resolve_rc_resource_binding(
     interface: Option<&str>,
     explicit_resource: Option<&str>,
     self_ident: &Ident,
@@ -838,7 +842,7 @@ fn generate_guest_binding_tokens(
                     .expect("segment")
                     .ident
                     .clone();
-                match resolve_shared_resource_binding(
+                match resolve_rc_resource_binding(
                     args.interface.as_deref(),
                     args.resource.as_deref(),
                     &self_ident,
@@ -1070,11 +1074,11 @@ enum SharedReceiverKind {
     SharedMut,
 }
 
-fn expand_shared_resource_struct(item_struct: ItemStruct) -> syn::Result<proc_macro2::TokenStream> {
+fn expand_rc_resource_struct(item_struct: ItemStruct) -> syn::Result<proc_macro2::TokenStream> {
     if !item_struct.generics.params.is_empty() {
         return Err(Error::new_spanned(
             &item_struct.generics,
-            "#[inferlib_macros::shared_resource] does not yet support generic resources",
+            "#[inferlib_macros::rc_resource] does not yet support generic resources",
         ));
     }
 
@@ -1110,14 +1114,14 @@ fn expand_shared_resource_struct(item_struct: ItemStruct) -> syn::Result<proc_ma
     })
 }
 
-fn expand_shared_resource_impl(
+fn expand_rc_resource_impl(
     args: GuestBindingInput,
     item_impl: ItemImpl,
 ) -> syn::Result<proc_macro2::TokenStream> {
     if item_impl.trait_.is_some() {
         return Err(Error::new_spanned(
             &item_impl.self_ty,
-            "shared_resource must be attached to an inherent impl block",
+            "rc_resource must be attached to an inherent impl block",
         ));
     }
 
@@ -1125,7 +1129,7 @@ fn expand_shared_resource_impl(
     let Type::Path(type_path) = &*self_ty else {
         return Err(Error::new_spanned(
             &item_impl.self_ty,
-            "#[inferlib_macros::shared_resource] requires a concrete resource type",
+            "#[inferlib_macros::rc_resource] requires a concrete resource type",
         ));
     };
     let self_ident = type_path
@@ -1135,10 +1139,10 @@ fn expand_shared_resource_impl(
         .ok_or_else(|| Error::new_spanned(&item_impl.self_ty, "expected a resource type"))?
         .ident
         .clone();
-    let state_wrapper_mode = has_shared_resource_struct(&self_ident)
+    let state_wrapper_mode = has_rc_resource_struct(&self_ident)
         .map_err(|message| Error::new(Span::call_site(), message))?;
 
-    let (resolved_interface, resolved_resource_name) = resolve_shared_resource_binding(
+    let (resolved_interface, resolved_resource_name) = resolve_rc_resource_binding(
         args.interface.as_deref(),
         args.resource.as_deref(),
         &self_ident,
@@ -1163,7 +1167,7 @@ fn expand_shared_resource_impl(
                 if receiver.reference.is_none() {
                     return Err(Error::new_spanned(
                         receiver,
-                        "#[inferlib_macros::shared_resource] only supports &self and &mut self methods",
+                        "#[inferlib_macros::rc_resource] only supports &self and &mut self methods",
                     ));
                 }
                 *wrapper_sig.inputs.iter_mut().next().expect("receiver") = syn::parse_quote!(&self);
@@ -1182,7 +1186,7 @@ fn expand_shared_resource_impl(
                 let Pat::Ident(pat_ident) = &*pat_ty.pat else {
                     return Err(Error::new_spanned(
                         &pat_ty.pat,
-                        "shared_resource methods require simple identifier arguments",
+                        "rc_resource methods require simple identifier arguments",
                     ));
                 };
                 call_args.push(pat_ident.ident.clone());
@@ -1209,7 +1213,7 @@ fn expand_shared_resource_impl(
             } else if matches!(**ty, Type::Reference(_)) {
                 return Err(Error::new_spanned(
                     ty,
-                    "#[inferlib_macros::shared_resource] wrapper methods cannot return references; return an owned value instead",
+                    "#[inferlib_macros::rc_resource] wrapper methods cannot return references; return an owned value instead",
                 ));
             }
         }
@@ -1344,7 +1348,7 @@ fn expand_shared_resource_impl(
                             } else {
                                 return Err(Error::new_spanned(
                                     receiver,
-                                    "#[inferlib_macros::shared_resource] only supports &self and &mut self methods",
+                                    "#[inferlib_macros::rc_resource] only supports &self and &mut self methods",
                                 ));
                             }
                         }
@@ -1835,22 +1839,22 @@ pub fn guest_resource(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 #[proc_macro_attribute]
-pub fn shared_resource(attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn rc_resource(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as GuestBindingInput);
     let item = parse_macro_input!(item as Item);
 
     match item {
-        Item::Struct(item_struct) => match expand_shared_resource_struct(item_struct) {
+        Item::Struct(item_struct) => match expand_rc_resource_struct(item_struct) {
             Ok(tokens) => tokens.into(),
             Err(error) => error.to_compile_error().into(),
         },
-        Item::Impl(item_impl) => match expand_shared_resource_impl(args, item_impl) {
+        Item::Impl(item_impl) => match expand_rc_resource_impl(args, item_impl) {
             Ok(tokens) => tokens.into(),
             Err(error) => error.to_compile_error().into(),
         },
         other => Error::new_spanned(
             other,
-            "#[inferlib_macros::shared_resource] must be attached to a struct or inherent impl block",
+            "#[inferlib_macros::rc_resource] must be attached to a struct or inherent impl block",
         )
         .to_compile_error()
         .into(),
@@ -2076,7 +2080,7 @@ fn infer_auto_component_tokens(
                 }
                 Item::Struct(item_struct) => {
                     if has_attr_named(&item_struct.attrs, "wit_record")
-                        || has_attr_named(&item_struct.attrs, "shared_resource")
+                        || has_rc_resource_attr(&item_struct.attrs)
                     {
                         continue;
                     }
@@ -2122,7 +2126,7 @@ fn infer_auto_component_tokens(
                     if item_impl.trait_.is_some()
                         || has_attr_named(&item_impl.attrs, "guest_interface")
                         || has_attr_named(&item_impl.attrs, "guest_resource")
-                        || has_attr_named(&item_impl.attrs, "shared_resource")
+                        || has_rc_resource_attr(&item_impl.attrs)
                     {
                         continue;
                     }
@@ -2335,7 +2339,7 @@ pub fn component(item: TokenStream) -> TokenStream {
                     .expect("segment")
                     .ident
                     .clone();
-                shared_resource_wrapper_type(&ty_ident)
+                rc_resource_wrapper_type(&ty_ident)
                     .ok()
                     .flatten()
                     .unwrap_or(inferred_ty)
