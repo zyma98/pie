@@ -1,5 +1,0 @@
-package inferlib:js-engine-bindings;
-
-world importer {
-    import inferlib:js-engine/js-engine;
-}

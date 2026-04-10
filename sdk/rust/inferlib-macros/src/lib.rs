@@ -156,11 +156,23 @@ fn module_path_for_source(
 fn source_interface_for_file(file: &std::path::Path) -> std::result::Result<Option<String>, String> {
     let src_dir = manifest_dir()?.join("src");
     let module_path = module_path_for_source(&src_dir, file)?;
-    let Some(interface) = module_path.last() else {
-        return Ok(None);
-    };
     let exports = parse_world_exports()?;
-    Ok(exports.into_iter().find(|export| export == interface))
+    if let Some(interface) = module_path.last() {
+        return Ok(exports.into_iter().find(|export| export == interface));
+    }
+
+    if exports.len() == 1 {
+        return Ok(exports.into_iter().next());
+    }
+
+    Ok(None)
+}
+
+fn interface_has_dedicated_module(interface: &str) -> std::result::Result<bool, String> {
+    let src_dir = manifest_dir()?.join("src");
+    let interface_module = interface.replace('-', "_");
+    Ok(src_dir.join(format!("{interface_module}.rs")).exists()
+        || src_dir.join(interface_module).join("mod.rs").exists())
 }
 
 fn current_wit_resource_name_for_ident(
@@ -339,19 +351,28 @@ fn resolve_rc_resource_binding(
 }
 
 fn infer_component_bindings_from_wit() -> std::result::Result<Vec<InterfaceBindings>, String> {
+    let exports = parse_world_exports()?;
+    let single_export = exports.len() == 1;
     let mut interfaces = Vec::new();
-    for interface in parse_world_exports()? {
+    for interface in exports {
         let resources = parse_interface_resources(&interface)?;
         if resources.is_empty() {
             continue;
         }
 
         let interface_module = interface.replace('-', "_");
+        let type_prefix = if interface_has_dedicated_module(&interface)? {
+            format!("crate::{interface_module}")
+        } else if single_export {
+            "crate".to_string()
+        } else {
+            format!("crate::{interface_module}")
+        };
         let bindings = resources
             .into_iter()
             .map(|resource| {
                 let assoc_name = to_upper_camel(&resource);
-                let impl_name = format!("crate::{interface_module}::{assoc_name}");
+                let impl_name = format!("{type_prefix}::{assoc_name}");
                 let name = Ident::new(&assoc_name, Span::call_site());
                 let ty = syn::parse_str::<Type>(&impl_name)
                     .map_err(|e| format!("Failed to build inferred type `{impl_name}`: {e}"))?;
@@ -2305,9 +2326,17 @@ pub fn component(item: TokenStream) -> TokenStream {
     let auto_imports = match parse_world_exports() {
         Ok(exports) => exports
             .into_iter()
-            .map(|interface| {
-                let module_ident = to_rust_ident(&interface);
-                quote! { use crate::#module_ident::*; }
+            .filter_map(|interface| {
+                match interface_has_dedicated_module(&interface) {
+                    Ok(true) => {
+                        let module_ident = to_rust_ident(&interface);
+                        Some(quote! { use crate::#module_ident::*; })
+                    }
+                    Ok(false) => None,
+                    Err(message) => Some(
+                        Error::new(Span::call_site(), message).to_compile_error(),
+                    ),
+                }
             })
             .collect::<Vec<_>>(),
         Err(message) => {

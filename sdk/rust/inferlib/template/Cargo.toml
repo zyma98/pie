@@ -9,5 +9,6 @@ name = "inferlib_template"
 
 [dependencies]
 wit-bindgen = { workspace = true }
+inferlib-macros = { path = "../../inferlib-macros" }
 minijinja = { version = "2", default-features = false, features = ["builtins", "serde"] }
 serde_json = "1"

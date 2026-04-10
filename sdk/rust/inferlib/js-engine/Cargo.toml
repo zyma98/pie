@@ -9,4 +9,5 @@ name = "inferlib_js_engine"
 
 [dependencies]
 wit-bindgen = { workspace = true }
+inferlib-macros = { path = "../../inferlib-macros" }
 boa_engine = "0.20.0"
