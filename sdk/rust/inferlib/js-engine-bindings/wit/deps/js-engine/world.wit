@@ -1,0 +1,5 @@
+package inferlib:js-engine;
+
+world js-engine-provider {
+    export js-engine;
+}
