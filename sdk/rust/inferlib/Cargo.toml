@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["cacheback", "cacheback-bindings", "cacheback-py-bindings", "engine-bindings", "inference", "inference-bindings", "js-engine", "js-engine-bindings", "llguidance", "llguidance-bindings", "run-bindings", "schema", "schema-bindings", "template", "template-bindings"]
+members = ["cacheback", "cacheback-bindings", "cacheback-py-bindings", "engine-bindings", "inference", "inference-bindings", "inference-old", "inference-bindings-old", "js-engine", "js-engine-bindings", "llguidance", "llguidance-bindings", "run-bindings", "schema", "schema-bindings", "template", "template-bindings"]
 
 [workspace.dependencies]
 wit-bindgen = "0.48.0"

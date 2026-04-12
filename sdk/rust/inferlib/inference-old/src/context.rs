@@ -1,34 +1,21 @@
 use crate::brle::Brle;
 use crate::chat::ChatFormatter;
-use crate::models::{Model, Tokenizer};
-use crate::queues::{Distribution, KvPage, Queue};
-
-use crate::exports::inferlib::inference::models::ModelBorrow;
+use crate::exports::inferlib::inference::inference::{
+    GuestContext, GuestDecodeStepFuture, GuestFlushFuture, GuestGenerateFuture, SamplerConfig,
+    StopConfig,
+};
+use crate::forward::KvPage;
+use crate::models::{Model, ModelImpl, Tokenizer};
+use crate::queues::Queue;
 
 use inferlib_engine_bindings::inferlet::core::forward::ForwardPassResult as HostForwardPassResult;
 use inferlib_engine_bindings::inferlet::core::runtime::get_model;
-use inferlib_macros::rc_resource;
 
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::mem;
+use std::rc::Rc;
 use wstd::runtime::block_on;
-
-#[derive(Clone, Debug)]
-pub(crate) enum SamplerConfig {
-    Greedy,
-    Multinomial(f32),
-    TopP(f32, f32),
-    TopK(f32, u32),
-    MinP(f32, f32),
-    TopKTopP(f32, u32, f32),
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct StopConfig {
-    pub(crate) max_tokens: u32,
-    pub(crate) eos_sequences: Vec<Vec<u32>>,
-}
 
 fn greedy_argmax(ids: &[u32], probs: &[f32]) -> u32 {
     if ids.is_empty() {
@@ -43,7 +30,6 @@ fn greedy_argmax(ids: &[u32], probs: &[f32]) -> u32 {
     ids[max_idx]
 }
 
-#[rc_resource]
 pub(crate) struct Context {
     model: Model,
     queue: Queue,
@@ -68,11 +54,8 @@ pub(crate) struct Context {
     begin_of_sequence: bool,
 }
 
-#[rc_resource]
 impl Context {
-    pub(crate) fn new(wit_model: ModelBorrow<'_>) -> Self {
-        let model: &Model = wit_model.get();
-        let model = model.clone();
+    fn new(model: &Model) -> Self {
         let model_name = model.get_name();
         let host_model = get_model(&model_name).expect("Failed to get model");
         let queue = Queue::from_host_model(&host_model);
@@ -82,8 +65,8 @@ impl Context {
         let formatter =
             ChatFormatter::new(prompt_template).expect("Failed to create chat formatter");
 
-        Self {
-            model,
+        Context {
+            model: model.clone(),
             queue,
             tokenizer,
             formatter,
@@ -101,17 +84,14 @@ impl Context {
         }
     }
 
-    /// Creates a new context from previously exported and now imported KV pages.
+    /// Creates a new Context from previously exported and now imported KV pages.
     /// This is used to restore a context's state from a cache.
-    pub(crate) fn from_imported_state(
-        wit_model: ModelBorrow<'_>,
+    fn from_imported_state(
+        model: &Model,
         kv_page_ptrs: Vec<u32>,
         prefix_tokens: Vec<u32>,
-        kv_page_last_len: u32,
-    ) -> Context {
-        let model: &Model = wit_model.get();
-        let model = model.clone();
-        let kv_page_last_len = kv_page_last_len as usize;
+        kv_page_last_len: usize,
+    ) -> Self {
         let model_name = model.get_name();
         let host_model = get_model(&model_name).expect("Failed to get model");
         let queue = Queue::from_host_model(&host_model);
@@ -132,8 +112,8 @@ impl Context {
             .map(|ptr| KvPage::new(&queue, ptr))
             .collect();
 
-        Self {
-            model,
+        Context {
+            model: model.clone(),
             queue,
             tokenizer,
             formatter,
@@ -151,34 +131,30 @@ impl Context {
         }
     }
 
-    pub(crate) fn get_token_ids(&self) -> Vec<u32> {
-        self.token_ids.clone()
+    fn get_token_ids(&self) -> &[u32] {
+        &self.token_ids
     }
 
-    pub(crate) fn get_text(&self) -> String {
-        self.tokenizer.detokenize(self.token_ids.clone())
-    }
-
-    fn detokenize(&self, token_ids: Vec<u32>) -> String {
-        self.tokenizer.detokenize(token_ids)
+    fn get_text(&self) -> String {
+        self.tokenizer.detokenize(&self.token_ids)
     }
 
     /// Returns the unique IDs of the KV cache pages currently in use.
-    pub(crate) fn get_kv_page_ptrs(&self) -> Vec<u32> {
+    fn get_kv_page_ptrs(&self) -> Vec<u32> {
         self.kv_pages.iter().map(|p| p.ptr()).collect()
     }
 
     /// Returns the number of tokens stored in the last KV cache page.
-    pub(crate) fn get_kv_page_last_len(&self) -> u32 {
-        self.kv_page_last_len as u32
+    fn get_kv_page_last_len(&self) -> usize {
+        self.kv_page_last_len
     }
 
-    pub(crate) fn fill(&mut self, text: String) {
+    fn fill(&mut self, text: &str) {
         let new_token_ids = self.tokenizer.tokenize(text);
         self.fill_tokens(new_token_ids);
     }
 
-    pub(crate) fn fill_tokens(&mut self, new_token_ids: Vec<u32>) {
+    fn fill_tokens(&mut self, new_token_ids: Vec<u32>) {
         let n = new_token_ids.len();
         self.token_ids_pending.extend(new_token_ids);
 
@@ -190,7 +166,7 @@ impl Context {
         self.begin_of_sequence = false;
     }
 
-    pub(crate) fn fill_token(&mut self, new_token_id: u32) {
+    fn fill_token(&mut self, new_token_id: u32) {
         self.token_ids_pending.push(new_token_id);
         self.token_mask_current.append(false);
         self.token_mask_pending
@@ -198,38 +174,36 @@ impl Context {
         self.begin_of_sequence = false;
     }
 
-    pub(crate) fn fill_system(&mut self, text: String) {
+    fn fill_system(&mut self, text: &str) {
         self.formatter.add_system(text);
         self.flush_chat_messages(false);
     }
 
-    pub(crate) fn fill_user(&mut self, text: String) {
+    fn fill_user(&mut self, text: &str) {
         self.formatter.add_user(text);
         self.flush_chat_messages(true);
     }
 
-    pub(crate) fn fill_user_only(&mut self, text: String) {
+    fn fill_user_only(&mut self, text: &str) {
         self.formatter.add_user(text);
         self.flush_chat_messages(false);
     }
 
-    pub(crate) fn fill_assistant(&mut self, text: String) {
+    fn fill_assistant(&mut self, text: &str) {
         self.formatter.add_assistant(text);
         self.flush_chat_messages(false);
     }
 
-    pub(crate) fn mask_tokens(&mut self, indices: Vec<u32>, mask: bool) {
-        let indices = indices.into_iter().map(|i| i as usize).collect::<Vec<_>>();
-        self.token_mask_current.mask(&indices, mask)
+    fn mask_tokens(&mut self, indices: &[usize], mask: bool) {
+        self.token_mask_current.mask(indices, mask)
     }
 
-    pub(crate) fn mask_token_range(&mut self, start: u32, end: u32, mask: bool) {
-        self.token_mask_current
-            .mask_range(start as usize, end as usize, mask)
+    fn mask_token_range(&mut self, start: usize, end: usize, mask: bool) {
+        self.token_mask_current.mask_range(start, end, mask)
     }
 
-    pub(crate) fn mask_token(&mut self, index: u32, mask: bool) {
-        self.token_mask_current.mask(&[index as usize], mask)
+    fn mask_token(&mut self, index: usize, mask: bool) {
+        self.token_mask_current.mask(&[index], mask)
     }
 
     /// Drops fully masked KV pages to save memory, supporting non-contiguous
@@ -239,7 +213,7 @@ impl Context {
     /// to a page are all masked as `true`. If so, it removes the page (triggering
     /// deallocation via reference counting when the last reference is dropped) and
     /// removes the corresponding token ranges from the context's state.
-    pub(crate) fn drop_masked_kv_pages(&mut self) {
+    fn drop_masked_kv_pages(&mut self) {
         let num_committed_pages = self.token_ids.len() / self.kv_page_size;
 
         for i in (0..num_committed_pages).rev() {
@@ -278,15 +252,15 @@ impl Context {
         };
     }
 
-    pub(crate) fn set_adapter(&mut self, adapter_ptr: u32) {
+    fn set_adapter(&mut self, adapter_ptr: u32) {
         self.adapter_ptr = Some(adapter_ptr);
     }
 
-    pub(crate) fn remove_adapter(&mut self) {
+    fn remove_adapter(&mut self) {
         self.adapter_ptr = None;
     }
 
-    pub(crate) fn set_adapter_random_seed(&mut self, seed: i64) {
+    fn set_adapter_random_seed(&mut self, seed: i64) {
         self.adapter_random_seed = Some(seed);
     }
 
@@ -297,7 +271,7 @@ impl Context {
                 .render(add_generation_prompt, self.begin_of_sequence);
             self.begin_of_sequence = false;
             self.formatter.clear();
-            self.fill(p);
+            self.fill(&p);
         }
     }
 
@@ -362,7 +336,7 @@ impl Context {
     }
 
     /// Processes a batch of pending tokens to update the model's internal state.
-    pub(crate) fn flush(&mut self) {
+    fn flush(&mut self) {
         if self.token_ids_pending.is_empty() {
             return;
         }
@@ -387,11 +361,11 @@ impl Context {
 
         let kv_ptrs: Vec<u32> = self.kv_pages.iter().map(|p| p.ptr()).collect();
         let p = self.queue.create_forward_pass();
-        p.input_tokens(pending_token_ids.clone(), position_ids.clone());
-        p.kv_cache(kv_ptrs, self.kv_page_last_len as u32);
-        p.attention_mask(mask);
+        p.input_tokens(&pending_token_ids, &position_ids);
+        p.kv_cache(&kv_ptrs, self.kv_page_last_len as u32);
+        p.attention_mask(&mask);
 
-        let _ = p.execute();
+        let _ = block_on(async move { p.execute().await });
 
         self.token_ids.extend(pending_token_ids);
         self.position_ids.extend(&position_ids);
@@ -432,33 +406,33 @@ impl Context {
         }
 
         let kv_ptrs: Vec<u32> = self.kv_pages.iter().map(|p| p.ptr()).collect();
-        p.input_tokens(pending_token_ids.clone(), position_ids.clone());
-        p.kv_cache(kv_ptrs, self.kv_page_last_len as u32);
-        p.attention_mask(mask);
+        p.input_tokens(&pending_token_ids, &position_ids);
+        p.kv_cache(&kv_ptrs, self.kv_page_last_len as u32);
+        p.attention_mask(&mask);
 
         let output_idx = pending_token_ids.len() as u32 - 1;
         match sampler {
             SamplerConfig::Greedy => {
-                p.output_tokens(vec![output_idx], 0.0);
+                p.output_tokens(&[output_idx], 0.0);
             }
             SamplerConfig::Multinomial(temperature) => {
-                p.output_tokens(vec![output_idx], *temperature);
+                p.output_tokens(&[output_idx], *temperature);
             }
-            SamplerConfig::TopP(temperature, top_p) => {
-                p.output_tokens_top_p(vec![output_idx], *temperature, *top_p);
+            SamplerConfig::TopP((temperature, top_p)) => {
+                p.output_tokens_top_p(&[output_idx], *temperature, *top_p);
             }
-            SamplerConfig::TopK(temperature, top_k) => {
-                p.output_tokens_top_k(vec![output_idx], *temperature, *top_k);
+            SamplerConfig::TopK((temperature, top_k)) => {
+                p.output_tokens_top_k(&[output_idx], *temperature, *top_k);
             }
-            SamplerConfig::MinP(temperature, min_p) => {
-                p.output_tokens_min_p(vec![output_idx], *temperature, *min_p);
+            SamplerConfig::MinP((temperature, min_p)) => {
+                p.output_tokens_min_p(&[output_idx], *temperature, *min_p);
             }
-            SamplerConfig::TopKTopP(temperature, top_k, top_p) => {
-                p.output_tokens_top_k_top_p(vec![output_idx], *temperature, *top_k, *top_p);
+            SamplerConfig::TopKTopP((temperature, top_k, top_p)) => {
+                p.output_tokens_top_k_top_p(&[output_idx], *temperature, *top_k, *top_p);
             }
         }
 
-        let host_result = p.submit_host().expect("Forward pass returned no result");
+        let host_result = p.submit().expect("Forward pass returned no result");
         (host_result, pending_token_ids, position_ids)
     }
 
@@ -474,8 +448,8 @@ impl Context {
     /// provided sampler to choose the next token, and returns the sampled token ID.
     /// The pending tokens are consumed and moved to the main `token_ids` history,
     /// and the KV cache is updated accordingly.
-    pub(crate) fn decode_step(&mut self, sampler: SamplerConfig) -> u32 {
-        let (host_result, pending_token_ids, position_ids) = self.submit_decode_step(&sampler);
+    fn decode_step(&mut self, sampler: &SamplerConfig) -> u32 {
+        let (host_result, pending_token_ids, position_ids) = self.submit_decode_step(sampler);
 
         let pollable = host_result.pollable();
         block_on(async {
@@ -497,11 +471,7 @@ impl Context {
     /// full probability distribution over next tokens instead of a sampled token.
     /// This enables custom sampling logic (e.g. grammar-constrained decoding,
     /// watermarking) where the caller picks the token from the distribution.
-    pub(crate) fn decode_step_dist(
-        &mut self,
-        temperature: f32,
-        top_k: Option<u32>,
-    ) -> Distribution {
+    fn decode_step_dist(&mut self, temperature: f32, top_k: Option<u32>) -> (Vec<u32>, Vec<f32>) {
         assert!(
             !self.token_ids_pending.is_empty(),
             "Must have at least one seed token"
@@ -530,31 +500,31 @@ impl Context {
         }
 
         let kv_ptrs: Vec<u32> = self.kv_pages.iter().map(|p| p.ptr()).collect();
-        p.input_tokens(pending_token_ids.clone(), position_ids.clone());
-        p.kv_cache(kv_ptrs, self.kv_page_last_len as u32);
-        p.attention_mask(mask);
+        p.input_tokens(&pending_token_ids, &position_ids);
+        p.kv_cache(&kv_ptrs, self.kv_page_last_len as u32);
+        p.attention_mask(&mask);
 
         let output_idx = pending_token_ids.len() as u32 - 1;
-        p.output_distributions(vec![output_idx], temperature, top_k);
+        p.output_distributions(&[output_idx], temperature, top_k);
 
-        let res = p.execute();
+        let res = block_on(async move { p.execute().await });
         let dist = res.distributions.unwrap().into_iter().next().unwrap();
 
         self.token_ids.extend(pending_token_ids);
         self.position_ids.extend(position_ids);
 
-        dist
+        (dist.ids, dist.probs)
     }
 
     /// Generates text autoregressively until a stop condition is met.
     ///
     /// Drives the text generation loop: in each iteration, calls `decode_step()` to
     /// sample the next token, adds it to the context, and checks the stop condition.
-    pub(crate) fn generate(&mut self, sampler: SamplerConfig, stop_config: StopConfig) -> String {
+    fn generate(&mut self, sampler: &SamplerConfig, stop_config: &StopConfig) -> String {
         let mut generated_token_ids = Vec::new();
 
         loop {
-            let next_token_id = self.decode_step(sampler.clone());
+            let next_token_id = self.decode_step(sampler);
 
             self.fill_token(next_token_id);
 
@@ -571,7 +541,7 @@ impl Context {
             }
         }
 
-        self.tokenizer.detokenize(generated_token_ids.clone())
+        self.tokenizer.detokenize(&generated_token_ids)
     }
 
     /// Generates text using beam search decoding until a stop condition is met.
@@ -580,8 +550,7 @@ impl Context {
     /// it maintains `beam_size` candidate sequences, expands each with the top next
     /// tokens, scores them by cumulative log probability, and prunes to the top
     /// `beam_size` candidates. Upon completion, adopts the state of the winning beam.
-    pub(crate) fn generate_with_beam(&mut self, stop_config: StopConfig, beam_size: u32) -> String {
-        let beam_size = beam_size as usize;
+    fn generate_with_beam(&mut self, stop_config: &StopConfig, beam_size: usize) -> String {
         let mut beams = Vec::new();
         beams.push((self.fork(), vec![], 0.0f32));
 
@@ -590,7 +559,7 @@ impl Context {
                 g.len() >= stop_config.max_tokens as usize
                     || stop_config.eos_sequences.iter().any(|seq| g.ends_with(seq))
             }) {
-                let result = self.tokenizer.detokenize(generated_tokens.clone());
+                let result = self.tokenizer.detokenize(generated_tokens);
 
                 let winning_beam_idx = beams
                     .iter()
@@ -616,9 +585,7 @@ impl Context {
             }
 
             let mut next_beams = Vec::new();
-            for ((beam, generated, score), dist) in beams.into_iter().zip(all_dists) {
-                let ids = dist.ids;
-                let probs = dist.probs;
+            for ((beam, generated, score), (ids, probs)) in beams.into_iter().zip(all_dists) {
                 for i in 0..beam_size.min(ids.len()) {
                     let mut next_beam = beam.fork();
                     next_beam.fill_token(ids[i]);
@@ -645,11 +612,7 @@ impl Context {
     ///
     /// Ported from the single-iteration core of `generate_with_drafter` in
     /// `inferlet/src/context.rs`.
-    pub(crate) fn verify_draft(
-        &mut self,
-        draft_tokens: Vec<u32>,
-        draft_pos_ids: Vec<u32>,
-    ) -> Vec<u32> {
+    fn verify_draft(&mut self, draft_tokens: &[u32], draft_pos_ids: &[u32]) -> Vec<u32> {
         assert!(
             !self.token_ids_pending.is_empty(),
             "Must have at least one seed token"
@@ -658,7 +621,7 @@ impl Context {
         let token_ids_pending = mem::take(&mut self.token_ids_pending);
         self.token_mask_pending.clear();
 
-        let batch_tokens = [token_ids_pending.as_slice(), draft_tokens.as_slice()].concat();
+        let batch_tokens = [token_ids_pending.as_slice(), draft_tokens].concat();
 
         let pos_offset = self.position_ids.last().map(|&p| p + 1).unwrap_or(0);
         let pending_len = token_ids_pending.len() as u32;
@@ -737,12 +700,12 @@ impl Context {
         }
 
         let kv_ptrs: Vec<u32> = self.kv_pages.iter().map(|p| p.ptr()).collect();
-        p.input_tokens(batch_tokens.clone(), batch_positions.clone());
-        p.kv_cache(kv_ptrs, self.kv_page_last_len as u32);
-        p.attention_mask(batch_masks);
-        p.output_distributions(out_range.map(|x| x as u32).collect::<Vec<_>>(), 0.0, None);
+        p.input_tokens(&batch_tokens, &batch_positions);
+        p.kv_cache(&kv_ptrs, self.kv_page_last_len as u32);
+        p.attention_mask(&batch_masks);
+        p.output_distributions(&out_range.map(|x| x as u32).collect::<Vec<_>>(), 0.0, None);
 
-        let res = p.execute();
+        let res = block_on(async move { p.execute().await });
         let output_distributions = res.distributions.unwrap();
 
         let accepted_tokens = {
@@ -813,7 +776,7 @@ impl Context {
     /// last context holding a reference is dropped. If the last KV-cache page is not
     /// full, its tokens are moved to the `token_ids_pending` buffer of the new
     /// context to be recomputed, ensuring state isolation.
-    pub(crate) fn fork(&self) -> Context {
+    fn fork(&self) -> Self {
         let (
             new_tokens,
             new_pending,
@@ -882,7 +845,7 @@ impl Context {
         let formatter =
             ChatFormatter::new(prompt_template).expect("Failed to create chat formatter");
 
-        Self {
+        Context {
             model: self.model.clone(),
             queue,
             tokenizer,
@@ -900,88 +863,249 @@ impl Context {
             begin_of_sequence: self.begin_of_sequence,
         }
     }
+}
 
-    fn submit_flush(&mut self) -> Option<HostForwardPassResult> {
-        if self.token_ids_pending.is_empty() {
+// No custom Drop needed: KvPage handles deallocation via Rc reference counting.
+// When a Context is dropped, its Vec<KvPage> is dropped, which drops each KvPage,
+// and each KvPage only deallocates the underlying page when the last reference is gone.
+
+pub(crate) struct ContextImpl {
+    inner: Rc<RefCell<Context>>,
+}
+
+impl GuestContext for ContextImpl {
+    fn new(wit_model: crate::exports::inferlib::inference::models::ModelBorrow<'_>) -> Self {
+        let model_impl: &ModelImpl = wit_model.get();
+        let model = model_impl.inner.borrow().clone();
+        let inner = Context::new(&model);
+        ContextImpl {
+            inner: Rc::new(RefCell::new(inner)),
+        }
+    }
+
+    fn from_imported_state(
+        wit_model: crate::exports::inferlib::inference::models::ModelBorrow<'_>,
+        kv_page_ptrs: Vec<u32>,
+        prefix_tokens: Vec<u32>,
+        kv_page_last_len: u32,
+    ) -> crate::exports::inferlib::inference::inference::Context {
+        let model_impl: &ModelImpl = wit_model.get();
+        let model = model_impl.inner.borrow().clone();
+        let inner = Context::from_imported_state(
+            &model,
+            kv_page_ptrs,
+            prefix_tokens,
+            kv_page_last_len as usize,
+        );
+        crate::exports::inferlib::inference::inference::Context::new(ContextImpl {
+            inner: Rc::new(RefCell::new(inner)),
+        })
+    }
+
+    fn fill(&self, text: String) {
+        self.inner.borrow_mut().fill(&text);
+    }
+
+    fn fill_tokens(&self, token_ids: Vec<u32>) {
+        self.inner.borrow_mut().fill_tokens(token_ids);
+    }
+
+    fn fill_token(&self, token_id: u32) {
+        self.inner.borrow_mut().fill_token(token_id);
+    }
+
+    fn fill_system(&self, text: String) {
+        self.inner.borrow_mut().fill_system(&text);
+    }
+
+    fn fill_user(&self, text: String) {
+        self.inner.borrow_mut().fill_user(&text);
+    }
+
+    fn fill_user_only(&self, text: String) {
+        self.inner.borrow_mut().fill_user_only(&text);
+    }
+
+    fn fill_assistant(&self, text: String) {
+        self.inner.borrow_mut().fill_assistant(&text);
+    }
+
+    fn mask_tokens(&self, indices: Vec<u32>, mask: bool) {
+        let indices: Vec<usize> = indices.into_iter().map(|i| i as usize).collect();
+        self.inner.borrow_mut().mask_tokens(&indices, mask);
+    }
+
+    fn mask_token_range(&self, start: u32, end: u32, mask: bool) {
+        self.inner
+            .borrow_mut()
+            .mask_token_range(start as usize, end as usize, mask);
+    }
+
+    fn mask_token(&self, index: u32, mask: bool) {
+        self.inner.borrow_mut().mask_token(index as usize, mask);
+    }
+
+    fn drop_masked_kv_pages(&self) {
+        self.inner.borrow_mut().drop_masked_kv_pages();
+    }
+
+    fn set_adapter(&self, adapter_ptr: u32) {
+        self.inner.borrow_mut().set_adapter(adapter_ptr);
+    }
+
+    fn remove_adapter(&self) {
+        self.inner.borrow_mut().remove_adapter();
+    }
+
+    fn set_adapter_random_seed(&self, seed: i64) {
+        self.inner.borrow_mut().set_adapter_random_seed(seed);
+    }
+
+    fn flush(&self) {
+        self.inner.borrow_mut().flush();
+    }
+
+    fn decode_step(&self, sampler_config: SamplerConfig) -> u32 {
+        self.inner.borrow_mut().decode_step(&sampler_config)
+    }
+
+    fn decode_step_dist(
+        &self,
+        temperature: f32,
+        top_k: Option<u32>,
+    ) -> crate::exports::inferlib::inference::queues::Distribution {
+        let (ids, probs) = self.inner.borrow_mut().decode_step_dist(temperature, top_k);
+        crate::exports::inferlib::inference::queues::Distribution { ids, probs }
+    }
+
+    fn generate(&self, sampler_config: SamplerConfig, stop_config: StopConfig) -> String {
+        self.inner
+            .borrow_mut()
+            .generate(&sampler_config, &stop_config)
+    }
+
+    fn generate_with_beam(&self, stop_config: StopConfig, beam_size: u32) -> String {
+        self.inner
+            .borrow_mut()
+            .generate_with_beam(&stop_config, beam_size as usize)
+    }
+
+    fn verify_draft(&self, draft_tokens: Vec<u32>, draft_pos_ids: Vec<u32>) -> Vec<u32> {
+        self.inner
+            .borrow_mut()
+            .verify_draft(&draft_tokens, &draft_pos_ids)
+    }
+
+    fn fork(&self) -> crate::exports::inferlib::inference::inference::Context {
+        let forked = self.inner.borrow().fork();
+        crate::exports::inferlib::inference::inference::Context::new(ContextImpl {
+            inner: Rc::new(RefCell::new(forked)),
+        })
+    }
+
+    fn get_text(&self) -> String {
+        self.inner.borrow().get_text()
+    }
+
+    fn get_token_ids(&self) -> Vec<u32> {
+        self.inner.borrow().get_token_ids().to_vec()
+    }
+
+    fn get_kv_page_ptrs(&self) -> Vec<u32> {
+        self.inner.borrow().get_kv_page_ptrs()
+    }
+
+    fn get_kv_page_last_len(&self) -> u32 {
+        self.inner.borrow().get_kv_page_last_len() as u32
+    }
+
+    fn decode_step_async(
+        &self,
+        sampler: SamplerConfig,
+    ) -> crate::exports::inferlib::inference::inference::DecodeStepFuture {
+        let (host_result, pending_token_ids, position_ids) =
+            self.inner.borrow_mut().submit_decode_step(&sampler);
+
+        crate::exports::inferlib::inference::inference::DecodeStepFuture::new(
+            DecodeStepFutureImpl {
+                context: Rc::clone(&self.inner),
+                host_result: RefCell::new(Some(host_result)),
+                pending_token_ids,
+                pending_position_ids: position_ids,
+            },
+        )
+    }
+
+    fn flush_async(&self) -> Option<crate::exports::inferlib::inference::inference::FlushFuture> {
+        let mut ctx = self.inner.borrow_mut();
+
+        if ctx.token_ids_pending.is_empty() {
             return None;
         }
 
-        let process_count = self.token_ids_pending.len();
+        let process_count = ctx.token_ids_pending.len();
 
-        let pending_token_ids = self
+        let pending_token_ids = ctx
             .token_ids_pending
             .drain(..process_count)
             .collect::<Vec<u32>>();
 
-        let mask = self
+        let mask = ctx
             .token_mask_pending
             .drain(..process_count)
             .map(|b| b.get_buffer())
             .collect::<Vec<Vec<u32>>>();
 
-        let last_pos = self.position_ids.last().map(|&p| p + 1).unwrap_or(0);
+        let last_pos = ctx.position_ids.last().map(|&p| p + 1).unwrap_or(0);
         let position_ids =
             (last_pos..(last_pos + pending_token_ids.len() as u32)).collect::<Vec<u32>>();
 
-        self.grow_kv_pages(pending_token_ids.len());
+        ctx.grow_kv_pages(pending_token_ids.len());
 
-        let kv_ptrs: Vec<u32> = self.kv_pages.iter().map(|p| p.ptr()).collect();
-        let p = self.queue.create_forward_pass();
-        p.input_tokens(pending_token_ids.clone(), position_ids.clone());
-        p.kv_cache(kv_ptrs, self.kv_page_last_len as u32);
-        p.attention_mask(mask);
+        let kv_ptrs: Vec<u32> = ctx.kv_pages.iter().map(|p| p.ptr()).collect();
+        let p = ctx.queue.create_forward_pass();
+        p.input_tokens(&pending_token_ids, &position_ids);
+        p.kv_cache(&kv_ptrs, ctx.kv_page_last_len as u32);
+        p.attention_mask(&mask);
 
-        let host_result = p.submit_host();
+        let host_result = p.submit();
 
-        self.token_ids.extend(&pending_token_ids);
-        self.position_ids.extend(&position_ids);
+        ctx.token_ids.extend(&pending_token_ids);
+        ctx.position_ids.extend(&position_ids);
 
-        host_result
+        Some(
+            crate::exports::inferlib::inference::inference::FlushFuture::new(FlushFutureImpl {
+                host_result: RefCell::new(host_result),
+            }),
+        )
     }
 
-    pub(crate) fn decode_step_async(&self, sampler: SamplerConfig) -> DecodeStepFuture {
-        let (host_result, pending_token_ids, position_ids) = self.submit_decode_step(&sampler);
-
-        DecodeStepFuture {
-            context: self.clone(),
-            host_result: RefCell::new(Some(host_result)),
-            pending_token_ids,
-            pending_position_ids: position_ids,
-        }
-    }
-
-    pub(crate) fn flush_async(&self) -> Option<FlushFuture> {
-        self.submit_flush().map(|host_result| FlushFuture {
-            host_result: RefCell::new(Some(host_result)),
-        })
-    }
-
-    pub(crate) fn generate_async(
+    fn generate_async(
         &self,
         sampler: SamplerConfig,
         stop_config: StopConfig,
-    ) -> GenerateFuture {
-        GenerateFuture {
-            context: self.clone(),
+    ) -> crate::exports::inferlib::inference::inference::GenerateFuture {
+        crate::exports::inferlib::inference::inference::GenerateFuture::new(GenerateFutureImpl {
+            context: Rc::clone(&self.inner),
             sampler,
             stop_config,
             state: RefCell::new(GenerateFutureState {
                 generated_token_ids: Vec::new(),
                 phase: GeneratePhase::Ready,
             }),
-        }
+        })
     }
 }
 
-pub(crate) struct DecodeStepFuture {
-    context: Context,
+pub(crate) struct DecodeStepFutureImpl {
+    context: Rc<RefCell<Context>>,
     host_result: RefCell<Option<HostForwardPassResult>>,
     pending_token_ids: Vec<u32>,
     pending_position_ids: Vec<u32>,
 }
 
-impl DecodeStepFuture {
-    pub(crate) fn pollable(&self) -> wasip2::io::poll::Pollable {
+impl GuestDecodeStepFuture for DecodeStepFutureImpl {
+    fn pollable(&self) -> wasip2::io::poll::Pollable {
         self.host_result
             .borrow()
             .as_ref()
@@ -989,25 +1113,25 @@ impl DecodeStepFuture {
             .pollable()
     }
 
-    pub(crate) fn get(&self) -> Option<u32> {
+    fn get(&self) -> Option<u32> {
         let host_result = self.host_result.borrow();
         let result = host_result.as_ref()?;
         let tokens = result.get_tokens()?;
         let sampled = tokens.into_iter().next()?;
 
-        self.context
-            .commit_decode_step(&self.pending_token_ids, &self.pending_position_ids);
+        let mut ctx = self.context.borrow_mut();
+        ctx.commit_decode_step(&self.pending_token_ids, &self.pending_position_ids);
 
         Some(sampled)
     }
 }
 
-pub(crate) struct FlushFuture {
+pub(crate) struct FlushFutureImpl {
     host_result: RefCell<Option<HostForwardPassResult>>,
 }
 
-impl FlushFuture {
-    pub(crate) fn pollable(&self) -> wasip2::io::poll::Pollable {
+impl GuestFlushFuture for FlushFutureImpl {
+    fn pollable(&self) -> wasip2::io::poll::Pollable {
         self.host_result
             .borrow()
             .as_ref()
@@ -1015,7 +1139,7 @@ impl FlushFuture {
             .pollable()
     }
 
-    pub(crate) fn is_ready(&self) -> bool {
+    fn is_ready(&self) -> bool {
         self.host_result
             .borrow()
             .as_ref()
@@ -1039,20 +1163,20 @@ struct GenerateFutureState {
     phase: GeneratePhase,
 }
 
-pub(crate) struct GenerateFuture {
-    context: Context,
+pub(crate) struct GenerateFutureImpl {
+    context: Rc<RefCell<Context>>,
     sampler: SamplerConfig,
     stop_config: StopConfig,
     state: RefCell<GenerateFutureState>,
 }
 
-impl GenerateFuture {
-    pub(crate) fn pollable(&self) -> wasip2::io::poll::Pollable {
+impl GuestGenerateFuture for GenerateFutureImpl {
+    fn pollable(&self) -> wasip2::io::poll::Pollable {
         let mut state = self.state.borrow_mut();
         match &state.phase {
             GeneratePhase::Ready => {
                 let (host_result, pending_token_ids, pending_position_ids) =
-                    self.context.submit_decode_step(&self.sampler);
+                    self.context.borrow_mut().submit_decode_step(&self.sampler);
                 let pollable = host_result.pollable();
                 state.phase = GeneratePhase::Pending {
                     host_result,
@@ -1068,7 +1192,7 @@ impl GenerateFuture {
         }
     }
 
-    pub(crate) fn get(&self) -> Option<String> {
+    fn get(&self) -> Option<String> {
         let mut state = self.state.borrow_mut();
 
         let (host_result, pending_token_ids, pending_position_ids) =
@@ -1089,9 +1213,11 @@ impl GenerateFuture {
             .and_then(|t| t.into_iter().next())
             .expect("Decode step produced no token");
 
-        self.context
-            .commit_decode_step(&pending_token_ids, &pending_position_ids);
-        self.context.fill_token(token);
+        {
+            let mut ctx = self.context.borrow_mut();
+            ctx.commit_decode_step(&pending_token_ids, &pending_position_ids);
+            ctx.fill_token(token);
+        }
 
         state.generated_token_ids.push(token);
 
@@ -1103,7 +1229,8 @@ impl GenerateFuture {
                 .any(|seq| state.generated_token_ids.ends_with(seq));
 
         if should_stop {
-            let result = self.context.detokenize(state.generated_token_ids.clone());
+            let ctx = self.context.borrow();
+            let result = ctx.tokenizer.detokenize(&state.generated_token_ids);
             state.phase = GeneratePhase::Done;
             Some(result)
         } else {

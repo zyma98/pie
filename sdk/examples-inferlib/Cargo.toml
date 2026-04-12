@@ -15,6 +15,7 @@ members = [
     "knowledge-graph",
     "output-validation",
     "parallel-generation",
+    "parallel-generation-old",
     "prefix-caching",
     "prefix-tree",
     "recursion-of-thought",
