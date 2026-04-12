@@ -75,6 +75,13 @@ def build(
             help="Build using inferlib mode; value is a directory containing bindings WIT. Can be specified multiple times.",
         ),
     ] = None,
+    bindings: Annotated[
+        Optional[list[Path]],
+        typer.Option(
+            "--bindings",
+            help="Directory containing generated Python binding packages such as inference_bindings. Can be specified multiple times.",
+        ),
+    ] = None,
     lib: Annotated[
         bool,
         typer.Option(
@@ -101,6 +108,7 @@ def build(
             output=expand_path(output),
             debug=debug,
             inferlib=inferlib,
+            bindings=bindings,
             lib=lib,
             world=world,
             extra=extra,
