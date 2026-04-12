@@ -1,0 +1,381 @@
+#!/usr/bin/env python3
+"""
+Generate Python bindings packages for inferlib Rust crates.
+
+This script scans `sdk/rust/inferlib` for Rust crates with a `src/` directory,
+skipping `*-py` and `*-bindings` crates. For each remaining crate, it uses the
+crate's sibling `*-bindings/wit` directory as the source of truth, runs
+`componentize-py bindings`, and writes a thin Python wrapper package like
+`inference_bindings` or `js_engine_bindings`.
+
+Example:
+    sdk/rust/inferlib-rust-to-bindings --output /tmp/inferlib-py-bindings
+"""
+
+from __future__ import annotations
+
+import argparse
+import re
+import shutil
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Iterable
+
+
+IDENT_RE = r"[A-Za-z0-9_-]+"
+
+
+@dataclass(frozen=True)
+class ImportedInterface:
+    package_id: str
+    package_dir: str
+    interface: str
+    module: str
+    wit_file: Path
+
+
+@dataclass
+class InterfaceExports:
+    module: str
+    alias: str
+    resources: list[str] = field(default_factory=list)
+    records: list[str] = field(default_factory=list)
+    variants: list[str] = field(default_factory=list)
+    variant_cases: list[str] = field(default_factory=list)
+    enums: list[str] = field(default_factory=list)
+    flags: list[str] = field(default_factory=list)
+    functions: list[str] = field(default_factory=list)
+
+    def public_names(self) -> list[str]:
+        return (
+            self.resources
+            + self.records
+            + self.variants
+            + self.variant_cases
+            + self.enums
+            + self.flags
+            + self.functions
+        )
+
+
+def info(message: str) -> None:
+    print(f"[info] {message}")
+
+
+def warn(message: str) -> None:
+    print(f"[warn] {message}", file=sys.stderr)
+
+
+def error(message: str) -> None:
+    print(f"[error] {message}", file=sys.stderr)
+
+
+def append_unique(items: list[str], value: str) -> None:
+    if value not in items:
+        items.append(value)
+
+
+def to_snake(name: str) -> str:
+    return name.replace("-", "_")
+
+
+def to_camel(name: str) -> str:
+    parts = re.split(r"[-_]", name)
+    return "".join(part[:1].upper() + part[1:] for part in parts if part)
+
+
+def strip_comment(line: str) -> str:
+    if "//" in line:
+        line = line.split("//", 1)[0]
+    return line.strip()
+
+
+def discover_crates(inferlib_root: Path) -> list[Path]:
+    crates: list[Path] = []
+    for child in sorted(inferlib_root.iterdir()):
+        if not child.is_dir():
+            continue
+        name = child.name
+        if name == "target" or name.endswith("-py") or name.endswith("-bindings"):
+            continue
+        if (child / "src").is_dir():
+            crates.append(child)
+    return crates
+
+
+def parse_world_name(world_path: Path) -> str:
+    for raw_line in world_path.read_text(encoding="utf-8").splitlines():
+        line = strip_comment(raw_line)
+        match = re.match(rf"world\s+({IDENT_RE})\s*\{{", line)
+        if match:
+            return match.group(1)
+    raise ValueError(f"missing `world ... {{` in {world_path}")
+
+
+def parse_world_imports(wit_dir: Path) -> list[ImportedInterface]:
+    world_path = wit_dir / "world.wit"
+    imports: list[ImportedInterface] = []
+
+    for raw_line in world_path.read_text(encoding="utf-8").splitlines():
+        line = strip_comment(raw_line)
+        if not line.startswith("import "):
+            continue
+        target = line[len("import ") :].rstrip(";").strip()
+        if "/" not in target:
+            continue
+
+        package_id, interface_part = target.rsplit("/", 1)
+        interface = interface_part.split("@", 1)[0]
+        package_dir = package_id.split(":", 1)[1].split("@", 1)[0]
+        module = to_snake(interface)
+        wit_file = wit_dir / "deps" / package_dir / f"{interface}.wit"
+
+        imports.append(
+            ImportedInterface(
+                package_id=package_id,
+                package_dir=package_dir,
+                interface=interface,
+                module=module,
+                wit_file=wit_file,
+            )
+        )
+
+    return imports
+
+
+def parse_interface_exports(imported: ImportedInterface) -> InterfaceExports:
+    if not imported.wit_file.exists():
+        raise FileNotFoundError(
+            f"missing interface WIT for {imported.package_id}/{imported.interface}: "
+            f"{imported.wit_file}"
+        )
+
+    exports = InterfaceExports(module=imported.module, alias=f"_{imported.module}")
+    lines = imported.wit_file.read_text(encoding="utf-8").splitlines()
+
+    in_interface = False
+    depth = 0
+    current_variant: str | None = None
+
+    for raw_line in lines:
+        line = strip_comment(raw_line)
+        if not line:
+            continue
+
+        if not in_interface:
+            match = re.match(rf"interface\s+({IDENT_RE})\s*\{{", line)
+            if match:
+                in_interface = True
+                depth = 1
+            continue
+
+        if current_variant is not None and depth == 2:
+            case_match = re.match(rf"({IDENT_RE})\b", line)
+            if case_match and case_match.group(1) != "constructor":
+                append_unique(
+                    exports.variant_cases,
+                    f"{current_variant}_{to_camel(case_match.group(1))}",
+                )
+
+        if depth == 1:
+            match = re.match(rf"resource\s+({IDENT_RE})\s*\{{", line)
+            if match:
+                append_unique(exports.resources, to_camel(match.group(1)))
+            match = re.match(rf"record\s+({IDENT_RE})\s*\{{", line)
+            if match:
+                append_unique(exports.records, to_camel(match.group(1)))
+            match = re.match(rf"variant\s+({IDENT_RE})\s*\{{", line)
+            if match:
+                current_variant = to_camel(match.group(1))
+                append_unique(exports.variants, current_variant)
+            match = re.match(rf"enum\s+({IDENT_RE})\s*\{{", line)
+            if match:
+                append_unique(exports.enums, to_camel(match.group(1)))
+            match = re.match(rf"flags\s+({IDENT_RE})\s*\{{", line)
+            if match:
+                append_unique(exports.flags, to_camel(match.group(1)))
+            match = re.match(rf"({IDENT_RE})\s*:\s*func\s*\(", line)
+            if match:
+                append_unique(exports.functions, to_snake(match.group(1)))
+
+        depth += line.count("{") - line.count("}")
+
+        if current_variant is not None and depth < 2:
+            current_variant = None
+        if in_interface and depth <= 0:
+            break
+
+    return exports
+
+
+def render_wrapper(crate_name: str, exports: list[InterfaceExports]) -> str:
+    package_name = f"{crate_name.replace('-', '_')}_bindings"
+    lines: list[str] = [
+        '"""',
+        f"{package_name} - Thin Python wrapper over inferlib-{crate_name} WIT bindings.",
+        "",
+        "Generated by sdk/rust/inferlib-rust-to-bindings.",
+        '"""',
+        "",
+    ]
+
+    for interface_exports in exports:
+        lines.append(
+            f"from wit_world.imports import {interface_exports.module} as {interface_exports.alias}"
+        )
+
+    lines.append("")
+
+    exported_names: list[str] = []
+    for interface_exports in exports:
+        names = interface_exports.public_names()
+        if not names:
+            continue
+        for name in names:
+            lines.append(f"{name} = {interface_exports.alias}.{name}")
+            append_unique(exported_names, name)
+        lines.append("")
+
+    if lines[-1] == "":
+        lines.pop()
+
+    if exported_names:
+        lines.extend(
+            [
+                "",
+                "__all__ = [",
+                *[f'    "{name}",' for name in exported_names],
+                "]",
+            ]
+        )
+
+    lines.append("")
+    return "\n".join(lines)
+
+
+def run_componentize_py(componentize_py: str, wit_dir: Path, world: str, package_dir: Path) -> None:
+    cmd = [
+        componentize_py,
+        "-d",
+        str(wit_dir),
+        "-w",
+        world,
+        "bindings",
+        str(package_dir),
+    ]
+    info(f"running: {' '.join(cmd)}")
+    result = subprocess.run(cmd, text=True)
+    if result.returncode != 0:
+        raise subprocess.CalledProcessError(result.returncode, cmd)
+
+
+def generate_package(
+    componentize_py: str,
+    crate_dir: Path,
+    inferlib_root: Path,
+    output_root: Path,
+) -> bool:
+    crate_name = crate_dir.name
+    bindings_wit_dir = inferlib_root / f"{crate_name}-bindings" / "wit"
+    if not bindings_wit_dir.is_dir():
+        warn(f"skipping {crate_name}: missing bindings WIT at {bindings_wit_dir}")
+        return False
+
+    world_path = bindings_wit_dir / "world.wit"
+    if not world_path.exists():
+        warn(f"skipping {crate_name}: missing {world_path}")
+        return False
+
+    world = parse_world_name(world_path)
+    imported_interfaces = parse_world_imports(bindings_wit_dir)
+    exports = [parse_interface_exports(imported) for imported in imported_interfaces]
+
+    package_dir = output_root / f"{crate_name.replace('-', '_')}_bindings"
+    if package_dir.exists():
+        shutil.rmtree(package_dir)
+    package_dir.parent.mkdir(parents=True, exist_ok=True)
+
+    info(f"generating Python bindings for {crate_name} -> {package_dir}")
+    run_componentize_py(componentize_py, bindings_wit_dir, world, package_dir)
+
+    init_path = package_dir / "__init__.py"
+    init_path.write_text(render_wrapper(crate_name, exports), encoding="utf-8")
+    info(f"wrote wrapper {init_path}")
+    return True
+
+
+def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
+    script_path = Path(__file__).resolve()
+    default_inferlib_root = script_path.parent / "inferlib"
+
+    parser = argparse.ArgumentParser(
+        description="Generate Python bindings packages for inferlib Rust crates."
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        required=True,
+        help="Output root directory for generated Python packages.",
+    )
+    parser.add_argument(
+        "--inferlib-root",
+        default=str(default_inferlib_root),
+        help=f"Inferlib root directory (default: {default_inferlib_root}).",
+    )
+    parser.add_argument(
+        "--crate",
+        action="append",
+        dest="crates",
+        help="Only generate bindings for the named crate. Can be provided multiple times.",
+    )
+    return parser.parse_args(list(argv) if argv is not None else None)
+
+
+def main(argv: Iterable[str] | None = None) -> int:
+    args = parse_args(argv)
+    inferlib_root = Path(args.inferlib_root).resolve()
+    output_root = Path(args.output).resolve()
+
+    if not inferlib_root.is_dir():
+        error(f"inferlib root does not exist: {inferlib_root}")
+        return 1
+
+    componentize_py = shutil.which("componentize-py")
+    if componentize_py is None:
+        error("componentize-py not found. Install with: pip install componentize-py")
+        return 1
+
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    requested = set(args.crates or [])
+    crates = discover_crates(inferlib_root)
+    if requested:
+        crates = [crate for crate in crates if crate.name in requested]
+        missing = sorted(requested - {crate.name for crate in crates})
+        for name in missing:
+            warn(f"requested crate not found or not eligible: {name}")
+
+    if not crates:
+        warn("no eligible crates found")
+        return 0
+
+    info(f"using inferlib root {inferlib_root}")
+    info(f"writing bindings packages to {output_root}")
+
+    generated = 0
+    try:
+        for crate_dir in crates:
+            if generate_package(componentize_py, crate_dir, inferlib_root, output_root):
+                generated += 1
+    except (FileNotFoundError, ValueError, subprocess.CalledProcessError) as exc:
+        error(str(exc))
+        return 1
+
+    info(f"generated {generated} package(s)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
