@@ -35,11 +35,20 @@ bakery build ./my-ts-inferlet -o output.wasm
 
 # Build a single JS/TS file
 bakery build ./index.ts -o output.wasm
+
+# Build a Python inferlib app with inferlib WIT and generated Python bindings
+bakery build \
+  --inferlib /path/to/sdk/rust/inferlib \
+  --bindings /path/to/generated/python/bindings \
+  ./my-python-inferlet \
+  -o output.wasm
 ```
 
 **Options:**
 - `-o, --output` - Output `.wasm` file path (required)
 - `--debug` - Enable debug build (JS only: includes source maps)
+- `--inferlib` - Directory containing inferlib `*-bindings/wit` directories
+- `--bindings` - Directory containing generated Python packages such as `inference_bindings`
 
 ### `bakery login`
 

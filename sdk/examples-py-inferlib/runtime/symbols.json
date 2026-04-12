@@ -1,0 +1,174 @@
+{
+  "app_name": "app",
+  "stub_wasi": false,
+  "symbols": {
+    "exports": [
+      {
+        "kind": {
+          "Freestanding": {
+            "protocol": "Run",
+            "name": "run"
+          }
+        },
+        "return_style": "Result"
+      }
+    ],
+    "resources": [
+      {
+        "package": "wit_world.imports.poll",
+        "name": "Pollable"
+      },
+      {
+        "package": "wit_world.imports.formatter",
+        "name": "ChatFormatter"
+      },
+      {
+        "package": "wit_world.imports.models",
+        "name": "Model"
+      },
+      {
+        "package": "wit_world.imports.models",
+        "name": "Tokenizer"
+      },
+      {
+        "package": "wit_world.imports.queues",
+        "name": "ForwardPass"
+      },
+      {
+        "package": "wit_world.imports.queues",
+        "name": "KvPage"
+      },
+      {
+        "package": "wit_world.imports.queues",
+        "name": "Queue"
+      },
+      {
+        "package": "wit_world.imports.inference",
+        "name": "Context"
+      },
+      {
+        "package": "wit_world.imports.inference",
+        "name": "DecodeStepFuture"
+      },
+      {
+        "package": "wit_world.imports.inference",
+        "name": "FlushFuture"
+      },
+      {
+        "package": "wit_world.imports.inference",
+        "name": "GenerateFuture"
+      }
+    ],
+    "records": [
+      {
+        "package": "wit_world.imports.formatter",
+        "name": "ToolCall",
+        "fields": [
+          "name",
+          "arguments"
+        ]
+      },
+      {
+        "package": "wit_world.imports.queues",
+        "name": "Distribution",
+        "fields": [
+          "ids",
+          "probs"
+        ]
+      },
+      {
+        "package": "wit_world.imports.queues",
+        "name": "ForwardPassResult",
+        "fields": [
+          "distributions",
+          "tokens"
+        ]
+      },
+      {
+        "package": "wit_world.imports.inference",
+        "name": "StopConfig",
+        "fields": [
+          "max_tokens",
+          "eos_sequences"
+        ]
+      }
+    ],
+    "flags": [],
+    "tuples": [
+      {
+        "count": 2
+      },
+      {
+        "count": 2
+      },
+      {
+        "count": 2
+      },
+      {
+        "count": 2
+      },
+      {
+        "count": 3
+      }
+    ],
+    "variants": [
+      {
+        "package": "wit_world.imports.inference",
+        "name": "SamplerConfig",
+        "cases": [
+          {
+            "name": "SamplerConfig_Greedy",
+            "has_payload": false
+          },
+          {
+            "name": "SamplerConfig_Multinomial",
+            "has_payload": true
+          },
+          {
+            "name": "SamplerConfig_TopP",
+            "has_payload": true
+          },
+          {
+            "name": "SamplerConfig_TopK",
+            "has_payload": true
+          },
+          {
+            "name": "SamplerConfig_MinP",
+            "has_payload": true
+          },
+          {
+            "name": "SamplerConfig_TopKTopP",
+            "has_payload": true
+          }
+        ]
+      }
+    ],
+    "enums": [
+      {
+        "package": "wit_world.imports.queues",
+        "name": "Priority",
+        "count": 3
+      },
+      {
+        "package": "wit_world.imports.queues",
+        "name": "ResourceType",
+        "count": 3
+      }
+    ],
+    "options": [
+      "NonNesting",
+      "NonNesting",
+      "NonNesting",
+      "NonNesting",
+      "NonNesting",
+      "NonNesting",
+      "NonNesting"
+    ],
+    "results": [
+      {
+        "has_ok": false,
+        "has_err": true
+      }
+    ]
+  }
+}

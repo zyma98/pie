@@ -94,6 +94,12 @@ def to_python_ident(name: str) -> str:
     return name.replace("-", "_")
 
 
+def inferlib_dependency_to_binding_package(dep_name: str) -> str:
+    """Map an inferlib dependency name to its generated Python package name."""
+    component_name = dep_name.removeprefix("inferlib-")
+    return f"{to_python_ident(component_name)}_bindings"
+
+
 def command_exists(cmd: str) -> bool:
     """Check if a command is available in PATH."""
     return shutil.which(cmd) is not None
@@ -230,7 +236,6 @@ from wit_world import exports
 
 # Import bindings at top level so componentize-py bundles them
 import inference_bindings as _bindings
-import run_bindings as _run_bindings
 
 # Track whether set_return was called
 _return_was_set = False
@@ -293,6 +298,48 @@ class Run(exports.Run):
     output_path.write_text(wrapper_content)
 
 
+def generate_run_bindings_package(output_dir: Path) -> None:
+    """Generate the lightweight run_bindings package for inferlib apps."""
+    run_bindings_dir = output_dir / "run_bindings"
+    run_bindings_dir.mkdir(parents=True, exist_ok=True)
+
+    init_content = '''"""
+run_bindings - Python equivalent of inferlib run-bindings.
+
+Provides argument parsing for inferlet applications,
+analogous to pico-args::Arguments in Rust.
+"""
+
+from inference_bindings import get_arguments as _get_raw_arguments
+
+
+def parse_args(raw_args: list[str]) -> dict[str, str | bool]:
+    """Parse POSIX-style CLI arguments into a dict."""
+    parsed: dict[str, str | bool] = {}
+    i = 0
+    while i < len(raw_args):
+        arg = raw_args[i]
+        if arg.startswith("-"):
+            key = arg.lstrip("-")
+            next_arg = raw_args[i + 1] if i + 1 < len(raw_args) else None
+            if next_arg and not next_arg.startswith("-"):
+                parsed[key] = next_arg
+                i += 2
+            else:
+                parsed[key] = True
+                i += 1
+        else:
+            i += 1
+    return parsed
+
+
+def get_arguments() -> dict[str, str | bool]:
+    """Retrieve and parse CLI arguments for the inferlet."""
+    return parse_args(_get_raw_arguments())
+'''
+    (run_bindings_dir / "__init__.py").write_text(init_content)
+
+
 def copy_dir_recursive(src: Path, dst: Path) -> None:
     """Recursively copy a directory."""
     dst.mkdir(parents=True, exist_ok=True)
@@ -305,6 +352,40 @@ def copy_dir_recursive(src: Path, dst: Path) -> None:
             copy_dir_recursive(src_path, dst_path)
         else:
             shutil.copy2(src_path, dst_path)
+
+
+def stage_python_packages(
+    package_roots: list[Path] | None,
+    destination: Path,
+    package_names: set[str] | None = None,
+) -> None:
+    """Copy Python packages from external roots into the temp build directory.
+
+    This intentionally mirrors the older "bindings live next to the app" layout.
+    In practice, `componentize-py` bundles those local packages more reliably than
+    packages only made visible through `-p`.
+    """
+    if not package_roots:
+        return
+
+    for root in package_roots:
+        if not root.exists():
+            raise FileNotFoundError(f"Bindings path does not exist: {root}")
+
+        for entry in root.iterdir():
+            if entry.name == "__pycache__":
+                continue
+
+            if package_names is not None and entry.name not in package_names:
+                continue
+
+            dst = destination / entry.name
+
+            if entry.is_dir() and (entry / "__init__.py").exists():
+                copy_dir_recursive(entry, dst)
+            elif entry.is_file() and entry.suffix in {".py", ".pyi"}:
+                destination.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(entry, dst)
 
 
 def generate_dynamic_wit(
@@ -593,6 +674,7 @@ def handle_python_lib_build(
     world: str,
     debug: bool = False,
     inferlib: list[Path] | None = None,
+    bindings: list[Path] | None = None,
     extra: list[Path] | None = None,
 ) -> None:
     """Build a Python library component to WASM.
@@ -607,6 +689,7 @@ def handle_python_lib_build(
         output: Output path for the .wasm file.
         world: WIT world name to pass to componentize-py.
         inferlib: Directories to search for dependency bindings WIT.
+        bindings: Directories containing generated Python bindings packages.
         debug: Enable debug mode.
         extra: Additional Python package paths passed as -p to componentize-py.
     """
@@ -644,6 +727,11 @@ def handle_python_lib_build(
 
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
+        binding_package_names = (
+            {inferlib_dependency_to_binding_package(d) for d in read_pie_dependencies(project_dir)}
+            if inferlib
+            else None
+        )
 
         with console.status(
             "[bold green]Building Python library component...[/bold green]"
@@ -658,6 +746,16 @@ def handle_python_lib_build(
             for subdir in project_dir.iterdir():
                 if subdir.is_dir() and (subdir / "__init__.py").exists():
                     copy_dir_recursive(subdir, temp_path / subdir.name)
+
+            if bindings:
+                status.update(
+                    "[bold green]📦 Staging external Python bindings...[/bold green]"
+                )
+                stage_python_packages(
+                    bindings,
+                    temp_path,
+                    package_names=binding_package_names,
+                )
 
             # Copy the wit/ directory
             copy_dir_recursive(wit_dir, temp_path / "wit")
@@ -699,6 +797,7 @@ def handle_python_build(
     output: Path,
     debug: bool = False,
     inferlib: list[Path] | None = None,
+    bindings: list[Path] | None = None,
     extra: list[Path] | None = None,
 ) -> None:
     """Build a Python inferlet to WASM.
@@ -719,6 +818,7 @@ def handle_python_build(
         output: Output path for the .wasm file.
         debug: Enable debug mode.
         inferlib: Directories to search for inferlib bindings WIT.
+        bindings: Directories containing generated Python bindings packages.
         extra: Additional Python package paths passed as -p to componentize-py.
     """
     # Check prerequisites
@@ -758,6 +858,11 @@ def handle_python_build(
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
         wrapper_py = temp_path / "app.py"
+        binding_package_names = (
+            {inferlib_dependency_to_binding_package(d) for d in deps}
+            if inferlib
+            else None
+        )
 
         with console.status(
             f"[bold green]Building Python {mode_label}...[/bold green]"
@@ -795,12 +900,35 @@ def handle_python_build(
                 if inferlet_src.exists():
                     inferlet_dest = temp_path / "inferlet"
                     copy_dir_recursive(inferlet_src, inferlet_dest)
+            else:
+                # Step 3: Provide run_bindings for inferlib Python apps.
+                status.update(
+                    "[bold green]📦 Generating run_bindings...[/bold green]"
+                )
+                generate_run_bindings_package(temp_path)
+
+            if bindings:
+                status.update(
+                    "[bold green]📦 Staging external Python bindings...[/bold green]"
+                )
+                stage_python_packages(
+                    bindings,
+                    temp_path,
+                    package_names=binding_package_names,
+                )
 
             # Step 4: Run componentize-py
             status.update(
                 "[bold green]🔧 Compiling to WebAssembly component with componentize-py...[/bold green]"
             )
-            run_componentize_py(wrapper_py, output, wit_paths, package_name, debug, extra=extra)
+            run_componentize_py(
+                wrapper_py,
+                output,
+                wit_paths,
+                package_name,
+                debug,
+                extra=extra,
+            )
 
     # Success
     wasm_size = output.stat().st_size if output.exists() else 0
@@ -1406,6 +1534,7 @@ def handle_build_command(
     output: Path,
     debug: bool = False,
     inferlib: list[Path] | None = None,
+    bindings: list[Path] | None = None,
     lib: bool = False,
     world: str | None = None,
     extra: list[Path] | None = None,
@@ -1420,6 +1549,7 @@ def handle_build_command(
         output: Output path for the .wasm file.
         debug: Enable debug mode (JS/Python: inline source maps).
         inferlib: Directories to search for inferlib bindings WIT (Python only).
+        bindings: Directories containing generated Python bindings packages.
         lib: Build as a library component (Python only).
         world: WIT world name (required with --lib).
         extra: Additional Python package paths passed as -p to componentize-py.
@@ -1437,7 +1567,15 @@ def handle_build_command(
                 "--lib is only supported for Python projects. "
                 "Use 'cargo build' for Rust libraries."
             )
-        handle_python_lib_build(input_path, output, world, debug, inferlib=inferlib, extra=extra)
+        handle_python_lib_build(
+            input_path,
+            output,
+            world,
+            debug,
+            inferlib=inferlib,
+            bindings=bindings,
+            extra=extra,
+        )
         return
 
     # Auto-detect platform
@@ -1446,6 +1584,13 @@ def handle_build_command(
     if platform == "rust":
         handle_rust_build(input_path, output)
     elif platform == "python":
-        handle_python_build(input_path, output, debug, inferlib=inferlib, extra=extra)
+        handle_python_build(
+            input_path,
+            output,
+            debug,
+            inferlib=inferlib,
+            bindings=bindings,
+            extra=extra,
+        )
     else:
         handle_js_build(input_path, output, debug)
