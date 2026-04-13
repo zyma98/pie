@@ -1,0 +1,469 @@
+=== Building runtime with case_study_cold_start_latency feature ===
+=== Building inferlib dependencies ===
+=== Building sdk/examples (monolithic + herald) ===
+=== Building sdk/examples-inferlib (rust-inferlib + herald) ===
+=== Building Python template-generation ===
+Component built successfully
+=== Building Python template-generation-herald ===
+Component built successfully
+=== Building Python template-generation-full ===
+Component built successfully
+=== Building Python watermarking-numpy ===
+Component built successfully
+=== Building Python watermarking-numpy-herald ===
+Component built successfully
+=== Building Python watermarking-numpy-full ===
+Component built successfully
+=== Pre-linking rust-inferlib-static ===
+=== Setting up toxiproxy ===
+
+############################################################
+  Network: slow (~10 Mbps, 1250 KB/s)
+############################################################
+
+============================================================
+  slow / rust-mono-template-generation (10 runs)
+============================================================
+  Run 1/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=4937633.2 us  compile=440565.3 us  total=5378198.5 us
+  Run 2/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=4941101.3 us  compile=474922.6 us  total=5416023.9 us
+  Run 3/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=4938087.7 us  compile=442794.6 us  total=5380882.3 us
+  Run 4/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=4938732.9 us  compile=405873.7 us  total=5344606.6 us
+  Run 5/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=4939708.8 us  compile=411150.5 us  total=5350859.4 us
+  Run 6/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=4946114.7 us  compile=440508.5 us  total=5386623.2 us
+  Run 7/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=4945581.9 us  compile=433141.7 us  total=5378723.7 us
+  Run 8/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=4939346.7 us  compile=418124.0 us  total=5357470.6 us
+  Run 9/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=4936121.6 us  compile=403567.0 us  total=5339688.6 us
+  Run 10/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=4947198.0 us  compile=399842.6 us  total=5347040.6 us
+
+  --- Average ---
+  Upload:              4.941 s
+  Compile+instantiate: 0.427 s
+  Cold-start latency:  5.368 s
+
+============================================================
+  slow / rust-dynamic-template-generation (10 runs)
+============================================================
+  Run 1/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=160050.5 us  compile=34003.0 us  total=194053.5 us
+  Run 2/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=159827.1 us  compile=35135.3 us  total=194962.5 us
+  Run 3/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=160491.6 us  compile=41319.8 us  total=201811.4 us
+  Run 4/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=160537.1 us  compile=36690.7 us  total=197227.8 us
+  Run 5/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=161007.1 us  compile=39367.2 us  total=200374.3 us
+  Run 6/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=160636.4 us  compile=26945.9 us  total=187582.3 us
+  Run 7/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=161149.8 us  compile=38291.6 us  total=199441.4 us
+  Run 8/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=160607.8 us  compile=34480.0 us  total=195087.7 us
+  Run 9/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=160540.3 us  compile=41207.8 us  total=201748.1 us
+  Run 10/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=160466.3 us  compile=32777.6 us  total=193243.8 us
+
+  --- Average ---
+  Upload:              0.161 s
+  Compile+instantiate: 0.036 s
+  Cold-start latency:  0.197 s
+
+============================================================
+  slow / rust-static-template-generation (10 runs)
+============================================================
+  Run 1/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=7764166.6 us  compile=728871.3 us  total=8493037.9 us
+  Run 2/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=7771363.7 us  compile=667477.9 us  total=8438841.7 us
+  Run 3/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=7776469.4 us  compile=692904.5 us  total=8469373.9 us
+  Run 4/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=7777844.0 us  compile=657512.6 us  total=8435356.6 us
+  Run 5/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=7775980.9 us  compile=632060.3 us  total=8408041.1 us
+  Run 6/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=7779382.3 us  compile=657793.3 us  total=8437175.6 us
+  Run 7/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=7776139.7 us  compile=667268.9 us  total=8443408.7 us
+  Run 8/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=7793252.2 us  compile=660999.6 us  total=8454251.8 us
+  Run 9/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=7779169.7 us  compile=655131.2 us  total=8434300.9 us
+  Run 10/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=7776822.8 us  compile=651577.1 us  total=8428399.9 us
+
+  --- Average ---
+  Upload:              7.777 s
+  Compile+instantiate: 0.667 s
+  Cold-start latency:  8.444 s
+
+============================================================
+  slow / python-factored-dynamic-template-generation (10 runs)
+============================================================
+  Run 1/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=729881.9 us  compile=1250532.9 us  total=1980414.7 us
+  Run 2/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=730994.1 us  compile=898705.0 us  total=1629699.2 us
+  Run 3/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=729988.6 us  compile=1075646.9 us  total=1805635.5 us
+  Run 4/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=730691.6 us  compile=1217270.0 us  total=1947961.6 us
+  Run 5/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=730023.4 us  compile=1208242.8 us  total=1938266.1 us
+  Run 6/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=729981.3 us  compile=1157108.0 us  total=1887089.3 us
+  Run 7/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=729947.7 us  compile=1199866.6 us  total=1929814.3 us
+  Run 8/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=729480.7 us  compile=840022.4 us  total=1569503.1 us
+  Run 9/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=730492.8 us  compile=1205090.9 us  total=1935583.7 us
+  Run 10/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=731002.3 us  compile=1079346.9 us  total=1810349.2 us
+
+  --- Average ---
+  Upload:              0.730 s
+  Compile+instantiate: 1.113 s
+  Cold-start latency:  1.843 s
+
+============================================================
+  slow / python-full-dynamic-template-generation (10 runs)
+============================================================
+  Run 1/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=34344570.0 us  compile=993458.3 us  total=35338028.3 us
+  Run 2/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=34344205.1 us  compile=1023186.2 us  total=35367391.4 us
+  Run 3/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=34341966.5 us  compile=1050622.6 us  total=35392589.1 us
+  Run 4/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=34349084.0 us  compile=962333.6 us  total=35311417.7 us
+  Run 5/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=34343173.0 us  compile=1012259.7 us  total=35355432.6 us
+  Run 6/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=34349408.2 us  compile=990612.2 us  total=35340020.4 us
+  Run 7/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=34309385.8 us  compile=1056107.9 us  total=35365493.7 us
+  Run 8/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=34343622.8 us  compile=980964.4 us  total=35324587.2 us
+  Run 9/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=34346676.1 us  compile=988939.9 us  total=35335616.0 us
+  Run 10/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=34337980.0 us  compile=1028063.7 us  total=35366043.7 us
+
+  --- Average ---
+  Upload:              34.341 s
+  Compile+instantiate: 1.009 s
+  Cold-start latency:  35.350 s
+
+============================================================
+  slow / python-factored-dynamic-watermarking-numpy (10 runs)
+============================================================
+  Run 1/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=1627638.6 us  compile=2030869.3 us  total=3658507.9 us
+  Run 2/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=1625355.2 us  compile=1954665.2 us  total=3580020.4 us
+  Run 3/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=1624322.4 us  compile=1894081.1 us  total=3518403.4 us
+  Run 4/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=1627202.2 us  compile=1572189.7 us  total=3199391.9 us
+  Run 5/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=1627488.8 us  compile=1772037.9 us  total=3399526.6 us
+  Run 6/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=1627949.2 us  compile=2034423.9 us  total=3662373.1 us
+  Run 7/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=1624218.1 us  compile=2059471.2 us  total=3683689.3 us
+  Run 8/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=1625246.5 us  compile=2133614.4 us  total=3758860.9 us
+  Run 9/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=1624551.0 us  compile=1547344.2 us  total=3171895.2 us
+  Run 10/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=1624383.5 us  compile=2203930.0 us  total=3828313.5 us
+
+  --- Average ---
+  Upload:              1.626 s
+  Compile+instantiate: 1.920 s
+  Cold-start latency:  3.546 s
+
+============================================================
+  slow / python-full-dynamic-watermarking-numpy (10 runs)
+============================================================
+  Run 1/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=64835044.1 us  compile=1705784.6 us  total=66540828.7 us
+  Run 2/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=64811363.7 us  compile=1773827.2 us  total=66585190.9 us
+  Run 3/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=64790888.6 us  compile=2008282.3 us  total=66799170.9 us
+  Run 4/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=64826073.5 us  compile=1789464.0 us  total=66615537.4 us
+  Run 5/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=64829443.0 us  compile=1794908.1 us  total=66624351.1 us
+  Run 6/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=64822832.6 us  compile=1742373.7 us  total=66565206.3 us
+  Run 7/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=64810004.5 us  compile=1800656.6 us  total=66610661.1 us
+  Run 8/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=64821599.9 us  compile=1757214.3 us  total=66578814.2 us
+  Run 9/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=64820904.4 us  compile=1756131.9 us  total=66577036.3 us
+  Run 10/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=64832429.8 us  compile=1657445.5 us  total=66489875.3 us
+
+  --- Average ---
+  Upload:              64.820 s
+  Compile+instantiate: 1.779 s
+  Cold-start latency:  66.599 s
+
+############################################################
+  Network: medium (~100 Mbps, 12500 KB/s)
+############################################################
+
+============================================================
+  medium / rust-mono-template-generation (10 runs)
+============================================================
+  Run 1/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=508824.6 us  compile=417890.1 us  total=926714.7 us
+  Run 2/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=510887.2 us  compile=447246.5 us  total=958133.7 us
+  Run 3/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=512574.1 us  compile=448134.9 us  total=960709.0 us
+  Run 4/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=508266.0 us  compile=446384.4 us  total=954650.3 us
+  Run 5/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=508283.0 us  compile=428527.7 us  total=936810.6 us
+  Run 6/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=501630.4 us  compile=432305.0 us  total=933935.4 us
+  Run 7/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=501531.7 us  compile=412196.5 us  total=913728.2 us
+  Run 8/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=502952.7 us  compile=446118.0 us  total=949070.7 us
+  Run 9/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=504370.2 us  compile=431673.7 us  total=936043.9 us
+  Run 10/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=503867.5 us  compile=428777.2 us  total=932644.7 us
+
+  --- Average ---
+  Upload:              0.506 s
+  Compile+instantiate: 0.434 s
+  Cold-start latency:  0.940 s
+
+============================================================
+  medium / rust-dynamic-template-generation (10 runs)
+============================================================
+  Run 1/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=19507.8 us  compile=44057.7 us  total=63565.6 us
+  Run 2/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=18532.6 us  compile=31222.7 us  total=49755.4 us
+  Run 3/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=19425.3 us  compile=39927.2 us  total=59352.6 us
+  Run 4/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=19271.5 us  compile=32587.1 us  total=51858.6 us
+  Run 5/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=18490.8 us  compile=42508.7 us  total=60999.6 us
+  Run 6/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=19051.5 us  compile=46345.4 us  total=65396.9 us
+  Run 7/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=19275.7 us  compile=34441.4 us  total=53717.1 us
+  Run 8/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=18620.7 us  compile=38185.1 us  total=56805.9 us
+  Run 9/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=18694.6 us  compile=30729.8 us  total=49424.3 us
+  Run 10/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=18087.4 us  compile=32248.6 us  total=50336.0 us
+
+  --- Average ---
+  Upload:              0.019 s
+  Compile+instantiate: 0.037 s
+  Cold-start latency:  0.056 s
+
+============================================================
+  medium / rust-static-template-generation (10 runs)
+============================================================
+  Run 1/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=807033.3 us  compile=709933.8 us  total=1516967.1 us
+  Run 2/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=804698.3 us  compile=700264.9 us  total=1504963.2 us
+  Run 3/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=790840.1 us  compile=673861.9 us  total=1464702.1 us
+  Run 4/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=793391.7 us  compile=661620.4 us  total=1455012.2 us
+  Run 5/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=804154.5 us  compile=657441.0 us  total=1461595.5 us
+  Run 6/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=799474.1 us  compile=657514.0 us  total=1456988.0 us
+  Run 7/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=800693.6 us  compile=692900.5 us  total=1493594.1 us
+  Run 8/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=791082.8 us  compile=641539.5 us  total=1432622.3 us
+  Run 9/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=791342.5 us  compile=658540.3 us  total=1449882.8 us
+  Run 10/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=804408.8 us  compile=699921.5 us  total=1504330.3 us
+
+  --- Average ---
+  Upload:              0.799 s
+  Compile+instantiate: 0.675 s
+  Cold-start latency:  1.474 s
+
+============================================================
+  medium / python-factored-dynamic-template-generation (10 runs)
+============================================================
+  Run 1/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=76216.7 us  compile=1041148.6 us  total=1117365.4 us
+  Run 2/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=77313.4 us  compile=1217801.1 us  total=1295114.4 us
+  Run 3/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=77527.0 us  compile=1077656.7 us  total=1155183.7 us
+  Run 4/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=77270.6 us  compile=1228557.6 us  total=1305828.2 us
+  Run 5/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=77485.5 us  compile=928784.8 us  total=1006270.3 us
+  Run 6/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=77709.4 us  compile=1131048.2 us  total=1208757.6 us
+  Run 7/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=76872.9 us  compile=1222163.7 us  total=1299036.6 us
+  Run 8/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=77009.2 us  compile=860162.3 us  total=937171.5 us
+  Run 9/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=76655.9 us  compile=1277674.1 us  total=1354330.0 us
+  Run 10/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=77338.2 us  compile=1233462.3 us  total=1310800.5 us
+
+  --- Average ---
+  Upload:              0.077 s
+  Compile+instantiate: 1.122 s
+  Cold-start latency:  1.199 s
+
+============================================================
+  medium / python-full-dynamic-template-generation (10 runs)
+============================================================
+  Run 1/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=3486843.7 us  compile=947486.7 us  total=4434330.5 us
+  Run 2/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=3510366.3 us  compile=1086191.5 us  total=4596557.8 us
+  Run 3/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=3483373.5 us  compile=1036603.6 us  total=4519977.0 us
+  Run 4/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=3532092.2 us  compile=980855.9 us  total=4512948.1 us
+  Run 5/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=3531827.6 us  compile=1021806.9 us  total=4553634.6 us
+  Run 6/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=3539087.0 us  compile=1037613.8 us  total=4576700.8 us
+  Run 7/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=3530644.8 us  compile=1006223.8 us  total=4536868.7 us
+  Run 8/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=3484529.8 us  compile=1079014.4 us  total=4563544.2 us
+  Run 9/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=3530483.3 us  compile=1011465.1 us  total=4541948.4 us
+  Run 10/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=3533834.8 us  compile=1037636.9 us  total=4571471.8 us
+
+  --- Average ---
+  Upload:              3.516 s
+  Compile+instantiate: 1.024 s
+  Cold-start latency:  4.541 s
+
+============================================================
+  medium / python-factored-dynamic-watermarking-numpy (10 runs)
+============================================================
+  Run 1/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=167918.7 us  compile=1700801.4 us  total=1868720.1 us
+  Run 2/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=167846.0 us  compile=2045353.2 us  total=2213199.2 us
+  Run 3/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=167419.7 us  compile=1875388.4 us  total=2042808.1 us
+  Run 4/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=168475.4 us  compile=1439271.0 us  total=1607746.4 us
+  Run 5/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=170423.4 us  compile=2079530.9 us  total=2249954.2 us
+  Run 6/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=166518.1 us  compile=2060455.0 us  total=2226973.1 us
+  Run 7/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=167860.8 us  compile=2152368.5 us  total=2320229.3 us
+  Run 8/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=168473.9 us  compile=1544799.7 us  total=1713273.5 us
+  Run 9/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=168129.5 us  compile=2153579.8 us  total=2321709.3 us
+  Run 10/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=168335.2 us  compile=2020754.5 us  total=2189089.8 us
+
+  --- Average ---
+  Upload:              0.168 s
+  Compile+instantiate: 1.907 s
+  Cold-start latency:  2.075 s
+
+============================================================
+  medium / python-full-dynamic-watermarking-numpy (10 runs)
+============================================================
+  Run 1/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=6644110.7 us  compile=1794320.2 us  total=8438430.9 us
+  Run 2/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=6644920.8 us  compile=1823864.8 us  total=8468785.7 us
+  Run 3/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=6635505.4 us  compile=1717557.1 us  total=8353062.5 us
+  Run 4/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=6639452.4 us  compile=1832931.8 us  total=8472384.2 us
+  Run 5/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=6638607.0 us  compile=1914709.4 us  total=8553316.4 us
+  Run 6/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=6625587.5 us  compile=1791031.5 us  total=8416619.0 us
+  Run 7/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=6646299.5 us  compile=1832565.9 us  total=8478865.3 us
+  Run 8/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=6634625.8 us  compile=1780712.2 us  total=8415338.0 us
+  Run 9/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=6645104.8 us  compile=1708153.9 us  total=8353258.7 us
+  Run 10/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=6644748.5 us  compile=1891606.6 us  total=8536355.1 us
+
+  --- Average ---
+  Upload:              6.640 s
+  Compile+instantiate: 1.809 s
+  Cold-start latency:  8.449 s
+
+############################################################
+  Network: fast (~1000 Mbps, 125000 KB/s)
+############################################################
+
+============================================================
+  fast / rust-mono-template-generation (10 runs)
+============================================================
+  Run 1/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=78082.1 us  compile=437805.1 us  total=515887.2 us
+  Run 2/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=70887.5 us  compile=413071.3 us  total=483958.8 us
+  Run 3/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=69578.5 us  compile=416353.1 us  total=485931.5 us
+  Run 4/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=80606.5 us  compile=421361.9 us  total=501968.5 us
+  Run 5/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=76302.5 us  compile=435020.1 us  total=511322.6 us
+  Run 6/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=72584.8 us  compile=469435.7 us  total=542020.5 us
+  Run 7/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=79304.3 us  compile=404142.0 us  total=483446.4 us
+  Run 8/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=78946.8 us  compile=429606.6 us  total=508553.4 us
+  Run 9/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=75997.2 us  compile=435843.5 us  total=511840.7 us
+  Run 10/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=69802.6 us  compile=450533.8 us  total=520336.4 us
+
+  --- Average ---
+  Upload:              0.075 s
+  Compile+instantiate: 0.431 s
+  Cold-start latency:  0.507 s
+
+============================================================
+  fast / rust-dynamic-template-generation (10 runs)
+============================================================
+  Run 1/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=5593.4 us  compile=37097.5 us  total=42690.9 us
+  Run 2/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=4903.2 us  compile=40245.8 us  total=45149.0 us
+  Run 3/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=5189.2 us  compile=32022.9 us  total=37212.1 us
+  Run 4/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=5603.8 us  compile=32415.9 us  total=38019.7 us
+  Run 5/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=4700.0 us  compile=31609.3 us  total=36309.2 us
+  Run 6/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=5014.2 us  compile=30141.7 us  total=35155.9 us
+  Run 7/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=4907.7 us  compile=35233.6 us  total=40141.4 us
+  Run 8/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=5101.7 us  compile=36675.9 us  total=41777.6 us
+  Run 9/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=4810.9 us  compile=35517.0 us  total=40327.9 us
+  Run 10/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=5067.6 us  compile=28182.8 us  total=33250.5 us
+
+  --- Average ---
+  Upload:              0.005 s
+  Compile+instantiate: 0.034 s
+  Cold-start latency:  0.039 s
+
+============================================================
+  fast / rust-static-template-generation (10 runs)
+============================================================
+  Run 1/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=112343.0 us  compile=705105.5 us  total=817448.5 us
+  Run 2/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=105776.7 us  compile=693906.7 us  total=799683.4 us
+  Run 3/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=118727.2 us  compile=701526.1 us  total=820253.3 us
+  Run 4/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=112949.9 us  compile=715375.2 us  total=828325.1 us
+  Run 5/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=113715.6 us  compile=659483.8 us  total=773199.4 us
+  Run 6/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=106020.6 us  compile=668259.4 us  total=774280.0 us
+  Run 7/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=121997.6 us  compile=678300.3 us  total=800297.9 us
+  Run 8/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=120509.5 us  compile=673368.3 us  total=793877.9 us
+  Run 9/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=123448.5 us  compile=643767.9 us  total=767216.3 us
+  Run 10/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=110655.1 us  compile=703056.6 us  total=813711.7 us
+
+  --- Average ---
+  Upload:              0.115 s
+  Compile+instantiate: 0.684 s
+  Cold-start latency:  0.799 s
+
+============================================================
+  fast / python-factored-dynamic-template-generation (10 runs)
+============================================================
+  Run 1/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=14308.3 us  compile=1161125.4 us  total=1175433.7 us
+  Run 2/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=12581.7 us  compile=1255467.0 us  total=1268048.7 us
+  Run 3/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=12410.1 us  compile=1059888.7 us  total=1072298.8 us
+  Run 4/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=12121.5 us  compile=1155952.1 us  total=1168073.5 us
+  Run 5/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=12921.8 us  compile=1192147.2 us  total=1205069.1 us
+  Run 6/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=13613.0 us  compile=959752.3 us  total=973365.3 us
+  Run 7/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=12541.2 us  compile=828948.9 us  total=841490.0 us
+  Run 8/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=13096.2 us  compile=1164208.5 us  total=1177304.7 us
+  Run 9/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=13436.2 us  compile=1092494.4 us  total=1105930.6 us
+  Run 10/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=12539.2 us  compile=1192482.9 us  total=1205022.1 us
+
+  --- Average ---
+  Upload:              0.013 s
+  Compile+instantiate: 1.106 s
+  Cold-start latency:  1.119 s
+
+============================================================
+  fast / python-full-dynamic-template-generation (10 runs)
+============================================================
+  Run 1/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=471269.8 us  compile=1005671.9 us  total=1476941.7 us
+  Run 2/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=510550.6 us  compile=1013367.0 us  total=1523917.6 us
+  Run 3/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=470255.2 us  compile=971289.3 us  total=1441544.6 us
+  Run 4/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=523014.4 us  compile=1011406.9 us  total=1534421.3 us
+  Run 5/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=480772.2 us  compile=990122.2 us  total=1470894.4 us
+  Run 6/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=475452.2 us  compile=979202.6 us  total=1454654.7 us
+  Run 7/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=470772.7 us  compile=955874.1 us  total=1426646.8 us
+  Run 8/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=515268.6 us  compile=969068.0 us  total=1484336.6 us
+  Run 9/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=522191.3 us  compile=957613.3 us  total=1479804.7 us
+  Run 10/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=471658.6 us  compile=995202.1 us  total=1466860.7 us
+
+  --- Average ---
+  Upload:              0.491 s
+  Compile+instantiate: 0.985 s
+  Cold-start latency:  1.476 s
+
+============================================================
+  fast / python-factored-dynamic-watermarking-numpy (10 runs)
+============================================================
+  Run 1/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=26610.4 us  compile=2033843.3 us  total=2060453.7 us
+  Run 2/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=26817.0 us  compile=2028987.8 us  total=2055804.8 us
+  Run 3/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=24700.3 us  compile=2090688.0 us  total=2115388.3 us
+  Run 4/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=25132.1 us  compile=1993008.0 us  total=2018140.1 us
+  Run 5/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=23980.9 us  compile=1797771.7 us  total=1821752.6 us
+  Run 6/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=26400.3 us  compile=2136867.5 us  total=2163267.8 us
+  Run 7/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=25563.8 us  compile=1697876.0 us  total=1723439.8 us
+  Run 8/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=27082.7 us  compile=2007035.1 us  total=2034117.8 us
+  Run 9/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=23674.8 us  compile=1511190.0 us  total=1534864.7 us
+  Run 10/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=23745.9 us  compile=1743805.9 us  total=1767551.8 us
+
+  --- Average ---
+  Upload:              0.025 s
+  Compile+instantiate: 1.904 s
+  Cold-start latency:  1.929 s
+
+============================================================
+  fast / python-full-dynamic-watermarking-numpy (10 runs)
+============================================================
+  Run 1/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=961374.0 us  compile=1635682.5 us  total=2597056.4 us
+  Run 2/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=924184.0 us  compile=1679099.8 us  total=2603283.8 us
+  Run 3/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=954393.1 us  compile=1663853.8 us  total=2618246.9 us
+  Run 4/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=968680.7 us  compile=1697827.0 us  total=2666507.6 us
+  Run 5/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=953315.0 us  compile=1700205.5 us  total=2653520.5 us
+  Run 6/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=932464.5 us  compile=1778329.3 us  total=2710793.7 us
+  Run 7/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=971035.5 us  compile=1717125.8 us  total=2688161.3 us
+  Run 8/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=964093.0 us  compile=1831116.9 us  total=2795209.9 us
+  Run 9/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=961941.9 us  compile=1784502.9 us  total=2746444.8 us
+  Run 10/10: clearing cache... starting engine... installing deps... warming up (herald)... submitting (throttled)... upload=958397.2 us  compile=1793600.1 us  total=2751997.3 us
+
+  --- Average ---
+  Upload:              0.955 s
+  Compile+instantiate: 1.728 s
+  Cold-start latency:  2.683 s
+
+============================================================
+  Overall Summary (10 runs each)
+============================================================
+
+--- Wasm file sizes ---
+  rust-mono-template-generation:  5.86 MB
+  rust-dynamic-template-generation:  0.19 MB
+  rust-static-template-generation:  9.21 MB
+  python-factored-dynamic-template-generation:  0.86 MB
+  python-full-dynamic-template-generation:  40.67 MB
+  python-factored-dynamic-watermarking-numpy:  1.92 MB
+  python-full-dynamic-watermarking-numpy:  76.85 MB
+
+--- slow (~10 Mbps) ---
+  rust-mono-template-generation:  upload=4.941 s  compile=0.427 s  total=5.368 s
+  rust-dynamic-template-generation:  upload=0.161 s  compile=0.036 s  total=0.197 s
+  rust-static-template-generation:  upload=7.777 s  compile=0.667 s  total=8.444 s
+  python-factored-dynamic-template-generation:  upload=0.730 s  compile=1.113 s  total=1.843 s
+  python-full-dynamic-template-generation:  upload=34.341 s  compile=1.009 s  total=35.350 s
+  python-factored-dynamic-watermarking-numpy:  upload=1.626 s  compile=1.920 s  total=3.546 s
+  python-full-dynamic-watermarking-numpy:  upload=64.820 s  compile=1.779 s  total=66.599 s
+
+--- medium (~100 Mbps) ---
+  rust-mono-template-generation:  upload=0.506 s  compile=0.434 s  total=0.940 s
+  rust-dynamic-template-generation:  upload=0.019 s  compile=0.037 s  total=0.056 s
+  rust-static-template-generation:  upload=0.799 s  compile=0.675 s  total=1.474 s
+  python-factored-dynamic-template-generation:  upload=0.077 s  compile=1.122 s  total=1.199 s
+  python-full-dynamic-template-generation:  upload=3.516 s  compile=1.024 s  total=4.541 s
+  python-factored-dynamic-watermarking-numpy:  upload=0.168 s  compile=1.907 s  total=2.075 s
+  python-full-dynamic-watermarking-numpy:  upload=6.640 s  compile=1.809 s  total=8.449 s
+
+--- fast (~1000 Mbps) ---
+  rust-mono-template-generation:  upload=0.075 s  compile=0.431 s  total=0.507 s
+  rust-dynamic-template-generation:  upload=0.005 s  compile=0.034 s  total=0.039 s
+  rust-static-template-generation:  upload=0.115 s  compile=0.684 s  total=0.799 s
+  python-factored-dynamic-template-generation:  upload=0.013 s  compile=1.106 s  total=1.119 s
+  python-full-dynamic-template-generation:  upload=0.491 s  compile=0.985 s  total=1.476 s
+  python-factored-dynamic-watermarking-numpy:  upload=0.025 s  compile=1.904 s  total=1.929 s
+  python-full-dynamic-watermarking-numpy:  upload=0.955 s  compile=1.728 s  total=2.683 s

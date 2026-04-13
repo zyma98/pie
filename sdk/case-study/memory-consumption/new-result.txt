@@ -1,0 +1,213 @@
+=== Building runtime with case_study_memory_consumption feature ===
+=== Building inferlib dependencies ===
+=== Building sdk/examples (monolithic template-generation-sleep) ===
+=== Building sdk/examples-inferlib (dynamic template-generation-sleep) ===
+=== Pre-linking rust-static template-generation-sleep ===
+=== Building Python watermarking-numpy-full-sleep ===
+Component built successfully
+=== Building Python watermarking-numpy-sleep ===
+Component built successfully
+=== Generating 720 manifest copies (full) ===
+=== Generating 720 manifest copies (shared) ===
+=== Generating 2000 manifest copies (rust monolithic) ===
+=== Generating 2000 manifest copies (rust dynamic) ===
+=== Generating 2000 manifest copies (rust static) ===
+
+============================================================
+  Case 1: Idle engine
+============================================================
+Clearing cache... starting engine... ready (PID 282196).
+
+--- Process tree ---
+  PID 282196    RSS  1197592 KB  /home/acciente/work/pie/pie/.venv/bin/python3 /home/acciente/work/pie/pie/.venv/bin/pie serve
+  PID 282303    RSS    10264 KB  /home/acciente/work/pie/pie/.venv/bin/python3 -c from multiprocessing.resource_tracker import main;main(30)
+  PID 282304    RSS   992492 KB  /home/acciente/work/pie/pie/.venv/bin/python3 -c from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=31, pipe_handle=33) --multiprocessing-fork
+--- FD limits ---
+  PID 282196    FD limit: soft=10240 hard=10240  /home/acciente/work/pie/pie/.venv/bin/python3 /home/acciente
+  PID 282303    FD limit: soft=10240 hard=10240  /home/acciente/work/pie/pie/.venv/bin/python3 -c from multip
+  PID 282304    FD limit: soft=10240 hard=10240  /home/acciente/work/pie/pie/.venv/bin/python3 -c from multip
+
+=== Idle engine RSS: 2200348 KB (2148.78 MiB) ===
+
+============================================================
+  Case 2: 720 detached inferlets (python full)
+============================================================
+Clearing cache... starting engine... ready (PID 282525).
+--- Process tree (sanity check) ---
+  PID 282525    RSS  1234508 KB  /home/acciente/work/pie/pie/.venv/bin/python3 /home/acciente/work/pie/pie/.venv/bin/pie serve
+  PID 282632    RSS    10296 KB  /home/acciente/work/pie/pie/.venv/bin/python3 -c from multiprocessing.resource_tracker import main;main(30)
+  PID 282633    RSS  1003260 KB  /home/acciente/work/pie/pie/.venv/bin/python3 -c from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=31, pipe_handle=33) --multiprocessing-fork
+--- FD limits ---
+  PID 282525    FD limit: soft=10240 hard=10240  /home/acciente/work/pie/pie/.venv/bin/python3 /home/acciente
+  PID 282632    FD limit: soft=10240 hard=10240  /home/acciente/work/pie/pie/.venv/bin/python3 -c from multip
+  PID 282633    FD limit: soft=10240 hard=10240  /home/acciente/work/pie/pie/.venv/bin/python3 -c from multip
+Installing inferlib-inference dependency... done.
+Submitting 720 detached inferlets (full)...
+  submitted 36/720  RSS=6448456 KB  FDs=120
+  submitted 72/720  RSS=9980784 KB  FDs=156
+  submitted 108/720  RSS=13449248 KB  FDs=192
+  submitted 144/720  RSS=16987560 KB  FDs=228
+  submitted 180/720  RSS=20481620 KB  FDs=264
+  submitted 216/720  RSS=23969004 KB  FDs=300
+  submitted 252/720  RSS=27499052 KB  FDs=336
+  submitted 288/720  RSS=31101328 KB  FDs=372
+  submitted 324/720  RSS=34612096 KB  FDs=408
+  submitted 360/720  RSS=38127152 KB  FDs=444
+  submitted 396/720  RSS=41616372 KB  FDs=480
+  submitted 432/720  RSS=45126840 KB  FDs=516
+  submitted 468/720  RSS=48684996 KB  FDs=552
+  submitted 504/720  RSS=52185972 KB  FDs=588
+  submitted 540/720  RSS=55744396 KB  FDs=624
+  submitted 576/720  RSS=59201780 KB  FDs=660
+  submitted 612/720  RSS=62682264 KB  FDs=696
+  submitted 648/720  RSS=66260552 KB  FDs=732
+  submitted 684/720  RSS=69801648 KB  FDs=768
+  submitted 720/720  RSS=73319792 KB  FDs=804
+All 720 submissions complete.
+  Verified: 720 detached instances (expected 720)
+
+============================================================
+  Case 3: 720 detached inferlets (python shared)
+============================================================
+Clearing cache... starting engine... ready (PID 294723).
+--- Process tree (sanity check) ---
+  PID 294723    RSS  1229084 KB  /home/acciente/work/pie/pie/.venv/bin/python3 /home/acciente/work/pie/pie/.venv/bin/pie serve
+  PID 294830    RSS    10312 KB  /home/acciente/work/pie/pie/.venv/bin/python3 -c from multiprocessing.resource_tracker import main;main(30)
+  PID 294831    RSS  1008472 KB  /home/acciente/work/pie/pie/.venv/bin/python3 -c from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=31, pipe_handle=33) --multiprocessing-fork
+--- FD limits ---
+  PID 294723    FD limit: soft=10240 hard=10240  /home/acciente/work/pie/pie/.venv/bin/python3 /home/acciente
+  PID 294830    FD limit: soft=10240 hard=10240  /home/acciente/work/pie/pie/.venv/bin/python3 -c from multip
+  PID 294831    FD limit: soft=10240 hard=10240  /home/acciente/work/pie/pie/.venv/bin/python3 -c from multip
+Installing inferlib-inference dependency... done.
+Submitting 720 detached inferlets (shared)...
+  submitted 36/720  RSS=3842836 KB  FDs=228
+  submitted 72/720  RSS=5238104 KB  FDs=372
+  submitted 108/720  RSS=6550128 KB  FDs=516
+  submitted 144/720  RSS=7998980 KB  FDs=660
+  submitted 180/720  RSS=9257596 KB  FDs=804
+  submitted 216/720  RSS=10628668 KB  FDs=948
+  submitted 252/720  RSS=11936024 KB  FDs=1092
+  submitted 288/720  RSS=13260092 KB  FDs=1236
+  submitted 324/720  RSS=14565332 KB  FDs=1380
+  submitted 360/720  RSS=15942560 KB  FDs=1524
+  submitted 396/720  RSS=17257720 KB  FDs=1668
+  submitted 432/720  RSS=18626884 KB  FDs=1812
+  submitted 468/720  RSS=19914008 KB  FDs=1956
+  submitted 504/720  RSS=21268440 KB  FDs=2100
+  submitted 540/720  RSS=22592740 KB  FDs=2244
+  submitted 576/720  RSS=23980012 KB  FDs=2388
+  submitted 612/720  RSS=25297156 KB  FDs=2532
+  submitted 648/720  RSS=26618116 KB  FDs=2676
+  submitted 684/720  RSS=28016816 KB  FDs=2820
+  submitted 720/720  RSS=29309632 KB  FDs=2964
+All 720 submissions complete.
+  Verified: 720 detached instances (expected 720)
+
+============================================================
+  Case 4: 2000 detached inferlets (rust monolithic)
+============================================================
+Clearing cache... starting engine... ready (PID 296923).
+--- Process tree (sanity check) ---
+  PID 296923    RSS  1206572 KB  /home/acciente/work/pie/pie/.venv/bin/python3 /home/acciente/work/pie/pie/.venv/bin/pie serve
+  PID 297038    RSS    10260 KB  /home/acciente/work/pie/pie/.venv/bin/python3 -c from multiprocessing.resource_tracker import main;main(30)
+  PID 297039    RSS  1008904 KB  /home/acciente/work/pie/pie/.venv/bin/python3 -c from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=31, pipe_handle=33) --multiprocessing-fork
+--- FD limits ---
+  PID 296923    FD limit: soft=10240 hard=10240  /home/acciente/work/pie/pie/.venv/bin/python3 /home/acciente
+  PID 297038    FD limit: soft=10240 hard=10240  /home/acciente/work/pie/pie/.venv/bin/python3 -c from multip
+  PID 297039    FD limit: soft=10240 hard=10240  /home/acciente/work/pie/pie/.venv/bin/python3 -c from multip
+Submitting 2000 detached inferlets (rust monolithic)...
+  submitted 100/2000  RSS=4815016 KB  FDs=183
+  submitted 200/2000  RSS=7156340 KB  FDs=283
+  submitted 300/2000  RSS=9474124 KB  FDs=383
+  submitted 400/2000  RSS=11820940 KB  FDs=483
+  submitted 500/2000  RSS=14107660 KB  FDs=583
+  submitted 600/2000  RSS=16433284 KB  FDs=683
+  submitted 700/2000  RSS=18768924 KB  FDs=783
+  submitted 800/2000  RSS=21076216 KB  FDs=883
+  submitted 900/2000  RSS=23451516 KB  FDs=983
+  submitted 1000/2000  RSS=25743404 KB  FDs=1083
+  submitted 1100/2000  RSS=28081932 KB  FDs=1183
+  submitted 1200/2000  RSS=30404328 KB  FDs=1283
+  submitted 1300/2000  RSS=32698464 KB  FDs=1383
+  submitted 1400/2000  RSS=35086860 KB  FDs=1483
+  submitted 1500/2000  RSS=37348248 KB  FDs=1583
+  submitted 1600/2000  RSS=39637392 KB  FDs=1683
+  submitted 1700/2000  RSS=42000680 KB  FDs=1783
+  submitted 1800/2000  RSS=44307884 KB  FDs=1883
+  submitted 1900/2000  RSS=46633212 KB  FDs=1983
+  submitted 2000/2000  RSS=48963980 KB  FDs=2083
+All 2000 submissions complete.
+  Verified: 2000 detached instances (expected 2000)
+
+============================================================
+  Case 5: 2000 detached inferlets (rust dynamic)
+============================================================
+Clearing cache... starting engine... ready (PID 300310).
+--- Process tree (sanity check) ---
+  PID 300310    RSS  1212864 KB  /home/acciente/work/pie/pie/.venv/bin/python3 /home/acciente/work/pie/pie/.venv/bin/pie serve
+  PID 300417    RSS    10288 KB  /home/acciente/work/pie/pie/.venv/bin/python3 -c from multiprocessing.resource_tracker import main;main(30)
+  PID 300418    RSS  1002892 KB  /home/acciente/work/pie/pie/.venv/bin/python3 -c from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=31, pipe_handle=33) --multiprocessing-fork
+--- FD limits ---
+  PID 300310    FD limit: soft=10240 hard=10240  /home/acciente/work/pie/pie/.venv/bin/python3 /home/acciente
+  PID 300417    FD limit: soft=10240 hard=10240  /home/acciente/work/pie/pie/.venv/bin/python3 -c from multip
+  PID 300418    FD limit: soft=10240 hard=10240  /home/acciente/work/pie/pie/.venv/bin/python3 -c from multip
+Installing inferlib template dependencies... done.
+Submitting 2000 detached inferlets (rust dynamic)...
+  submitted 100/2000  RSS=2469756 KB  FDs=187
+  submitted 200/2000  RSS=2611068 KB  FDs=287
+  submitted 300/2000  RSS=2761596 KB  FDs=387
+  submitted 400/2000  RSS=2921340 KB  FDs=487
+  submitted 500/2000  RSS=3078012 KB  FDs=587
+  submitted 600/2000  RSS=3235708 KB  FDs=687
+  submitted 700/2000  RSS=3392380 KB  FDs=787
+  submitted 800/2000  RSS=3551100 KB  FDs=887
+  submitted 900/2000  RSS=3707772 KB  FDs=987
+  submitted 1000/2000  RSS=3861372 KB  FDs=1087
+  submitted 1100/2000  RSS=4015996 KB  FDs=1187
+  submitted 1200/2000  RSS=4173692 KB  FDs=1287
+  submitted 1300/2000  RSS=4326268 KB  FDs=1387
+  submitted 1400/2000  RSS=4486012 KB  FDs=1487
+  submitted 1500/2000  RSS=4645756 KB  FDs=1587
+  submitted 1600/2000  RSS=4798332 KB  FDs=1687
+  submitted 1700/2000  RSS=4950908 KB  FDs=1787
+  submitted 1800/2000  RSS=5102460 KB  FDs=1887
+  submitted 1900/2000  RSS=5259132 KB  FDs=1987
+  submitted 2000/2000  RSS=5415804 KB  FDs=2087
+All 2000 submissions complete.
+  Verified: 2000 detached instances (expected 2000)
+
+============================================================
+  Case 6: 2000 detached inferlets (rust static)
+============================================================
+Clearing cache... starting engine... ready (PID 303608).
+--- Process tree (sanity check) ---
+  PID 303608    RSS  1196724 KB  /home/acciente/work/pie/pie/.venv/bin/python3 /home/acciente/work/pie/pie/.venv/bin/pie serve
+  PID 303723    RSS    10300 KB  /home/acciente/work/pie/pie/.venv/bin/python3 -c from multiprocessing.resource_tracker import main;main(30)
+  PID 303724    RSS   991940 KB  /home/acciente/work/pie/pie/.venv/bin/python3 -c from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=31, pipe_handle=33) --multiprocessing-fork
+--- FD limits ---
+  PID 303608    FD limit: soft=10240 hard=10240  /home/acciente/work/pie/pie/.venv/bin/python3 /home/acciente
+  PID 303723    FD limit: soft=10240 hard=10240  /home/acciente/work/pie/pie/.venv/bin/python3 -c from multip
+  PID 303724    FD limit: soft=10240 hard=10240  /home/acciente/work/pie/pie/.venv/bin/python3 -c from multip
+Submitting 2000 detached inferlets (rust static)...
+  submitted 100/2000  RSS=6133816 KB  FDs=583
+  submitted 200/2000  RSS=9695668 KB  FDs=1083
+  submitted 300/2000  RSS=13239508 KB  FDs=1583
+  submitted 400/2000  RSS=16720456 KB  FDs=2083
+  submitted 500/2000  RSS=20264400 KB  FDs=2583
+  submitted 600/2000  RSS=23736920 KB  FDs=3083
+  submitted 700/2000  RSS=27289676 KB  FDs=3583
+  submitted 800/2000  RSS=30791228 KB  FDs=4083
+  submitted 900/2000  RSS=34326192 KB  FDs=4583
+  submitted 1000/2000  RSS=37887040 KB  FDs=5083
+  submitted 1100/2000  RSS=41368240 KB  FDs=5583
+  submitted 1200/2000  RSS=44909000 KB  FDs=6083
+  submitted 1300/2000  RSS=48400612 KB  FDs=6583
+  submitted 1400/2000  RSS=51936844 KB  FDs=7083
+  submitted 1500/2000  RSS=55488060 KB  FDs=7583
+  submitted 1600/2000  RSS=58975500 KB  FDs=8083
+  submitted 1700/2000  RSS=62496112 KB  FDs=8583
+  submitted 1800/2000  RSS=65959584 KB  FDs=9083
+  submitted 1900/2000  RSS=69501296 KB  FDs=9583
+  submitted 2000/2000  RSS=73083968 KB  FDs=10083
+All 2000 submissions complete.
+  Verified: 2000 detached instances (expected 2000)
