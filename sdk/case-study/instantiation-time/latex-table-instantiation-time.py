@@ -5,8 +5,8 @@ import re
 import sys
 
 CASE_RE = re.compile(r"^\s+(\S+)\s+\(\d+ deps\):")
-DATA_RE = re.compile(
-    r"store\+linker=([\d.]+)\s+deps=([\d.]+)\s+app=([\d.]+)\s+total=([\d.]+)\s+us"
+METRIC_RE = re.compile(
+    r"^\s+(store\+linker|deps|app|total):\s+mean=([\d.]+)\s+min=([\d.]+)\s+max=([\d.]+)\s+stddev=([\d.]+)"
 )
 
 CASES = [
@@ -30,9 +30,20 @@ METRICS = [
 VAR_PREFIX = r"\caseInstTime"
 
 
-def parse(lines: list[str]) -> dict[str, dict[str, float]]:
-    """Return {case_name: {store_linker, deps, app, total}} from the Overall Summary."""
-    results = {}
+METRIC_KEY_MAP = {
+    "store+linker": "store_linker",
+    "deps": "deps",
+    "app": "app",
+    "total": "total",
+}
+
+
+def parse(lines: list[str]) -> dict[str, dict[str, tuple[float, float]]]:
+    """Return {case_name: {metric: (mean, stddev)}} from the Overall Summary.
+
+    Values are in microseconds.
+    """
+    results: dict[str, dict[str, tuple[float, float]]] = {}
     in_summary = False
     current_case = None
     for line in lines:
@@ -44,29 +55,33 @@ def parse(lines: list[str]) -> dict[str, dict[str, float]]:
         m = CASE_RE.match(line)
         if m:
             current_case = m.group(1)
+            results.setdefault(current_case, {})
             continue
         if current_case:
-            m = DATA_RE.search(line)
+            m = METRIC_RE.match(line)
             if m:
-                results[current_case] = {
-                    "store_linker": float(m.group(1)),
-                    "deps": float(m.group(2)),
-                    "app": float(m.group(3)),
-                    "total": float(m.group(4)),
-                }
-                current_case = None
+                key = METRIC_KEY_MAP[m.group(1)]
+                mean_val = float(m.group(2))
+                stddev_val = float(m.group(5))
+                results[current_case][key] = (mean_val, stddev_val)
+                if key == "total":
+                    current_case = None
     return results
 
 
-def latex_table(results: dict[str, dict[str, float]]) -> str:
+def latex_table(results: dict[str, dict[str, tuple[float, float]]]) -> str:
     lines: list[str] = []
 
     for case_key, _, tag, _ in CASES:
         data = results.get(case_key, {})
         for result_key, metric_suffix in METRICS:
+            mean_us, stddev_us = data.get(result_key, (float("nan"), float("nan")))
+            mean_ms = mean_us / 1000.0
+            stddev_ms = stddev_us / 1000.0
             var = f"{VAR_PREFIX}{tag}{metric_suffix}"
-            val_ms = data.get(result_key, float("nan")) / 1000.0
-            lines.append(rf"\newcommand{{{var}}}{{{val_ms:.2f}}}")
+            var_sd = f"{VAR_PREFIX}{tag}{metric_suffix}Sd"
+            lines.append(rf"\newcommand{{{var}}}{{{mean_ms:.2f}}}")
+            lines.append(rf"\newcommand{{{var_sd}}}{{{stddev_ms:.2f}}}")
 
     lines.append("")
     lines.append(r"\begin{table*}[t]")
@@ -102,10 +117,12 @@ def latex_table(results: dict[str, dict[str, float]]) -> str:
 
         for i, (_, metric_suffix) in enumerate(METRICS):
             var = f"{VAR_PREFIX}{tag}{metric_suffix}"
+            var_sd = f"{VAR_PREFIX}{tag}{metric_suffix}Sd"
+            cell = rf"{var}\,({var_sd})"
             if i < len(METRICS) - 1:
-                cols.append(rf"\multicolumn{{1}}{{r|}}{{{var}}}")
+                cols.append(rf"\multicolumn{{1}}{{r|}}{{{cell}}}")
             else:
-                cols.append(var)
+                cols.append(cell)
 
         lines.append(" & ".join(cols) + r" \\ \hline")
 

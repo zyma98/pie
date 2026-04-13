@@ -80,36 +80,42 @@ cargo build -rq --target wasm32-wasip2 \
 echo "=== Building Python prefix-tree ==="
 bakery build \
     --inferlib "$REPO_ROOT/sdk/rust/inferlib" \
+    --bindings "$REPO_ROOT/sdk/rust/inferlib/py-bindings" \
     "$REPO_ROOT/sdk/examples-py-inferlib/prefix-tree" \
     -o "$BUILD_DIR/prefix-tree-py.wasm" 2>/dev/null
 
 echo "=== Building Python recursion-of-thought ==="
 bakery build \
     --inferlib "$REPO_ROOT/sdk/rust/inferlib" \
+    --bindings "$REPO_ROOT/sdk/rust/inferlib/py-bindings" \
     "$REPO_ROOT/sdk/examples-py-inferlib/recursion-of-thought" \
     -o "$BUILD_DIR/recursion-of-thought-py.wasm" 2>/dev/null
 
 echo "=== Building Python template-generation ==="
 bakery build \
     --inferlib "$REPO_ROOT/sdk/rust/inferlib" \
+    --bindings "$REPO_ROOT/sdk/rust/inferlib/py-bindings" \
     "$REPO_ROOT/sdk/examples-py-inferlib/template-generation" \
     -o "$BUILD_DIR/template-generation-py.wasm" 2>/dev/null
 
 echo "=== Building Python cacheback-decoding ==="
 bakery build \
     --inferlib "$REPO_ROOT/sdk/rust/inferlib" \
+    --bindings "$REPO_ROOT/sdk/rust/inferlib/py-bindings" \
     "$REPO_ROOT/sdk/examples-py-inferlib/cacheback-decoding" \
     -o "$BUILD_DIR/cacheback-decoding-py.wasm" 2>/dev/null
 
 echo "=== Building Python agent-codeact ==="
 bakery build \
     --inferlib "$REPO_ROOT/sdk/rust/inferlib" \
+    --bindings "$REPO_ROOT/sdk/rust/inferlib/py-bindings" \
     "$REPO_ROOT/sdk/examples-py-inferlib/agent-codeact" \
     -o "$BUILD_DIR/agent-codeact-py.wasm" 2>/dev/null
 
 echo "=== Building Python text-completion-greedy ==="
 bakery build \
     --inferlib "$REPO_ROOT/sdk/rust/inferlib" \
+    --bindings "$REPO_ROOT/sdk/rust/inferlib/py-bindings" \
     "$REPO_ROOT/sdk/examples-py-inferlib/text-completion-greedy" \
     -o "$BUILD_DIR/text-completion-greedy-py.wasm" 2>/dev/null
 

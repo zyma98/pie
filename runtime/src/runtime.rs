@@ -1491,6 +1491,7 @@ impl Runtime {
                 println!("[case-study]   Dependency instantiation: {dep_us:.1} us");
                 println!("[case-study]   App component instantiation: {app_us:.1} us");
                 println!("[case-study]   Total: {total_us:.1} us");
+                return Ok(None);
             }
 
             // Attempt to call "run"

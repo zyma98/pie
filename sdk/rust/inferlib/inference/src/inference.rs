@@ -981,7 +981,7 @@ pub(crate) struct DecodeStepFuture {
 }
 
 impl DecodeStepFuture {
-    fn pollable(&self) -> wasip2::io::poll::Pollable {
+    pub(crate) fn pollable(&self) -> wasip2::io::poll::Pollable {
         self.host_result
             .borrow()
             .as_ref()
@@ -989,7 +989,7 @@ impl DecodeStepFuture {
             .pollable()
     }
 
-    fn get(&self) -> Option<u32> {
+    pub(crate) fn get(&self) -> Option<u32> {
         let host_result = self.host_result.borrow();
         let result = host_result.as_ref()?;
         let tokens = result.get_tokens()?;
@@ -1007,7 +1007,7 @@ pub(crate) struct FlushFuture {
 }
 
 impl FlushFuture {
-    fn pollable(&self) -> wasip2::io::poll::Pollable {
+    pub(crate) fn pollable(&self) -> wasip2::io::poll::Pollable {
         self.host_result
             .borrow()
             .as_ref()
@@ -1015,7 +1015,7 @@ impl FlushFuture {
             .pollable()
     }
 
-    fn is_ready(&self) -> bool {
+    pub(crate) fn is_ready(&self) -> bool {
         self.host_result
             .borrow()
             .as_ref()
@@ -1047,7 +1047,7 @@ pub(crate) struct GenerateFuture {
 }
 
 impl GenerateFuture {
-    fn pollable(&self) -> wasip2::io::poll::Pollable {
+    pub(crate) fn pollable(&self) -> wasip2::io::poll::Pollable {
         let mut state = self.state.borrow_mut();
         match &state.phase {
             GeneratePhase::Ready => {
@@ -1068,7 +1068,7 @@ impl GenerateFuture {
         }
     }
 
-    fn get(&self) -> Option<String> {
+    pub(crate) fn get(&self) -> Option<String> {
         let mut state = self.state.borrow_mut();
 
         let (host_result, pending_token_ids, pending_position_ids) =

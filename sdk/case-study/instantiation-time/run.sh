@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 ENGINE_LOG=$(mktemp)
 ENGINE_PID=""
-REPEATS=10
+REPEATS=1000
 
 cleanup() {
     if [ -n "$ENGINE_PID" ] && kill -0 "$ENGINE_PID" 2>/dev/null; then
@@ -26,11 +26,11 @@ source "$REPO_ROOT/pie/.venv/bin/activate"
 # Ordered by number of inferlib dependencies (0 -> 4)
 # ---------------------------------------------------------------------------
 CASES=(
-    "text-completion|std/text-completion/target/wasm32-wasip2/release/text_completion.wasm|std/text-completion/Pie.toml|0|-- -p Hello"
-    "text-completion-inferlib|sdk/examples-inferlib/target/wasm32-wasip2/release/text_completion_inferlib.wasm|sdk/examples-inferlib/text-completion-inferlib/Pie.toml|1|-- -p Hello"
-    "constrained-decoding|sdk/examples-inferlib/target/wasm32-wasip2/release/constrained_decoding.wasm|sdk/examples-inferlib/constrained-decoding/Pie.toml|2|"
-    "json-schema-validation|sdk/examples-inferlib/target/wasm32-wasip2/release/json_schema_validation.wasm|sdk/examples-inferlib/json-schema-validation/Pie.toml|3|"
-    "template-generation|sdk/examples-inferlib/target/wasm32-wasip2/release/template_generation.wasm|sdk/examples-inferlib/template-generation/Pie.toml|4|"
+    "text-completion|std/text-completion/target/wasm32-wasip2/release/text_completion.wasm|std/text-completion/Pie.toml|0|-- -p Hello -n 3"
+    "text-completion-inferlib|sdk/examples-inferlib/target/wasm32-wasip2/release/text_completion_inferlib.wasm|sdk/examples-inferlib/text-completion-inferlib/Pie.toml|1|-- -p Hello -n 3"
+    "constrained-decoding|sdk/examples-inferlib/target/wasm32-wasip2/release/constrained_decoding.wasm|sdk/examples-inferlib/constrained-decoding/Pie.toml|2|-- -n 3"
+    "json-schema-validation|sdk/examples-inferlib/target/wasm32-wasip2/release/json_schema_validation.wasm|sdk/examples-inferlib/json-schema-validation/Pie.toml|3|-- -t 3"
+    "template-generation|sdk/examples-inferlib/target/wasm32-wasip2/release/template_generation.wasm|sdk/examples-inferlib/template-generation/Pie.toml|4|-- -t 3"
 )
 
 # ---------------------------------------------------------------------------
@@ -120,7 +120,7 @@ submit_app() {
 
 extract_us() {
     local label="$1"
-    grep "\[case-study\].*$label" "$ENGINE_LOG" | \
+    grep "\[case-study\].*$label" "$ENGINE_LOG" | tail -1 | \
         sed "s/.*$label: *\([0-9.]*\) us/\1/"
 }
 
@@ -144,17 +144,22 @@ for entry in "${CASES[@]}"; do
     echo "  ${name} (${num_deps} inferlib deps, ${REPEATS} runs)"
     echo "============================================================"
 
+    echo -n "  Starting engine..."
+    start_engine
+    echo -n " installing deps..."
+    install_inferlib_deps
+
+    echo -n " warm-up..."
+    submit_app "$wasm_path" "$manifest_path" "$extra_args"
+    echo " done."
+
     case_sl=""
     case_dep=""
     case_app=""
     case_tot=""
 
     for i in $(seq 1 $REPEATS); do
-        echo -n "  Run $i/$REPEATS: starting engine..."
-        start_engine
-        echo -n " installing..."
-        install_inferlib_deps
-        echo -n " submitting..."
+        echo -n "  Run $i/$REPEATS: submitting..."
         submit_app "$wasm_path" "$manifest_path" "$extra_args"
 
         sl=$(extract_us "Store + Linker creation")
@@ -168,9 +173,9 @@ for entry in "${CASES[@]}"; do
         case_dep="$case_dep $dep"
         case_app="$case_app $app"
         case_tot="$case_tot $tot"
-
-        stop_engine
     done
+
+    stop_engine
 
     all_store_linker["$name"]="$case_sl"
     all_dep["$name"]="$case_dep"
@@ -178,16 +183,19 @@ for entry in "${CASES[@]}"; do
     all_total["$name"]="$case_tot"
 
     python3 -c "
+import statistics
 sl = [float(x) for x in '''$case_sl'''.split()]
 dep = [float(x) for x in '''$case_dep'''.split()]
 app = [float(x) for x in '''$case_app'''.split()]
 tot = [float(x) for x in '''$case_tot'''.split()]
+def stats(v):
+    return f'mean={statistics.mean(v):.1f}  min={min(v):.1f}  max={max(v):.1f}  stddev={statistics.stdev(v):.1f}'
 print()
-print('  --- Average ---')
-print(f'  Store + Linker creation:       {sum(sl)/len(sl):.1f} us')
-print(f'  Dependency instantiation:      {sum(dep)/len(dep):.1f} us')
-print(f'  App component instantiation:   {sum(app)/len(app):.1f} us')
-print(f'  Total:                         {sum(tot)/len(tot):.1f} us')
+print('  --- Statistics ---')
+print(f'  Store + Linker creation:       {stats(sl)} us')
+print(f'  Dependency instantiation:      {stats(dep)} us')
+print(f'  App component instantiation:   {stats(app)} us')
+print(f'  Total:                         {stats(tot)} us')
 "
 done
 
@@ -203,11 +211,17 @@ echo "============================================================"
 for entry in "${CASES[@]}"; do
     IFS='|' read -r name _ _ num_deps _ <<< "$entry"
     python3 -c "
+import statistics
 tot = [float(x) for x in '''${all_total[$name]}'''.split()]
 dep = [float(x) for x in '''${all_dep[$name]}'''.split()]
 app = [float(x) for x in '''${all_app[$name]}'''.split()]
 sl  = [float(x) for x in '''${all_store_linker[$name]}'''.split()]
+def stats(v):
+    return f'mean={statistics.mean(v):.1f}  min={min(v):.1f}  max={max(v):.1f}  stddev={statistics.stdev(v):.1f}'
 print(f'  ${name} (${num_deps} deps):')
-print(f'    store+linker={sum(sl)/len(sl):.1f}  deps={sum(dep)/len(dep):.1f}  app={sum(app)/len(app):.1f}  total={sum(tot)/len(tot):.1f} us')
+print(f'    store+linker:  {stats(sl)} us')
+print(f'    deps:          {stats(dep)} us')
+print(f'    app:           {stats(app)} us')
+print(f'    total:         {stats(tot)} us')
 "
 done
