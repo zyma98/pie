@@ -1,0 +1,295 @@
+=== Building runtime with microbench_call_latency feature ===
+=== Building inferlib dependencies ===
+=== Building microbench crates ===
+=== Building Python echo callees ===
+Building Python library component...
+   Input: /home/acciente/work/pie/sdk/microbench/func-call-latency/inferlib-p2p-echo-callee
+   Output: /home/acciente/work/pie/sdk/microbench/target/wasm32-wasip2/release/inferlib_p2p_echo_callee.wasm
+   World: echo-provider
+   Module: app
+╭──────────────────────────────────────────────────────────────────── Build successful! ─────────────────────────────────────────────────────────────────────╮
+│ Output: /home/acciente/work/pie/sdk/microbench/target/wasm32-wasip2/release/inferlib_p2p_echo_callee.wasm (0.7 MB)                                         │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Building Python library component...
+   Input: /home/acciente/work/pie/sdk/microbench/func-call-latency/inferlib-r2p-echo-callee
+   Output: /home/acciente/work/pie/sdk/microbench/target/wasm32-wasip2/release/inferlib_r2p_echo_callee.wasm
+   World: echo-provider
+   Module: app
+╭──────────────────────────────────────────────────────────────────── Build successful! ─────────────────────────────────────────────────────────────────────╮
+│ Output: /home/acciente/work/pie/sdk/microbench/target/wasm32-wasip2/release/inferlib_r2p_echo_callee.wasm (0.7 MB)                                         │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+=== Building Python echo callers (P2R, P2P) ===
+🏗️  Building Python inferlib...
+   Input: func-call-latency/inferlib-p2r-echo-caller
+   Output: target/wasm32-wasip2/release/inferlib_p2r_echo_caller.wasm
+   Package: inferlib-p2r-echo-caller
+   Mode: inferlib
+   Type: Package
+╭─────────────────────────────────────────────────────────────────── ✅ Build successful! ───────────────────────────────────────────────────────────────────╮
+│ Output: target/wasm32-wasip2/release/inferlib_p2r_echo_caller.wasm (0.8 MB)                                                                                │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+🏗️  Building Python inferlib...
+   Input: func-call-latency/inferlib-p2p-echo-caller
+   Output: target/wasm32-wasip2/release/inferlib_p2p_echo_caller.wasm
+   Package: inferlib-p2p-echo-caller
+   Mode: inferlib
+   Type: Package
+╭─────────────────────────────────────────────────────────────────── ✅ Build successful! ───────────────────────────────────────────────────────────────────╮
+│ Output: target/wasm32-wasip2/release/inferlib_p2p_echo_caller.wasm (0.8 MB)                                                                                │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+=== Starting engine (--no-snapshot) ===
+Waiting for engine to start................. ready (PID 310260)
+=== Installing inferlib-inference ===
+Inferlet: inferlib-inference@0.1.0
+✅ Inferlet installed successfully.
+=== Installing inferlib-r2r-echo-callee ===
+Inferlet: inferlib-r2r-echo-callee@0.1.0
+✅ Inferlet installed successfully.
+=== Installing inferlib-p2r-echo-callee ===
+Inferlet: inferlib-p2r-echo-callee@0.1.0
+✅ Inferlet installed successfully.
+=== Installing inferlib-p2p-echo-callee ===
+Inferlet: inferlib-p2p-echo-callee@0.1.0
+✅ Inferlet installed successfully.
+=== Installing inferlib-r2p-echo-callee ===
+Inferlet: inferlib-r2p-echo-callee@0.1.0
+✅ Inferlet installed successfully.
+=== Installing inferlib-r2r-resecho-callee ===
+Inferlet: inferlib-r2r-resecho-callee@0.1.0
+✅ Inferlet installed successfully.
+
+=== Running inferlib cross-component benchmark ===
+=== R2R Echo Dynamic Composition ===
+Inferlet: inferlib-r2r-echo-caller@0.1.0
+✅ Inferlet installed successfully.
+✅ Inferlet launched with ID: dd39d778-c5a8-4420-a7c4-b222160ad563
+[Instance dd39d778] Cross-component echo() call benchmark (R2R)
+[Instance dd39d778]   Warmup iterations:  100000
+[Instance dd39d778]   Bench iterations:   10000000
+[Instance dd39d778]   Total elapsed:      19.832045449s
+[Instance dd39d778]   Per-call latency:   1983.2 ns
+[Instance dd39d778] Completed: ()
+
+=== Running inferlib cross-component benchmark ===
+=== R2R Echo Static Composition ===
+Inferlet: inferlib-r2r-echo-caller@0.1.0
+✅ Inferlet installed successfully.
+✅ Inferlet launched with ID: 3f767335-1170-408f-804f-d5799c76efbc
+[Instance 3f767335] Cross-component echo() call benchmark (R2R)
+[Instance 3f767335]   Warmup iterations:  100000
+[Instance 3f767335]   Bench iterations:   10000000
+[Instance 3f767335]   Total elapsed:      579.120651ms
+[Instance 3f767335]   Per-call latency:   57.9 ns
+[Instance 3f767335] Completed: ()
+
+=== Running inferlib cross-component benchmark ===
+=== P2R Echo Dynamic Composition ===
+Inferlet: inferlib-p2r-echo-caller@0.1.0
+✅ Inferlet installed successfully.
+✅ Inferlet launched with ID: 61eb0449-ed20-4523-8bf5-cfa982b4ea70
+[Instance 61eb0449] Cross-component echo() call benchmark (P2R)
+[Instance 61eb0449]   Warmup iterations:  100000
+[Instance 61eb0449]   Bench iterations:   10000000
+[Instance 61eb0449]   Total elapsed:      30.848729s
+[Instance 61eb0449]   Per-call latency:   3084.9 ns
+[Instance 61eb0449] Completed: Per-call latency: 3084.9 ns
+
+=== Running inferlib cross-component benchmark ===
+=== P2R Echo Static Composition ===
+Inferlet: inferlib-p2r-echo-caller@0.1.0
+✅ Inferlet installed successfully.
+✅ Inferlet launched with ID: 9de7120d-8224-4bcd-a508-95a02986901b
+[Instance 9de7120d] Cross-component echo() call benchmark (P2R)
+[Instance 9de7120d]   Warmup iterations:  100000
+[Instance 9de7120d]   Bench iterations:   10000000
+[Instance 9de7120d]   Total elapsed:      8.339021s
+[Instance 9de7120d]   Per-call latency:   833.9 ns
+[Instance 9de7120d] Completed: Per-call latency: 833.9 ns
+
+=== Running inferlib cross-component benchmark ===
+=== P2P Echo Dynamic Composition ===
+Inferlet: inferlib-p2p-echo-caller@0.1.0
+✅ Inferlet installed successfully.
+✅ Inferlet launched with ID: daa7b898-8282-4629-9ef1-8a8843409e2d
+[Instance daa7b898] Cross-component echo() call benchmark (P2P)
+[Instance daa7b898]   Warmup iterations:  100000
+[Instance daa7b898]   Bench iterations:   10000000
+[Instance daa7b898]   Total elapsed:      45.708716s
+[Instance daa7b898]   Per-call latency:   4570.9 ns
+[Instance daa7b898] Completed: Per-call latency: 4570.9 ns
+
+=== Running inferlib cross-component benchmark ===
+=== P2P Echo Static Composition ===
+Inferlet: inferlib-p2p-echo-caller@0.1.0
+✅ Inferlet installed successfully.
+✅ Inferlet launched with ID: 73855791-aa06-465d-8d8d-a48512e5d902
+[Instance 73855791] Cross-component echo() call benchmark (P2P)
+[Instance 73855791]   Warmup iterations:  100000
+[Instance 73855791]   Bench iterations:   10000000
+[Instance 73855791]   Total elapsed:      21.376314s
+[Instance 73855791]   Per-call latency:   2137.6 ns
+[Instance 73855791] Completed: Per-call latency: 2137.6 ns
+
+=== Running inferlib cross-component benchmark ===
+=== R2P Echo Dynamic Composition ===
+Inferlet: inferlib-r2p-echo-caller@0.1.0
+✅ Inferlet installed successfully.
+✅ Inferlet launched with ID: 3bf2a7a3-7095-4fd0-8c24-91550293ec8e
+[Instance 3bf2a7a3] Cross-component echo() call benchmark (R2P)
+[Instance 3bf2a7a3]   Warmup iterations:  100000
+[Instance 3bf2a7a3]   Bench iterations:   10000000
+[Instance 3bf2a7a3]   Total elapsed:      35.096930879s
+[Instance 3bf2a7a3]   Per-call latency:   3509.7 ns
+[Instance 3bf2a7a3] Completed: ()
+
+=== Running inferlib cross-component benchmark ===
+=== R2P Echo Static Composition ===
+Inferlet: inferlib-r2p-echo-caller@0.1.0
+✅ Inferlet installed successfully.
+✅ Inferlet launched with ID: 2893f255-a099-4cb9-905f-6b4359b2e2a1
+[Instance 2893f255] Cross-component echo() call benchmark (R2P)
+[Instance 2893f255]   Warmup iterations:  100000
+[Instance 2893f255]   Bench iterations:   10000000
+[Instance 2893f255]   Total elapsed:      11.905102535s
+[Instance 2893f255]   Per-call latency:   1190.5 ns
+[Instance 2893f255] Completed: ()
+
+=== Running guest-to-host benchmark (R2H) ===
+Inferlet: inferlib-r2h-echo-caller@0.1.0
+✅ Inferlet installed successfully.
+✅ Inferlet launched with ID: c64bcecf-018a-4e37-87f0-54749317fdf3
+[Instance c64bcecf] Guest-to-host echo() call benchmark (R2H)
+[Instance c64bcecf]   Warmup iterations:  100000
+[Instance c64bcecf]   Bench iterations:   10000000
+[Instance c64bcecf]   Total elapsed:      2.537614698s
+[Instance c64bcecf]   Per-call latency:   253.8 ns
+[Instance c64bcecf] Completed: ()
+
+=== Running host-to-guest benchmark (H2R) ===
+Inferlet: inferlib-h2r-echo-caller@0.1.0
+✅ Inferlet installed successfully.
+✅ Inferlet launched with ID: f83943f6-22e5-4e32-a45c-d3f1357a9574
+[Instance f83943f6] Host-to-guest echo() call benchmark (H2R)
+[Instance f83943f6]   Warmup iterations:  100000
+[Instance f83943f6]   Bench iterations:   10000000
+[Instance f83943f6]   Total elapsed:      15.0381995s
+[Instance f83943f6]   Per-call latency:   1503.8 ns
+[Instance f83943f6] Completed: ()
+
+=== Running inferlib cross-component benchmark ===
+=== R2R ResEcho Dynamic Composition Resources=1 ===
+Inferlet: inferlib-r2r-resecho-caller@0.1.0
+✅ Inferlet installed successfully.
+✅ Inferlet launched with ID: bb6b2201-4956-46c2-8e08-a884ad046edc
+[Instance bb6b2201] Cross-component resecho() call benchmark (R2R, slow path)
+[Instance bb6b2201]   Resource count:     1
+[Instance bb6b2201]   Warmup iterations:  100000
+[Instance bb6b2201]   Bench iterations:   10000000
+[Instance bb6b2201]   Total elapsed:      27.839853455s
+[Instance bb6b2201]   Per-call latency:   2784.0 ns
+[Instance bb6b2201] Completed: ()
+
+=== Running inferlib cross-component benchmark ===
+=== R2R ResEcho Dynamic Composition Resources=2 ===
+Inferlet: inferlib-r2r-resecho-caller@0.1.0
+Inferlet already exists on server.
+✅ Inferlet launched with ID: 89bd84d5-78d0-4a3c-b3e6-90fefc0180ba
+[Instance 89bd84d5] Cross-component resecho() call benchmark (R2R, slow path)
+[Instance 89bd84d5]   Resource count:     2
+[Instance 89bd84d5]   Warmup iterations:  100000
+[Instance 89bd84d5]   Bench iterations:   10000000
+[Instance 89bd84d5]   Total elapsed:      29.73660955s
+[Instance 89bd84d5]   Per-call latency:   2973.7 ns
+[Instance 89bd84d5] Completed: ()
+
+=== Running inferlib cross-component benchmark ===
+=== R2R ResEcho Dynamic Composition Resources=4 ===
+Inferlet: inferlib-r2r-resecho-caller@0.1.0
+Inferlet already exists on server.
+✅ Inferlet launched with ID: 2da8834e-88c8-46fe-81eb-df38c8914987
+[Instance 2da8834e] Cross-component resecho() call benchmark (R2R, slow path)
+[Instance 2da8834e]   Resource count:     4
+[Instance 2da8834e]   Warmup iterations:  100000
+[Instance 2da8834e]   Bench iterations:   10000000
+[Instance 2da8834e]   Total elapsed:      34.068004776s
+[Instance 2da8834e]   Per-call latency:   3406.8 ns
+[Instance 2da8834e] Completed: ()
+
+=== Running inferlib cross-component benchmark ===
+=== R2R ResEcho Dynamic Composition Resources=8 ===
+Inferlet: inferlib-r2r-resecho-caller@0.1.0
+Inferlet already exists on server.
+✅ Inferlet launched with ID: bfaa560d-f758-42e6-a329-c57822d54fcf
+[Instance bfaa560d] Cross-component resecho() call benchmark (R2R, slow path)
+[Instance bfaa560d]   Resource count:     8
+[Instance bfaa560d]   Warmup iterations:  100000
+[Instance bfaa560d]   Bench iterations:   10000000
+[Instance bfaa560d]   Total elapsed:      43.353020891s
+[Instance bfaa560d]   Per-call latency:   4335.3 ns
+[Instance bfaa560d] Completed: ()
+
+=== Running inferlib cross-component benchmark ===
+=== R2R ResEcho Static Composition Resources=1 ===
+Inferlet: inferlib-r2r-resecho-caller@0.1.0
+✅ Inferlet installed successfully.
+✅ Inferlet launched with ID: 99247a17-5440-4c45-8cee-8b238097c393
+[Instance 99247a17] Cross-component resecho() call benchmark (R2R, slow path)
+[Instance 99247a17]   Resource count:     1
+[Instance 99247a17]   Warmup iterations:  100000
+[Instance 99247a17]   Bench iterations:   10000000
+[Instance 99247a17]   Total elapsed:      1.831205002s
+[Instance 99247a17]   Per-call latency:   183.1 ns
+[Instance 99247a17] Completed: ()
+
+=== Running inferlib cross-component benchmark ===
+=== R2R ResEcho Static Composition Resources=2 ===
+Inferlet: inferlib-r2r-resecho-caller@0.1.0
+✅ Inferlet installed successfully.
+✅ Inferlet launched with ID: 4b576bdf-1742-4270-8b5d-4912016b8284
+[Instance 4b576bdf] Cross-component resecho() call benchmark (R2R, slow path)
+[Instance 4b576bdf]   Resource count:     2
+[Instance 4b576bdf]   Warmup iterations:  100000
+[Instance 4b576bdf]   Bench iterations:   10000000
+[Instance 4b576bdf]   Total elapsed:      1.970679718s
+[Instance 4b576bdf]   Per-call latency:   197.1 ns
+[Instance 4b576bdf] Completed: ()
+
+=== Running inferlib cross-component benchmark ===
+=== R2R ResEcho Static Composition Resources=4 ===
+Inferlet: inferlib-r2r-resecho-caller@0.1.0
+✅ Inferlet installed successfully.
+✅ Inferlet launched with ID: babb7ab5-27d3-40b4-a405-f2d052c4e40a
+[Instance babb7ab5] Cross-component resecho() call benchmark (R2R, slow path)
+[Instance babb7ab5]   Resource count:     4
+[Instance babb7ab5]   Warmup iterations:  100000
+[Instance babb7ab5]   Bench iterations:   10000000
+[Instance babb7ab5]   Total elapsed:      2.477105721s
+[Instance babb7ab5]   Per-call latency:   247.7 ns
+[Instance babb7ab5] Completed: ()
+
+=== Running inferlib cross-component benchmark ===
+=== R2R ResEcho Static Composition Resources=8 ===
+Inferlet: inferlib-r2r-resecho-caller@0.1.0
+✅ Inferlet installed successfully.
+✅ Inferlet launched with ID: e13a3706-e02d-4fb9-8ab1-30cf290b9cab
+[Instance e13a3706] Cross-component resecho() call benchmark (R2R, slow path)
+[Instance e13a3706]   Resource count:     8
+[Instance e13a3706]   Warmup iterations:  100000
+[Instance e13a3706]   Bench iterations:   10000000
+[Instance e13a3706]   Total elapsed:      4.748086224s
+[Instance e13a3706]   Per-call latency:   474.8 ns
+[Instance e13a3706] Completed: ()
+
+=== Running monolithic intra-component benchmark ===
+Inferlet: mono-r2r-echo-caller@0.1.0
+✅ Inferlet installed successfully.
+✅ Inferlet launched with ID: f5feacee-7f06-4973-96a1-408282f88546
+[Instance f5feacee] Monolithic intra-component echo() call benchmark
+[Instance f5feacee]   Warmup iterations:  100000
+[Instance f5feacee]   Bench iterations:   10000000
+[Instance f5feacee]   Total elapsed:      176.326835ms
+[Instance f5feacee]   Per-call latency:   17.6 ns
+[Instance f5feacee] Completed: ()
+
+=== Stopping engine (PID 310260) ===
+Engine stopped.

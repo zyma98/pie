@@ -1,0 +1,1035 @@
+=== Building runtime with microbench_snapshot feature ===
+=== Building inferlib dependencies ===
+=== Building microbench Rust crates ===
+=== Building snapshot-echo-callee (Python, shared modules) ===
+Building Python library component...
+   Input: /home/acciente/work/pie/sdk/microbench/snapshot-latency/echo-callee
+   Output: /home/acciente/work/pie/sdk/microbench/target/wasm32-wasip2/release/snapshot_echo_callee.wasm
+   World: echo-provider
+   Module: app
+╭──────────────────────────────────────────────────────────────────── Build successful! ─────────────────────────────────────────────────────────────────────╮
+│ Output: /home/acciente/work/pie/sdk/microbench/target/wasm32-wasip2/release/snapshot_echo_callee.wasm (0.7 MB)                                             │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+============================================================
+  Phase 2: WITH snapshot optimization (100 runs)
+============================================================
+  Run 1/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=256.174 us, snapshot=1025496.8 us
+  Run 2/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=199.313 us, snapshot=1049040.7 us
+  Run 3/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=252.424 us, snapshot=702624.2 us
+  Run 4/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=234.585 us, snapshot=896775.3 us
+  Run 5/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=197.024 us, snapshot=1041217.0 us
+  Run 6/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=219.094 us, snapshot=930720.7 us
+  Run 7/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=538.269 us, snapshot=986588.8 us
+  Run 8/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=223.054 us, snapshot=894371.8 us
+  Run 9/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=198.213 us, snapshot=1026542.0 us
+  Run 10/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=425.358 us, snapshot=1017979.5 us
+  Run 11/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=271.965 us, snapshot=896586.8 us
+  Run 12/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=196.074 us, snapshot=973214.9 us
+  Run 13/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=207.113 us, snapshot=882702.0 us
+  Run 14/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=270.705 us, snapshot=794385.8 us
+  Run 15/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=198.954 us, snapshot=1000087.7 us
+  Run 16/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=312.435 us, snapshot=1037714.1 us
+  Run 17/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=287.375 us, snapshot=1000048.9 us
+  Run 18/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=197.744 us, snapshot=993587.4 us
+  Run 19/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=210.044 us, snapshot=987759.7 us
+  Run 20/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=211.744 us, snapshot=1013938.3 us
+  Run 21/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=321.055 us, snapshot=1002885.1 us
+  Run 22/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=321.315 us, snapshot=1025821.1 us
+  Run 23/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=251.185 us, snapshot=949623.1 us
+  Run 24/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=390.987 us, snapshot=985246.9 us
+  Run 25/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=660.892 us, snapshot=1001121.9 us
+  Run 26/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=204.473 us, snapshot=874783.4 us
+  Run 27/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=218.294 us, snapshot=890141.1 us
+  Run 28/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=244.714 us, snapshot=1002387.5 us
+  Run 29/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=298.605 us, snapshot=950129.4 us
+  Run 30/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=207.144 us, snapshot=923510.5 us
+  Run 31/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=192.293 us, snapshot=961234.0 us
+  Run 32/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=306.276 us, snapshot=913317.4 us
+  Run 33/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=270.115 us, snapshot=1069304.6 us
+  Run 34/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=568.451 us, snapshot=893393.6 us
+  Run 35/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=251.664 us, snapshot=937356.3 us
+  Run 36/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=309.285 us, snapshot=651495.9 us
+  Run 37/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=453.708 us, snapshot=928158.4 us
+  Run 38/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=378.586 us, snapshot=1035455.4 us
+  Run 39/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=193.483 us, snapshot=683650.3 us
+  Run 40/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=206.414 us, snapshot=924914.3 us
+  Run 41/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=249.914 us, snapshot=931808.5 us
+  Run 42/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=211.994 us, snapshot=942584.1 us
+  Run 43/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=496.499 us, snapshot=980552.7 us
+  Run 44/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=193.903 us, snapshot=935948.5 us
+  Run 45/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=198.334 us, snapshot=818480.1 us
+  Run 46/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=203.014 us, snapshot=937206.3 us
+  Run 47/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=325.876 us, snapshot=942392.1 us
+  Run 48/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=204.964 us, snapshot=890597.5 us
+  Run 49/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=448.918 us, snapshot=1004516.1 us
+  Run 50/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=190.273 us, snapshot=956637.2 us
+  Run 51/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=203.064 us, snapshot=900415.4 us
+  Run 52/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=313.206 us, snapshot=950263.9 us
+  Run 53/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=291.565 us, snapshot=1013047.5 us
+  Run 54/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=238.805 us, snapshot=653025.9 us
+  Run 55/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=296.955 us, snapshot=771655.2 us
+  Run 56/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=309.455 us, snapshot=904610.3 us
+  Run 57/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=200.864 us, snapshot=769305.2 us
+  Run 58/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=199.083 us, snapshot=649969.4 us
+  Run 59/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=197.663 us, snapshot=1014408.8 us
+  Run 60/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=207.823 us, snapshot=960495.2 us
+  Run 61/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=208.794 us, snapshot=789009.9 us
+  Run 62/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=208.904 us, snapshot=967867.4 us
+  Run 63/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=203.954 us, snapshot=900262.9 us
+  Run 64/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=250.935 us, snapshot=984321.7 us
+  Run 65/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=254.124 us, snapshot=928303.8 us
+  Run 66/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=249.084 us, snapshot=969689.8 us
+  Run 67/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=196.463 us, snapshot=1015383.1 us
+  Run 68/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=214.514 us, snapshot=943188.8 us
+  Run 69/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=694.743 us, snapshot=893397.6 us
+  Run 70/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=200.273 us, snapshot=998882.1 us
+  Run 71/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=301.815 us, snapshot=846085.6 us
+  Run 72/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=183.274 us, snapshot=992118.4 us
+  Run 73/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=252.055 us, snapshot=1009363.3 us
+  Run 74/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=438.368 us, snapshot=1051170.5 us
+  Run 75/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=266.445 us, snapshot=846566.6 us
+  Run 76/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=467.208 us, snapshot=993922.6 us
+  Run 77/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=296.175 us, snapshot=1039069.1 us
+  Run 78/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=296.406 us, snapshot=766460.6 us
+  Run 79/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=316.625 us, snapshot=810351.2 us
+  Run 80/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=191.854 us, snapshot=826396.8 us
+  Run 81/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=256.145 us, snapshot=840620.1 us
+  Run 82/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=266.355 us, snapshot=873165.8 us
+  Run 83/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=170.373 us, snapshot=878725.4 us
+  Run 84/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=316.306 us, snapshot=977295.4 us
+  Run 85/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=216.504 us, snapshot=960404.5 us
+  Run 86/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=184.073 us, snapshot=994802.1 us
+  Run 87/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=155.113 us, snapshot=905288.2 us
+  Run 88/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=196.214 us, snapshot=993978.2 us
+  Run 89/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=296.486 us, snapshot=770693.1 us
+  Run 90/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=270.385 us, snapshot=767987.5 us
+  Run 91/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=164.093 us, snapshot=573844.7 us
+  Run 92/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=203.974 us, snapshot=890928.7 us
+  Run 93/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=195.164 us, snapshot=1051695.2 us
+  Run 94/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=377.047 us, snapshot=896020.1 us
+  Run 95/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=254.794 us, snapshot=1040541.8 us
+  Run 96/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=197.304 us, snapshot=1001032.5 us
+  Run 97/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=421.498 us, snapshot=898336.1 us
+  Run 98/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=275.204 us, snapshot=1035689.7 us
+  Run 99/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=193.534 us, snapshot=669244.6 us
+  Run 100/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=268.955 us, snapshot=952450.5 us
+
+=== Results: WITH snapshot ===
+  First-call latency: mean=271.1  min=155.1  max=694.7  stddev=102.1 us
+  Snapshot creation:  mean=922277.9  min=573844.7  max=1069304.6  stddev=104499.2 us
+
+============================================================
+  Phase 3: WITHOUT snapshot optimization (100 runs)
+============================================================
+  Run 1/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=646103.132 us
+  Run 2/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=609112.651 us
+  Run 3/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=727619.727 us
+  Run 4/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=678506.95 us
+  Run 5/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=494086.019 us
+  Run 6/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=693361.105 us
+  Run 7/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=713430.043 us
+  Run 8/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=715442.799 us
+  Run 9/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=612520.562 us
+  Run 10/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=709496.413 us
+  Run 11/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=692589.332 us
+  Run 12/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=658533.803 us
+  Run 13/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=678678.363 us
+  Run 14/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=712235.912 us
+  Run 15/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=730085.511 us
+  Run 16/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=699805.09 us
+  Run 17/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=688891.085 us
+  Run 18/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=718484.684 us
+  Run 19/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=601240.841 us
+  Run 20/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=695698.217 us
+  Run 21/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=524771.446 us
+  Run 22/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=629237.671 us
+  Run 23/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=683049.382 us
+  Run 24/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=661487.576 us
+  Run 25/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=715171.664 us
+  Run 26/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=598614.917 us
+  Run 27/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=724736.932 us
+  Run 28/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=571356.559 us
+  Run 29/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=329893.7 us
+  Run 30/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=563919.756 us
+  Run 31/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=693368.801 us
+  Run 32/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=508731.309 us
+  Run 33/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=726654.816 us
+  Run 34/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=580273.928 us
+  Run 35/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=522656.098 us
+  Run 36/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=637122.235 us
+  Run 37/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=546866.64 us
+  Run 38/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=394455.885 us
+  Run 39/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=696095.689 us
+  Run 40/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=727689.034 us
+  Run 41/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=677228.252 us
+  Run 42/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=383378.296 us
+  Run 43/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=598888.371 us
+  Run 44/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=680678.144 us
+  Run 45/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=703907.589 us
+  Run 46/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=590898.059 us
+  Run 47/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=426899.185 us
+  Run 48/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=619725.184 us
+  Run 49/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=562758.225 us
+  Run 50/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=666354.107 us
+  Run 51/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=647049.852 us
+  Run 52/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=718246.987 us
+  Run 53/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=553192.054 us
+  Run 54/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=700839.864 us
+  Run 55/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=663870.483 us
+  Run 56/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=681055.561 us
+  Run 57/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=379270.883 us
+  Run 58/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=614500.879 us
+  Run 59/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=724456.213 us
+  Run 60/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=592526.464 us
+  Run 61/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=675986.312 us
+  Run 62/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=675504.444 us
+  Run 63/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=572690.819 us
+  Run 64/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=585171.853 us
+  Run 65/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=365056.602 us
+  Run 66/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=619152.213 us
+  Run 67/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=714801.93 us
+  Run 68/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=447445.52 us
+  Run 69/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=633438.249 us
+  Run 70/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=681499.712 us
+  Run 71/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=537286.724 us
+  Run 72/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=663591.321 us
+  Run 73/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=586416.885 us
+  Run 74/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=682836.915 us
+  Run 75/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=449911.105 us
+  Run 76/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=614972.527 us
+  Run 77/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=553031.206 us
+  Run 78/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=675144.118 us
+  Run 79/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=732324.534 us
+  Run 80/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=621899.942 us
+  Run 81/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=647482.011 us
+  Run 82/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=694190.589 us
+  Run 83/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=628549.171 us
+  Run 84/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=690931.571 us
+  Run 85/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=519174.298 us
+  Run 86/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=604733.594 us
+  Run 87/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=670193.149 us
+  Run 88/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=687660.292 us
+  Run 89/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=613244.157 us
+  Run 90/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=709961.211 us
+  Run 91/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=678464.232 us
+  Run 92/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=642407.527 us
+  Run 93/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=364322.348 us
+  Run 94/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=491117.43 us
+  Run 95/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=537004.392 us
+  Run 96/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=701975.23 us
+  Run 97/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=742527.281 us
+  Run 98/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=442154.699 us
+  Run 99/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=655234.93 us
+  Run 100/100: starting engine... installing...Inferlet: inferlib-inference@0.1.0
+Inferlet already exists on server.
+Inferlet: snapshot-echo-callee@0.1.0
+Inferlet already exists on server.
+ running... call=735822.073 us
+
+=== Results: WITHOUT snapshot ===
+  First-call latency: mean=622431.1  min=329893.7  max=742527.3  stddev=97853.9 us
+
+============================================================
+  Summary
+============================================================
+  First-call WITH snapshot:    mean=271.1  min=155.1  max=694.7  stddev=102.1 us
+  First-call WITHOUT snapshot: mean=622431.1  min=329893.7  max=742527.3  stddev=97853.9 us
+  Snapshot creation:           mean=922277.9  min=573844.7  max=1069304.6  stddev=104499.2 us
+  Speedup from snapshot:       2295.9x

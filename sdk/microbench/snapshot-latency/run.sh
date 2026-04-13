@@ -6,7 +6,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 MICROBENCH_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 ENGINE_LOG=$(mktemp)
 ENGINE_PID=""
-REPEATS=10
+REPEATS=100
 
 cleanup() {
     if [ -n "$ENGINE_PID" ] && kill -0 "$ENGINE_PID" 2>/dev/null; then
@@ -142,14 +142,14 @@ done
 echo ""
 echo "=== Results: WITH snapshot ==="
 python3 -c "
+import statistics
 vals = [float(x) for x in '''$with_snapshot_latencies'''.split()]
-print(f'  First-call latencies (us): {[\"{:.1f}\".format(v) for v in vals]}')
-print(f'  Average first-call latency: {sum(vals)/len(vals):.1f} us')
+print(f'  First-call latency: mean={statistics.mean(vals):.1f}  min={min(vals):.1f}  max={max(vals):.1f}  stddev={statistics.stdev(vals):.1f} us')
 "
 python3 -c "
+import statistics
 vals = [float(x) for x in '''$snapshot_latencies'''.split()]
-print(f'  Snapshot creation latencies (us): {[\"{:.1f}\".format(v) for v in vals]}')
-print(f'  Average snapshot creation latency: {sum(vals)/len(vals):.1f} us')
+print(f'  Snapshot creation:  mean={statistics.mean(vals):.1f}  min={min(vals):.1f}  max={max(vals):.1f}  stddev={statistics.stdev(vals):.1f} us')
 "
 
 # ---------------------------------------------------------------------------
@@ -183,9 +183,9 @@ done
 echo ""
 echo "=== Results: WITHOUT snapshot ==="
 python3 -c "
+import statistics
 vals = [float(x) for x in '''$without_snapshot_latencies'''.split()]
-print(f'  First-call latencies (us): {[\"{:.1f}\".format(v) for v in vals]}')
-print(f'  Average first-call latency: {sum(vals)/len(vals):.1f} us')
+print(f'  First-call latency: mean={statistics.mean(vals):.1f}  min={min(vals):.1f}  max={max(vals):.1f}  stddev={statistics.stdev(vals):.1f} us')
 "
 
 # ---------------------------------------------------------------------------
@@ -197,14 +197,14 @@ echo "============================================================"
 echo "  Summary"
 echo "============================================================"
 python3 -c "
+import statistics
+def stats(v):
+    return f'mean={statistics.mean(v):.1f}  min={min(v):.1f}  max={max(v):.1f}  stddev={statistics.stdev(v):.1f}'
 with_vals = [float(x) for x in '''$with_snapshot_latencies'''.split()]
 without_vals = [float(x) for x in '''$without_snapshot_latencies'''.split()]
 snap_vals = [float(x) for x in '''$snapshot_latencies'''.split()]
-avg_with = sum(with_vals) / len(with_vals)
-avg_without = sum(without_vals) / len(without_vals)
-avg_snap = sum(snap_vals) / len(snap_vals)
-print(f'  Avg first-call latency WITH snapshot:    {avg_with:.1f} us')
-print(f'  Avg first-call latency WITHOUT snapshot: {avg_without:.1f} us')
-print(f'  Avg snapshot creation latency:           {avg_snap:.1f} us')
-print(f'  Speedup from snapshot:                   {avg_without/avg_with:.1f}x')
+print(f'  First-call WITH snapshot:    {stats(with_vals)} us')
+print(f'  First-call WITHOUT snapshot: {stats(without_vals)} us')
+print(f'  Snapshot creation:           {stats(snap_vals)} us')
+print(f'  Speedup from snapshot:       {statistics.mean(without_vals)/statistics.mean(with_vals):.1f}x')
 "
